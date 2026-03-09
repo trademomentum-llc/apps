@@ -1,1 +1,40 @@
+# Build artifacts
 /target
+
+# PQC key material — NEVER commit
+*.keys/
+*.keys
+dk.bin
+sk.bin
+vk.bin
+*.pem
+*.key
+*.priv
+
+# Encrypted databases and signatures
+*.db
+*.db.enc
+*.sig
+
+# Environment and secrets
+.env
+.env.*
+credentials*
+*.secret
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Test output binaries
+*.bin
+*.out
+a.out
