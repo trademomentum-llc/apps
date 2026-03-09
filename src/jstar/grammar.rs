@@ -43,9 +43,12 @@ pub enum JStarStatement {
     },
 
     /// Control flow block
-    /// e.g., "if ... and ... end"
+    /// e.g., "if compare counter 0 ... end"
+    /// condition: the first statement (e.g. Compare) that produces a truth value.
+    /// body: the statements inside the block.
     ControlFlow {
         kind: FlowKind,
+        condition: Option<Box<JStarStatement>>,
         body: Vec<JStarStatement>,
     },
 
@@ -186,6 +189,7 @@ pub enum TypedStatement {
     },
     ControlFlow {
         kind: FlowKind,
+        condition: Option<Box<TypedStatement>>,
         body: Vec<TypedStatement>,
     },
     Return {

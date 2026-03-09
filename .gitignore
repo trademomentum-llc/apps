@@ -22,6 +22,11 @@ vk.bin
 credentials*
 *.secret
 
+# Communication and contact files — private, not for repo
+CONTACTS.md
+NOTIFICATIONS.md
+OUTREACH.md
+
 # OS / editor
 .DS_Store
 Thumbs.db

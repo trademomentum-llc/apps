@@ -86,7 +86,11 @@ impl TypeChecker {
                 })
             }
 
-            JStarStatement::ControlFlow { kind, body } => {
+            JStarStatement::ControlFlow { kind, condition, body } => {
+                let typed_condition = match condition {
+                    Some(cond) => Some(Box::new(self.check_statement(cond)?)),
+                    None => None,
+                };
                 let typed_body: Vec<TypedStatement> = body
                     .iter()
                     .map(|s| self.check_statement(s))
@@ -94,6 +98,7 @@ impl TypeChecker {
 
                 Ok(TypedStatement::ControlFlow {
                     kind: *kind,
+                    condition: typed_condition,
                     body: typed_body,
                 })
             }

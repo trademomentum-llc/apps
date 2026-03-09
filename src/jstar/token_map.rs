@@ -54,6 +54,9 @@ pub enum JStarInstruction {
     Shift,
     Not,
 
+    // I/O
+    Print,
+
     // System
     Syscall,
     Halt,
@@ -207,6 +210,7 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("exit",     TokenCategory::Operation(JStarInstruction::Halt)),
         ("end",      TokenCategory::Operation(JStarInstruction::Halt)),
         ("compare",  TokenCategory::Operation(JStarInstruction::Compare)),
+        ("print",    TokenCategory::Operation(JStarInstruction::Print)),
         ("push",     TokenCategory::Operation(JStarInstruction::Push)),
         ("pop",      TokenCategory::Operation(JStarInstruction::Pop)),
         ("negate",   TokenCategory::Operation(JStarInstruction::Neg)),
@@ -229,6 +233,27 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("result",    TokenCategory::Data),
         ("value",     TokenCategory::Data),
         ("buffer",    TokenCategory::Data),
+        // ── Determiners (scope) ──
+        // Morphlex may misclassify short function words — the hash table
+        // catches them by i32 identity, same pattern as "return"/"integer".
+        ("a",    TokenCategory::Scope(ScopeKind::Local)),
+        ("an",   TokenCategory::Scope(ScopeKind::Local)),
+        ("the",  TokenCategory::Scope(ScopeKind::Global)),
+        ("this", TokenCategory::Scope(ScopeKind::SelfRef)),
+        // ── Prepositions (addressing) ──
+        ("into",    TokenCategory::Addressing(AddrMode::Into)),
+        ("from",    TokenCategory::Addressing(AddrMode::From)),
+        ("to",      TokenCategory::Addressing(AddrMode::Into)),
+        ("at",      TokenCategory::Addressing(AddrMode::At)),
+        ("through", TokenCategory::Addressing(AddrMode::Through)),
+        // ── Pronouns (register aliases) ──
+        ("it",   TokenCategory::Register(RegAlias::Accumulator)),
+        ("that", TokenCategory::Register(RegAlias::LastResult)),
+        // ── Control flow (conjunctions) ──
+        // Morphlex may classify "if"/"while" as anything — the hash table
+        // ensures they always resolve to ControlFlow regardless of POS.
+        ("if",    TokenCategory::ControlFlow(FlowKind::Conditional)),
+        ("while", TokenCategory::ControlFlow(FlowKind::Loop)),
     ];
 
     let mut map = HashMap::with_capacity(entries.len());
@@ -304,6 +329,9 @@ fn resolve_verb(lemma: &str) -> JStarInstruction {
 
         // Bitwise
         "shift" | "rotate" => JStarInstruction::Shift,
+
+        // I/O
+        "print" | "show" | "display" | "output" => JStarInstruction::Print,
 
         // System
         "halt" | "stop" | "exit" | "quit" | "end" | "terminate" => JStarInstruction::Halt,

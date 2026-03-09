@@ -1,0 +1,149 @@
+MIT License
+
+Copyright (c) 2026 J M Jarmacz | Evolution Strategist
+Co-developed with Claude (Anthropic) - Claude Opus 4.6
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+===============================================================================
+CREDITS AND ACKNOWLEDGMENTS
+===============================================================================
+
+This project claims NO proprietary rights over the ideas, algorithms, or
+techniques used. It is built on the shoulders of the people and organizations
+listed below. Their work makes this possible.
+
+No matter where you look -- this file, THIRD-PARTY-LICENSES, or anywhere
+else -- you will find clear and accurate credit for everyone involved.
+
+PROJECT AUTHORS
+---------------
+  J M Jarmacz | Evolution Strategist
+    Role: Creator, architect, language designer
+    Contact: jason@trademomentumllc.com
+
+  Claude (Anthropic)
+    Role: Co-developer, code generation, architecture guidance
+    Model: Claude Opus 4.6
+    https://anthropic.com
+
+LANGUAGE AND TOOLCHAIN
+----------------------
+  The Rust Programming Language
+    Authors: The Rust Project Developers
+    License: MIT OR Apache-2.0
+    https://www.rust-lang.org
+
+DIRECT DEPENDENCIES
+-------------------
+  blake3 v1.8 -- Jack O'Connor, Samuel Neves (CC0/Apache-2.0)
+    BLAKE3 hash for deterministic token identity (i32 ID)
+
+  aes-gcm v0.10 -- RustCrypto Developers (Apache-2.0/MIT)
+    AES-256-GCM symmetric encryption (FIPS 197 + SP 800-38D)
+
+  ml-kem v0.3 -- RustCrypto Developers (Apache-2.0/MIT)
+    ML-KEM-1024 post-quantum key encapsulation (FIPS 203)
+
+  ml-dsa v0.1 -- RustCrypto Developers (Apache-2.0/MIT)
+    ML-DSA-65 post-quantum digital signatures (FIPS 204)
+
+  serde v1.0 -- Erick Tryzelaar, David Tolnay (MIT/Apache-2.0)
+    Serialization framework
+
+  bincode v1.3 -- Ty Overby, Francesco Mazzoli, David Tolnay, Zoey Riordan (MIT)
+    Binary serialization codec
+
+  clap v4.5 -- The clap contributors (MIT/Apache-2.0)
+    Command-line argument parsing
+
+  memmap2 v0.9 -- Dan Burkert, Yevhenii Reizner (MIT/Apache-2.0)
+    Memory-mapped file I/O
+
+  rand v0.8 -- The Rand Project Developers (MIT/Apache-2.0)
+    Random number generation
+
+  getrandom v0.2/v0.4 -- The Rand Project Developers (MIT/Apache-2.0)
+    OS-level entropy source
+
+  thiserror v1.0 -- David Tolnay (MIT/Apache-2.0)
+    Error type derivation
+
+KEY TRANSITIVE DEPENDENCIES
+----------------------------
+  RustCrypto ecosystem (aead, aes, cipher, ctr, ghash, polyval, sha3,
+    keccak, module-lattice, signature, pkcs8, spki, der, const-oid,
+    base64ct, zeroize, subtle, hybrid-array, crypto-common, block-buffer,
+    digest, inout, opaque-debug)
+    Authors: RustCrypto Developers, Isis Lovecruft, Henry de Valence
+    License: Apache-2.0/MIT (subtle: BSD-3-Clause)
+    https://github.com/RustCrypto
+
+  David Tolnay ecosystem (syn, proc-macro2, quote, unicode-ident,
+    serde_derive, serde_json, itoa, anyhow, semver, prettyplease)
+    License: MIT/Apache-2.0
+    https://github.com/dtolnay
+
+  Rust standard ecosystem (libc, log, cfg-if, cc, bitflags, hashbrown,
+    indexmap, autocfg, num-traits, memchr)
+    Authors: The Rust Project Developers, Alex Crichton, Amanieu d'Antras,
+             Andrew Gallant, Josh Stone
+    License: MIT/Apache-2.0
+
+  CLI ecosystem (anstream, anstyle, anstyle-parse, anstyle-query,
+    colorchoice, clap_builder, clap_derive, clap_lex, strsim, heck)
+    License: MIT/Apache-2.0
+
+  Other (generic-array, typenum, arrayref, arrayvec, constant_time_eq,
+    rand_chacha, rand_core, ppv-lite86, id-arena, version_check,
+    foldhash, wasi, shlex, leb128fmt, is_terminal_polyfill)
+    License: Various (MIT, Apache-2.0, BSD-2-Clause, CC0, Zlib, Unlicense)
+
+STANDARDS REFERENCED
+--------------------
+  NIST FIPS 197 (AES) -- National Institute of Standards and Technology
+  NIST SP 800-38D (GCM) -- National Institute of Standards and Technology
+  NIST FIPS 203 (ML-KEM) -- National Institute of Standards and Technology
+  NIST FIPS 204 (ML-DSA) -- National Institute of Standards and Technology
+  BLAKE3 Specification -- Jack O'Connor, Jean-Philippe Aumasson,
+                          Samuel Neves, Zooko Wilcox-O'Hearn
+  ELF-64 Object File Format -- UNIX System Laboratories / SCO
+  System V AMD64 ABI -- Michael Matz, Jan Hubicka, Andreas Jaeger,
+                        Mark Mitchell
+  Intel 64/IA-32 Software Developer Manuals -- Intel Corporation
+
+SPECIAL ACKNOWLEDGMENTS
+-----------------------
+  The RustCrypto Project (https://github.com/RustCrypto)
+    The entire PQC stack comes from RustCrypto. Pure Rust. No C FFI.
+
+  David Tolnay (https://github.com/dtolnay)
+    A huge portion of the Rust utility ecosystem used here is authored
+    or maintained by David Tolnay. Extraordinary contributions.
+
+  The Rust Community (https://www.rust-lang.org/community)
+    Rust's ownership model, pattern matching, and algebraic data types
+    are foundational to morphlex's design.
+
+===============================================================================
+For the complete dependency listing with exact versions, repository URLs,
+and per-package license texts, see THIRD-PARTY-LICENSES in this repository.
+
+Last updated: 2026-03-09
+===============================================================================

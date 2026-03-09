@@ -128,11 +128,38 @@ impl Parser {
         Ok(JStarStatement::Execute { op, operands })
     }
 
-    /// Parse a control flow block: conjunction + body + end marker.
-    /// "if <condition> and <body> end"
-    /// "while <condition> and <body> end"
+    /// Parse a control flow block: conjunction + condition + body + end marker.
+    /// "if compare counter 0 ... end"
+    /// "while compare counter 0 ... end"
+    ///
+    /// For Conditional and Loop kinds, the first statement after the keyword
+    /// is the condition (typically a Compare). Remaining statements are the body.
+    /// For Sequence and Branch kinds, condition is None — all statements are body.
     fn parse_control_flow(&mut self, kind: FlowKind) -> MorphResult<JStarStatement> {
         self.advance(); // consume the conjunction
+
+        // For if/while: first statement is the condition
+        let condition = match kind {
+            FlowKind::Conditional | FlowKind::Loop => {
+                if !self.is_at_end() {
+                    if let Some(tok) = self.peek() {
+                        if !matches!(tok.category, TokenCategory::Operation(JStarInstruction::Halt)) {
+                            match self.parse_statement() {
+                                Ok(stmt) => Some(Box::new(stmt)),
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
 
         let mut body = Vec::new();
         // Parse statements until we hit "end" (a Halt instruction) or end of input
@@ -155,7 +182,7 @@ impl Parser {
             }
         }
 
-        Ok(JStarStatement::ControlFlow { kind, body })
+        Ok(JStarStatement::ControlFlow { kind, condition, body })
     }
 
     /// Parse a declaration starting with a determiner (scope).

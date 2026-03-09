@@ -1,0 +1,477 @@
+# Third-Party Licenses and Credits
+#
+# morphlex + Jasterish (JStar)
+# Deterministic NLP tokenizer, vector compiler, and system-level language
+#
+# This project claims NO proprietary rights over the ideas, algorithms,
+# or techniques used. It is built on the shoulders of the people and
+# organizations listed below. Their work makes this possible.
+#
+# This file exists to clearly and accurately credit every contributor,
+# developer, author, and organization involved in the development of
+# this software, from the very beginning.
+#
+# =========================================================================
+
+## Project Authors
+
+  J M Jarmacz | Evolution Strategist
+    Role: Creator, architect, language designer
+    Contact: jason@trademomentumllc.com
+
+  Claude (Anthropic)
+    Role: Co-developer, code generation, architecture guidance
+    Model: Claude Opus 4.6
+    https://anthropic.com
+
+## Language and Toolchain
+
+  The Rust Programming Language
+    Authors: The Rust Project Developers
+    License: MIT OR Apache-2.0
+    https://www.rust-lang.org
+    Note: morphlex and JStar are written entirely in Rust (edition 2024).
+          The Rust compiler, standard library, and Cargo package manager
+          are foundational to this project.
+
+## Direct Dependencies
+
+  blake3 v1.8.3
+    Authors: Jack O'Connor, Samuel Neves
+    License: CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception
+    https://github.com/BLAKE3-team/BLAKE3
+    Use: BLAKE3 hash function for deterministic token identity (i32 ID).
+         Every TokenVector.id is a truncated BLAKE3 hash.
+
+  aes-gcm v0.10.3
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/AEADs
+    Use: AES-256-GCM symmetric encryption for the vector database.
+         FIPS 197 + SP 800-38D compliance.
+
+  ml-kem v0.3.0-rc.0
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/KEMs
+    Use: ML-KEM-1024 post-quantum key encapsulation (FIPS 203).
+
+  ml-dsa v0.1.0-rc.7
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/signatures
+    Use: ML-DSA-65 post-quantum digital signatures (FIPS 204).
+         Tamper detection for encrypted database files.
+
+  serde v1.0.228
+    Authors: Erick Tryzelaar, David Tolnay
+    License: MIT OR Apache-2.0
+    https://github.com/serde-rs/serde
+    Use: Serialization framework for database binary format.
+
+  bincode v1.3.3
+    Authors: Ty Overby, Francesco Mazzoli, David Tolnay, Zoey Riordan
+    License: MIT
+    https://github.com/servo/bincode
+    Use: Binary serialization codec for vector database entries.
+
+  clap v4.5.60
+    Authors: The clap contributors
+    License: MIT OR Apache-2.0
+    https://github.com/clap-rs/clap
+    Use: Command-line argument parsing for the morphlex/JStar CLI.
+
+  memmap2 v0.9.10
+    Authors: Dan Burkert, Yevhenii Reizner, The Contributors
+    License: MIT OR Apache-2.0
+    https://github.com/RazrFalcon/memmap2-rs
+    Use: Memory-mapped file I/O for database access.
+
+  rand v0.8.5
+    Authors: The Rand Project Developers, The Rust Project Developers
+    License: MIT OR Apache-2.0
+    https://github.com/rust-random/rand
+    Use: Random number generation for cryptographic nonces.
+
+  getrandom v0.2.17 / v0.4.2
+    Authors: The Rand Project Developers
+    License: MIT OR Apache-2.0
+    https://github.com/rust-random/getrandom
+    Use: OS-level entropy source for cryptographic operations.
+
+  thiserror v1.0.69
+    Authors: David Tolnay
+    License: MIT OR Apache-2.0
+    https://github.com/dtolnay/thiserror
+    Use: Ergonomic error type derivation for MorphlexError.
+
+## Transitive Dependencies (Cryptography)
+
+  aead v0.5.2
+    Authors: RustCrypto Developers
+    License: MIT OR Apache-2.0
+    https://github.com/RustCrypto/traits
+
+  aes v0.8.4
+    Authors: RustCrypto Developers
+    License: MIT OR Apache-2.0
+    https://github.com/RustCrypto/block-ciphers
+
+  cipher v0.4.4
+    Authors: RustCrypto Developers
+    License: MIT OR Apache-2.0
+    https://github.com/RustCrypto/traits
+
+  ctr v0.9.2
+    Authors: RustCrypto Developers
+    License: MIT OR Apache-2.0
+    https://github.com/RustCrypto/block-modes
+
+  ghash v0.5.1
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/universal-hashes
+
+  polyval v0.6.2
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/universal-hashes
+
+  sha3 v0.11.0-rc.8
+    Authors: RustCrypto Developers
+    License: MIT OR Apache-2.0
+    https://github.com/RustCrypto/hashes
+
+  keccak v0.2.0-rc.2
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/sponges
+
+  module-lattice v0.1.0
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/KEMs
+
+  signature v3.0.0-rc.10
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/traits
+
+  pkcs8 v0.11.0-rc.11
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/formats
+
+  spki v0.8.0-rc.4
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/formats
+
+  der v0.8.0
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/formats
+
+  const-oid v0.10.2
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/formats
+
+  base64ct v1.8.3
+    Authors: RustCrypto Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/formats
+
+  zeroize v1.8.2
+    Authors: The RustCrypto Project Developers
+    License: Apache-2.0 OR MIT
+    https://github.com/RustCrypto/utils
+
+  subtle v2.6.1
+    Authors: Isis Lovecruft, Henry de Valence
+    License: BSD-3-Clause
+    https://github.com/dalek-cryptography/subtle
+
+  constant_time_eq v0.4.2
+    Authors: Cesar Eduardo Barros
+    License: CC0-1.0 OR MIT-0 OR Apache-2.0
+    https://github.com/cesarb/constant_time_eq
+
+  rand_chacha v0.3.1
+    Authors: The Rand Project Developers, The Rust Project Developers,
+             The CryptoCorrosion Contributors
+    License: MIT OR Apache-2.0
+    https://github.com/rust-random/rand
+
+  rand_core v0.6.4
+    Authors: The Rand Project Developers, The Rust Project Developers
+    License: MIT OR Apache-2.0
+    https://github.com/rust-random/rand
+
+  ppv-lite86 v0.2.21
+    Authors: The CryptoCorrosion Contributors
+    License: MIT OR Apache-2.0
+    https://github.com/cryptocorrosion/cryptocorrosion
+
+## Transitive Dependencies (Utilities)
+
+  syn v2.0.117
+    Authors: David Tolnay
+    License: MIT OR Apache-2.0
+    https://github.com/dtolnay/syn
+
+  proc-macro2 v1.0.106
+    Authors: David Tolnay, Alex Crichton
+    License: MIT OR Apache-2.0
+    https://github.com/dtolnay/proc-macro2
+
+  quote v1.0.45
+    Authors: David Tolnay
+    License: MIT OR Apache-2.0
+    https://github.com/dtolnay/quote
+
+  unicode-ident v1.0.24
+    Authors: David Tolnay
+    License: (MIT OR Apache-2.0) AND Unicode-3.0
+    https://github.com/dtolnay/unicode-ident
+
+  serde_derive v1.0.228
+    Authors: Erick Tryzelaar, David Tolnay
+    License: MIT OR Apache-2.0
+    https://github.com/serde-rs/serde
+
+  serde_json v1.0.149
+    Authors: Erick Tryzelaar, David Tolnay
+    License: MIT OR Apache-2.0
+    https://github.com/serde-rs/json
+
+  itoa v1.0.17
+    Authors: David Tolnay
+    License: MIT OR Apache-2.0
+    https://github.com/dtolnay/itoa
+
+  anyhow v1.0.102
+    Authors: David Tolnay
+    License: MIT OR Apache-2.0
+    https://github.com/dtolnay/anyhow
+
+  semver v1.0.27
+    Authors: David Tolnay
+    License: MIT OR Apache-2.0
+    https://github.com/dtolnay/semver
+
+  prettyplease v0.2.37
+    Authors: David Tolnay
+    License: MIT OR Apache-2.0
+    https://github.com/dtolnay/prettyplease
+
+  generic-array v0.14.7
+    Authors: Bartlomiej Kaminski, Aaron Trent
+    License: MIT
+    https://github.com/fizyk20/generic-array.git
+
+  hybrid-array v0.4.8
+    Authors: RustCrypto Developers
+    License: MIT OR Apache-2.0
+    https://github.com/RustCrypto/hybrid-array
+
+  typenum v1.19.0
+    Authors: Paho Lurie-Gregg, Andre Bogus
+    License: MIT OR Apache-2.0
+    https://github.com/paholg/typenum
+
+  hashbrown v0.15.5
+    Authors: Amanieu d'Antras
+    License: MIT OR Apache-2.0
+    https://github.com/rust-lang/hashbrown
+
+  indexmap v2.13.0
+    Authors: The indexmap contributors
+    License: Apache-2.0 OR MIT
+    https://github.com/indexmap-rs/indexmap
+
+  cfg-if v1.0.4
+    Authors: Alex Crichton
+    License: MIT OR Apache-2.0
+    https://github.com/rust-lang/cfg-if
+
+  cc v1.2.56
+    Authors: Alex Crichton
+    License: MIT OR Apache-2.0
+    https://github.com/rust-lang/cc-rs
+
+  arrayref v0.3.9
+    Authors: David Roundy
+    License: BSD-2-Clause
+    https://github.com/droundy/arrayref
+
+  arrayvec v0.7.6
+    Authors: bluss
+    License: MIT OR Apache-2.0
+    https://github.com/bluss/arrayvec
+
+  libc v0.2.183
+    Authors: The Rust Project Developers
+    License: MIT OR Apache-2.0
+    https://github.com/rust-lang/libc
+
+  log v0.4.29
+    Authors: The Rust Project Developers
+    License: MIT OR Apache-2.0
+    https://github.com/rust-lang/log
+
+  memchr v2.8.0
+    Authors: Andrew Gallant, bluss
+    License: Unlicense OR MIT
+    https://github.com/BurntSushi/memchr
+
+  bitflags v2.11.0
+    Authors: The Rust Project Developers
+    License: MIT OR Apache-2.0
+    https://github.com/bitflags/bitflags
+
+  autocfg v1.5.0
+    Authors: Josh Stone
+    License: Apache-2.0 OR MIT
+    https://github.com/cuviper/autocfg
+
+  num-traits v0.2.19
+    Authors: The Rust Project Developers
+    License: MIT OR Apache-2.0
+    https://github.com/rust-num/num-traits
+
+  strsim v0.11.1
+    Authors: Danny Guo, maxbachmann
+    License: MIT
+    https://github.com/rapidfuzz/strsim-rs
+
+  heck v0.5.0
+    Authors: The heck contributors
+    License: MIT OR Apache-2.0
+    https://github.com/withoutboats/heck
+
+  id-arena v2.3.0
+    Authors: Nick Fitzgerald, Aleksey Kladov
+    License: MIT/Apache-2.0
+    https://github.com/fitzgen/id-arena
+
+  version_check v0.9.5
+    Authors: Sergio Benitez
+    License: MIT/Apache-2.0
+    https://github.com/SergioBenitez/version_check
+
+  foldhash v0.1.5
+    Authors: Orson Peters
+    License: Zlib
+    https://github.com/orlp/foldhash
+
+  wasi v0.11.1
+    Authors: The Cranelift Project Developers
+    License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+    https://github.com/bytecodealliance/wasi
+
+  shlex v1.3.0
+    Authors: comex, Fenhl, Adrian Taylor, Alex Touchet, Daniel Parks,
+             Garrett Berg
+    License: MIT OR Apache-2.0
+    https://github.com/comex/rust-shlex
+
+## Transitive Dependencies (Terminal/CLI)
+
+  anstream v0.6.21
+    Authors: The anstyle contributors
+    License: MIT OR Apache-2.0
+    https://github.com/rust-cli/anstyle.git
+
+  anstyle v1.0.13
+    Authors: The anstyle contributors
+    License: MIT OR Apache-2.0
+    https://github.com/rust-cli/anstyle.git
+
+  anstyle-parse v0.2.7
+    Authors: The anstyle contributors
+    License: MIT OR Apache-2.0
+    https://github.com/rust-cli/anstyle.git
+
+  anstyle-query v1.1.5
+    Authors: The anstyle contributors
+    License: MIT OR Apache-2.0
+    https://github.com/rust-cli/anstyle.git
+
+  colorchoice v1.0.4
+    Authors: The anstyle contributors
+    License: MIT OR Apache-2.0
+    https://github.com/rust-cli/anstyle.git
+
+  is_terminal_polyfill v1.70.2
+    Authors: The polyfill-rs contributors
+    License: MIT OR Apache-2.0
+    https://github.com/polyfill-rs/is_terminal_polyfill
+
+  leb128fmt v0.1.0
+    Authors: Bryant Luk
+    License: MIT OR Apache-2.0
+    https://github.com/bluk/leb128fmt
+
+## Standards and Specifications Referenced
+
+  NIST FIPS 197 (AES)
+    National Institute of Standards and Technology
+    Advanced Encryption Standard
+
+  NIST SP 800-38D (GCM)
+    National Institute of Standards and Technology
+    Galois/Counter Mode of Operation
+
+  NIST FIPS 203 (ML-KEM)
+    National Institute of Standards and Technology
+    Module-Lattice-Based Key-Encapsulation Mechanism
+
+  NIST FIPS 204 (ML-DSA)
+    National Institute of Standards and Technology
+    Module-Lattice-Based Digital Signature Algorithm
+
+  BLAKE3 Specification
+    Authors: Jack O'Connor, Jean-Philippe Aumasson, Samuel Neves,
+             Zooko Wilcox-O'Hearn
+    https://github.com/BLAKE3-team/BLAKE3-specs
+
+  ELF-64 Object File Format (System V ABI)
+    UNIX System Laboratories / The Santa Cruz Operation
+
+  System V AMD64 ABI
+    Authors: Michael Matz, Jan Hubicka, Andreas Jaeger, Mark Mitchell
+    https://gitlab.com/x86-psABIs/x86-64-ABI
+
+  Intel 64 and IA-32 Architectures Software Developer Manuals
+    Intel Corporation
+    (x86-64 instruction encoding reference)
+
+## Acknowledgments
+
+  The RustCrypto Project
+    https://github.com/RustCrypto
+    The entire post-quantum cryptography stack (ML-KEM, ML-DSA, AES-GCM,
+    SHA-3, and supporting primitives) comes from the RustCrypto
+    collective. Their work on pure-Rust cryptographic implementations
+    makes PQC accessible without C FFI dependencies.
+
+  David Tolnay
+    https://github.com/dtolnay
+    A substantial portion of the Rust ecosystem utilities used here
+    (serde, syn, proc-macro2, quote, thiserror, anyhow, itoa, semver,
+    prettyplease, unicode-ident) are authored or maintained by David
+    Tolnay. His contributions to the Rust ecosystem are extraordinary.
+
+  The Rust Community
+    https://www.rust-lang.org/community
+    Rust's ownership model, pattern matching, and algebraic data types
+    are foundational to morphlex's design. The language's guarantees
+    (memory safety without GC, zero-cost abstractions, fearless
+    concurrency) make it the right choice for a self-hosting compiler
+    bootstrap.
+
+# =========================================================================
+# This file is maintained manually and updated with each release.
+# Last updated: 2026-03-09
+# =========================================================================

@@ -8,9 +8,10 @@
 //!
 //! Virtual register IDs are u32 (unlimited supply, allocated by codegen).
 
+use std::collections::HashMap;
 use crate::types::MorphResult;
 use super::grammar::*;
-use super::token_map::JStarInstruction;
+use super::token_map::{JStarInstruction, FlowKind};
 
 // ─── IR Types ───────────────────────────────────────────────────────────────
 
@@ -108,11 +109,35 @@ pub enum IrInst {
         dest: VReg,
         lhs: IrValue,
         rhs: IrValue,
+        kind: CmpKind,
         ty: JStarType,
+    },
+
+    /// Print a value to stdout as decimal ASCII + newline.
+    /// High-level IR instruction — codegen expands to itoa + sys_write.
+    Print {
+        value: IrValue,
     },
 
     /// No-op (placeholder)
     Nop,
+}
+
+/// Comparison kind — determines the condition code in codegen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpKind {
+    /// Equal (sete / ZF=1)
+    Eq,
+    /// Not equal (setne / ZF=0)
+    Ne,
+    /// Less than (setl / SF!=OF)
+    Lt,
+    /// Less or equal (setle / ZF=1 or SF!=OF)
+    Le,
+    /// Greater than (setg / ZF=0 and SF=OF)
+    Gt,
+    /// Greater or equal (setge / SF=OF)
+    Ge,
 }
 
 /// Binary operations.
@@ -172,7 +197,15 @@ pub enum Terminator {
 /// Currently wraps all top-level statements in a single `_start` function
 /// (the ELF entry point). Future: support function definitions.
 pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
-    let mut lowerer = Lowerer { next_vreg: 0 };
+    let mut lowerer = Lowerer {
+        next_vreg: 0,
+        last_result: None,
+        variables: HashMap::new(),
+        blocks: Vec::new(),
+        current_label: String::new(),
+        current_insts: Vec::new(),
+        block_counter: 0,
+    };
     let main_fn = lowerer.lower_to_function("_start", &program.statements)?;
     Ok(IrProgram {
         functions: vec![main_fn],
@@ -181,6 +214,23 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
 
 struct Lowerer {
     next_vreg: VReg,
+    /// The vreg holding the result of the last Execute statement.
+    /// "it" (Accumulator) and "that" (LastResult) resolve to this.
+    last_result: Option<VReg>,
+    /// Variable name -> alloca vreg. Populated by Declare statements.
+    /// When a Variable operand is lowered, it resolves to Reg(alloca_vreg)
+    /// instead of Named(name), enabling direct stack-slot access in codegen.
+    variables: HashMap<String, VReg>,
+
+    // ─── Block-builder state (multi-block CFG support) ──────────────────
+    /// Completed basic blocks
+    blocks: Vec<BasicBlock>,
+    /// Label of the block currently being built
+    current_label: String,
+    /// Instructions accumulated for the current block
+    current_insts: Vec<IrInst>,
+    /// Counter for generating unique block labels
+    block_counter: u32,
 }
 
 impl Lowerer {
@@ -190,74 +240,268 @@ impl Lowerer {
         v
     }
 
+    /// Generate a unique block label with a prefix.
+    fn make_label(&mut self, prefix: &str) -> String {
+        let label = format!("{}_{}", prefix, self.block_counter);
+        self.block_counter += 1;
+        label
+    }
+
+    /// Finish the current block with the given terminator and start a new one.
+    fn finish_block(&mut self, terminator: Terminator, new_label: &str) {
+        let block = BasicBlock {
+            label: self.current_label.clone(),
+            instructions: std::mem::take(&mut self.current_insts),
+            terminator,
+        };
+        self.blocks.push(block);
+        self.current_label = new_label.to_string();
+    }
+
     fn lower_to_function(
         &mut self,
         name: &str,
         statements: &[TypedStatement],
     ) -> MorphResult<IrFunction> {
-        let mut instructions = Vec::new();
-        let mut terminator = None;
+        self.current_label = "entry".to_string();
+        self.current_insts.clear();
+        self.blocks.clear();
+
+        let mut final_terminator: Option<Terminator> = None;
 
         for stmt in statements {
-            match stmt {
-                TypedStatement::Execute {
-                    op, operands, result_type,
-                } => {
-                    let ir_insts = self.lower_execute(*op, operands, *result_type)?;
-                    instructions.extend(ir_insts);
-                }
-
-                TypedStatement::Declare { ty, .. } => {
-                    let dest = self.alloc_vreg();
-                    instructions.push(IrInst::Alloca {
-                        dest,
-                        size: ty.size_bytes(),
-                        ty: *ty,
-                    });
-                }
-
-                TypedStatement::Return { value, .. } => {
-                    let ir_val = match value {
-                        Some(v) => Some(self.lower_operand(v)?),
-                        None => None,
-                    };
-                    terminator = Some(Terminator::Return(ir_val));
-                }
-
-                TypedStatement::ControlFlow { body, .. } => {
-                    // For now, lower control flow as a flat sequence
-                    // (proper basic block splitting comes with optimization passes)
-                    for s in body {
-                        let lowered = self.lower_statement_to_insts(s)?;
-                        instructions.extend(lowered);
-                    }
-                }
-
-                TypedStatement::Label(_) => {
-                    // Labels are handled at the basic block level
-                }
-
-                TypedStatement::Nop => {
-                    instructions.push(IrInst::Nop);
-                }
-            }
+            self.lower_statement(stmt, &mut final_terminator)?;
         }
 
-        // If no explicit terminator, default to exit(0)
-        let term = terminator.unwrap_or(Terminator::Halt(IrValue::Imm(0)));
-
-        let block = BasicBlock {
-            label: "entry".to_string(),
-            instructions,
+        // Finalize the last open block
+        let term = final_terminator.unwrap_or(Terminator::Halt(IrValue::Imm(0)));
+        let last_block = BasicBlock {
+            label: self.current_label.clone(),
+            instructions: std::mem::take(&mut self.current_insts),
             terminator: term,
         };
+        self.blocks.push(last_block);
+
+        let blocks = std::mem::take(&mut self.blocks);
 
         Ok(IrFunction {
             name: name.to_string(),
             return_type: JStarType::Int,
-            blocks: vec![block],
+            blocks,
             next_vreg: self.next_vreg,
         })
+    }
+
+    /// Lower a single statement, appending instructions to current_insts.
+    /// May create new basic blocks for control flow.
+    fn lower_statement(
+        &mut self,
+        stmt: &TypedStatement,
+        final_terminator: &mut Option<Terminator>,
+    ) -> MorphResult<()> {
+        match stmt {
+            TypedStatement::Execute {
+                op, operands, result_type,
+            } => {
+                let (ir_insts, dest) = self.lower_execute(*op, operands, *result_type)?;
+                self.current_insts.extend(ir_insts);
+                self.last_result = Some(dest);
+            }
+
+            TypedStatement::Declare { name, ty, .. } => {
+                let dest = self.alloc_vreg();
+                self.current_insts.push(IrInst::Alloca {
+                    dest,
+                    size: ty.size_bytes(),
+                    ty: *ty,
+                });
+                self.variables.insert(name.clone(), dest);
+            }
+
+            TypedStatement::Return { value, .. } => {
+                let ir_val = match value {
+                    Some(v) => Some(self.lower_operand(v)?),
+                    None => None,
+                };
+                *final_terminator = Some(Terminator::Return(ir_val));
+            }
+
+            TypedStatement::ControlFlow { kind, condition, body } => {
+                match kind {
+                    FlowKind::Conditional => {
+                        self.lower_if(condition, body, final_terminator)?;
+                    }
+                    FlowKind::Loop => {
+                        self.lower_while(condition, body, final_terminator)?;
+                    }
+                    _ => {
+                        // Sequence/Branch: flat inline (no condition)
+                        for s in body {
+                            self.lower_statement(s, final_terminator)?;
+                        }
+                    }
+                }
+            }
+
+            TypedStatement::Label(_) => {
+                // Labels are handled at the basic block level
+            }
+
+            TypedStatement::Nop => {
+                self.current_insts.push(IrInst::Nop);
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower an `if` block into a 3-block CFG:
+    ///
+    ///   current_block:
+    ///     ...pre-if instructions...
+    ///     v_cond = condition
+    ///     Branch(v_cond, if_body, if_end)
+    ///
+    ///   if_body:
+    ///     ...body statements...
+    ///     Jump(if_end)
+    ///
+    ///   if_end:
+    ///     ...post-if instructions continue here...
+    fn lower_if(
+        &mut self,
+        condition: &Option<Box<TypedStatement>>,
+        body: &[TypedStatement],
+        final_terminator: &mut Option<Terminator>,
+    ) -> MorphResult<()> {
+        let body_label = self.make_label("if_body");
+        let end_label = self.make_label("if_end");
+
+        // Lower the condition into the current block
+        let cond_vreg = self.lower_condition(condition)?;
+
+        // Finish current block with Branch
+        self.finish_block(
+            Terminator::Branch {
+                cond: cond_vreg,
+                true_label: body_label.clone(),
+                false_label: end_label.clone(),
+            },
+            &body_label,
+        );
+
+        // Emit body statements into the body block
+        for s in body {
+            self.lower_statement(s, final_terminator)?;
+        }
+
+        // Finish body block with Jump to end
+        self.finish_block(
+            Terminator::Jump(end_label.clone()),
+            &end_label,
+        );
+
+        // Now current block is if_end — subsequent statements go here
+        Ok(())
+    }
+
+    /// Lower a `while` block into a 4-block CFG:
+    ///
+    ///   current_block:
+    ///     ...pre-while instructions...
+    ///     Jump(while_cond)
+    ///
+    ///   while_cond:
+    ///     v_cond = condition
+    ///     Branch(v_cond, while_body, while_end)
+    ///
+    ///   while_body:
+    ///     ...body statements...
+    ///     Jump(while_cond)              <-- back-edge
+    ///
+    ///   while_end:
+    ///     ...post-while instructions continue here...
+    fn lower_while(
+        &mut self,
+        condition: &Option<Box<TypedStatement>>,
+        body: &[TypedStatement],
+        final_terminator: &mut Option<Terminator>,
+    ) -> MorphResult<()> {
+        let cond_label = self.make_label("while_cond");
+        let body_label = self.make_label("while_body");
+        let end_label = self.make_label("while_end");
+
+        // Finish current block with Jump to condition
+        self.finish_block(
+            Terminator::Jump(cond_label.clone()),
+            &cond_label,
+        );
+
+        // Emit condition into the cond block
+        let cond_vreg = self.lower_condition(condition)?;
+
+        // Finish cond block with Branch
+        self.finish_block(
+            Terminator::Branch {
+                cond: cond_vreg,
+                true_label: body_label.clone(),
+                false_label: end_label.clone(),
+            },
+            &body_label,
+        );
+
+        // Emit body statements
+        for s in body {
+            self.lower_statement(s, final_terminator)?;
+        }
+
+        // Finish body block with Jump back to cond (back-edge)
+        self.finish_block(
+            Terminator::Jump(cond_label.clone()),
+            &end_label,
+        );
+
+        // Now current block is while_end
+        Ok(())
+    }
+
+    /// Lower a condition statement and return the vreg holding the result.
+    /// If no condition is provided, defaults to Imm(1) (always true).
+    fn lower_condition(
+        &mut self,
+        condition: &Option<Box<TypedStatement>>,
+    ) -> MorphResult<VReg> {
+        match condition {
+            Some(cond_stmt) => {
+                match cond_stmt.as_ref() {
+                    TypedStatement::Execute { op, operands, result_type } => {
+                        let (ir_insts, dest) = self.lower_execute(*op, operands, *result_type)?;
+                        self.current_insts.extend(ir_insts);
+                        self.last_result = Some(dest);
+                        Ok(dest)
+                    }
+                    _ => {
+                        // Non-execute condition: emit as constant true
+                        let dest = self.alloc_vreg();
+                        self.current_insts.push(IrInst::Copy {
+                            dest,
+                            src: IrValue::Imm(1),
+                            ty: JStarType::Boolean,
+                        });
+                        Ok(dest)
+                    }
+                }
+            }
+            None => {
+                // No condition: always true
+                let dest = self.alloc_vreg();
+                self.current_insts.push(IrInst::Copy {
+                    dest,
+                    src: IrValue::Imm(1),
+                    ty: JStarType::Boolean,
+                });
+                Ok(dest)
+            }
+        }
     }
 
     fn lower_statement_to_insts(
@@ -267,10 +511,15 @@ impl Lowerer {
         match stmt {
             TypedStatement::Execute {
                 op, operands, result_type,
-            } => self.lower_execute(*op, operands, *result_type),
+            } => {
+                let (insts, dest) = self.lower_execute(*op, operands, *result_type)?;
+                self.last_result = Some(dest);
+                Ok(insts)
+            }
 
-            TypedStatement::Declare { ty, .. } => {
+            TypedStatement::Declare { name, ty, .. } => {
                 let dest = self.alloc_vreg();
+                self.variables.insert(name.clone(), dest);
                 Ok(vec![IrInst::Alloca {
                     dest,
                     size: ty.size_bytes(),
@@ -289,7 +538,7 @@ impl Lowerer {
         op: JStarInstruction,
         operands: &[TypedOperand],
         result_type: JStarType,
-    ) -> MorphResult<Vec<IrInst>> {
+    ) -> MorphResult<(Vec<IrInst>, VReg)> {
         let mut insts = Vec::new();
         let dest = self.alloc_vreg();
 
@@ -366,16 +615,45 @@ impl Lowerer {
                 });
             }
 
-            // Comparison
-            JStarInstruction::Compare
-            | JStarInstruction::Equal
-            | JStarInstruction::Less
-            | JStarInstruction::Greater => {
+            // Comparison — each variant maps to a CmpKind
+            JStarInstruction::Compare => {
+                let (lhs, rhs) = self.get_two_operands(operands)?;
+                // "compare X Y" in control flow context means "X != Y" (nonzero = true)
+                insts.push(IrInst::Compare {
+                    dest,
+                    lhs,
+                    rhs,
+                    kind: CmpKind::Ne,
+                    ty: result_type,
+                });
+            }
+            JStarInstruction::Equal => {
                 let (lhs, rhs) = self.get_two_operands(operands)?;
                 insts.push(IrInst::Compare {
                     dest,
                     lhs,
                     rhs,
+                    kind: CmpKind::Eq,
+                    ty: result_type,
+                });
+            }
+            JStarInstruction::Less => {
+                let (lhs, rhs) = self.get_two_operands(operands)?;
+                insts.push(IrInst::Compare {
+                    dest,
+                    lhs,
+                    rhs,
+                    kind: CmpKind::Lt,
+                    ty: result_type,
+                });
+            }
+            JStarInstruction::Greater => {
+                let (lhs, rhs) = self.get_two_operands(operands)?;
+                insts.push(IrInst::Compare {
+                    dest,
+                    lhs,
+                    rhs,
+                    kind: CmpKind::Gt,
                     ty: result_type,
                 });
             }
@@ -495,6 +773,18 @@ impl Lowerer {
                 });
             }
 
+            // I/O
+            JStarInstruction::Print => {
+                let value = self.get_one_operand(operands)?;
+                insts.push(IrInst::Print { value: value.clone() });
+                // Also copy value to dest so "it" tracks the printed value
+                insts.push(IrInst::Copy {
+                    dest,
+                    src: value,
+                    ty: result_type,
+                });
+            }
+
             // Stack ops (push/pop) — lower to store/load on stack pointer
             JStarInstruction::Push | JStarInstruction::Pop => {
                 insts.push(IrInst::Nop); // placeholder
@@ -505,16 +795,26 @@ impl Lowerer {
             }
         }
 
-        Ok(insts)
+        Ok((insts, dest))
     }
 
     fn lower_operand(&self, operand: &TypedOperand) -> MorphResult<IrValue> {
         match operand {
             TypedOperand::Immediate(val, _) => Ok(IrValue::Imm(*val)),
-            TypedOperand::Variable { name, .. } => Ok(IrValue::Named(name.clone())),
+            TypedOperand::Variable { name, .. } => {
+                // Resolve declared variables to their alloca vreg.
+                // This enables direct stack-slot access in codegen.
+                match self.variables.get(name) {
+                    Some(&vreg) => Ok(IrValue::Reg(vreg)),
+                    None => Ok(IrValue::Named(name.clone())),
+                }
+            }
             TypedOperand::Register(_, _) => {
-                // Registers are lowered to virtual registers in codegen
-                Ok(IrValue::Imm(0)) // placeholder
+                // "it" / "that" = result of the last Execute
+                match self.last_result {
+                    Some(vreg) => Ok(IrValue::Reg(vreg)),
+                    None => Ok(IrValue::Imm(0)), // no prior result
+                }
             }
             TypedOperand::Addressed { target, .. } => self.lower_operand(target),
         }
@@ -628,6 +928,205 @@ mod tests {
         match &block.terminator {
             Terminator::Halt(IrValue::Imm(0)) => {}
             other => panic!("Expected Halt(0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lower_variable_store_and_return() {
+        // Declare counter, store 42, return counter.
+        // Variable operands should resolve to Reg(alloca_vreg), not Named.
+        let prog = TypedProgram {
+            statements: vec![
+                TypedStatement::Declare {
+                    scope: ScopeKind::Local,
+                    name: "counter".to_string(),
+                    ty: JStarType::Int,
+                },
+                TypedStatement::Execute {
+                    op: JStarInstruction::Store,
+                    operands: vec![
+                        TypedOperand::Immediate(42, JStarType::Byte),
+                        TypedOperand::Variable {
+                            name: "counter".to_string(),
+                            scope: ScopeKind::Local,
+                            ty: JStarType::Int,
+                        },
+                    ],
+                    result_type: JStarType::Void,
+                },
+                TypedStatement::Return {
+                    value: Some(TypedOperand::Variable {
+                        name: "counter".to_string(),
+                        scope: ScopeKind::Local,
+                        ty: JStarType::Int,
+                    }),
+                    ty: JStarType::Int,
+                },
+            ],
+        };
+        let ir = lower(&prog).unwrap();
+        let block = &ir.functions[0].blocks[0];
+
+        // First instruction: Alloca for counter
+        match &block.instructions[0] {
+            IrInst::Alloca { dest: 0, size: 4, .. } => {}
+            other => panic!("Expected Alloca(v0, 4), got {:?}", other),
+        }
+
+        // Second instruction: Store { addr: Reg(0), value: Imm(42) }
+        // The variable "counter" resolves to Reg(0) — the alloca vreg.
+        match &block.instructions[1] {
+            IrInst::Store {
+                addr: IrValue::Reg(0),
+                value: IrValue::Imm(42),
+                ..
+            } => {}
+            other => panic!("Expected Store(Reg(0), Imm(42)), got {:?}", other),
+        }
+
+        // Terminator: Return(Reg(0)) — counter's alloca vreg
+        match &block.terminator {
+            Terminator::Return(Some(IrValue::Reg(0))) => {}
+            other => panic!("Expected Return(Reg(0)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lower_if_creates_3_blocks() {
+        // "if compare X 0 ... end" should produce 3 basic blocks:
+        //   entry: ...pre-if, Branch(cond, if_body, if_end)
+        //   if_body: ...body, Jump(if_end)
+        //   if_end: ...post-if, terminator
+        let prog = TypedProgram {
+            statements: vec![
+                TypedStatement::ControlFlow {
+                    kind: FlowKind::Conditional,
+                    condition: Some(Box::new(TypedStatement::Execute {
+                        op: JStarInstruction::Compare,
+                        operands: vec![
+                            TypedOperand::Immediate(1, JStarType::Int),
+                            TypedOperand::Immediate(0, JStarType::Int),
+                        ],
+                        result_type: JStarType::Boolean,
+                    })),
+                    body: vec![TypedStatement::Nop],
+                },
+            ],
+        };
+        let ir = lower(&prog).unwrap();
+        let func = &ir.functions[0];
+        assert_eq!(func.blocks.len(), 3, "if should produce 3 basic blocks");
+
+        // Block 0 (entry): terminates with Branch
+        match &func.blocks[0].terminator {
+            Terminator::Branch { true_label, false_label, .. } => {
+                assert!(true_label.starts_with("if_body"));
+                assert!(false_label.starts_with("if_end"));
+            }
+            other => panic!("Expected Branch, got {:?}", other),
+        }
+
+        // Block 1 (if_body): terminates with Jump to if_end
+        match &func.blocks[1].terminator {
+            Terminator::Jump(label) => {
+                assert!(label.starts_with("if_end"));
+            }
+            other => panic!("Expected Jump, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lower_while_creates_4_blocks() {
+        // "while compare X 0 ... end" should produce 4 basic blocks:
+        //   entry: Jump(while_cond)
+        //   while_cond: Compare, Branch(cond, while_body, while_end)
+        //   while_body: ...body, Jump(while_cond)  <-- back-edge
+        //   while_end: terminator
+        let prog = TypedProgram {
+            statements: vec![
+                TypedStatement::ControlFlow {
+                    kind: FlowKind::Loop,
+                    condition: Some(Box::new(TypedStatement::Execute {
+                        op: JStarInstruction::Compare,
+                        operands: vec![
+                            TypedOperand::Immediate(5, JStarType::Int),
+                            TypedOperand::Immediate(0, JStarType::Int),
+                        ],
+                        result_type: JStarType::Boolean,
+                    })),
+                    body: vec![TypedStatement::Nop],
+                },
+            ],
+        };
+        let ir = lower(&prog).unwrap();
+        let func = &ir.functions[0];
+        assert_eq!(func.blocks.len(), 4, "while should produce 4 basic blocks");
+
+        // Block 0 (entry): Jump to while_cond
+        match &func.blocks[0].terminator {
+            Terminator::Jump(label) => {
+                assert!(label.starts_with("while_cond"));
+            }
+            other => panic!("Expected Jump, got {:?}", other),
+        }
+
+        // Block 1 (while_cond): Branch to while_body or while_end
+        match &func.blocks[1].terminator {
+            Terminator::Branch { true_label, false_label, .. } => {
+                assert!(true_label.starts_with("while_body"));
+                assert!(false_label.starts_with("while_end"));
+            }
+            other => panic!("Expected Branch, got {:?}", other),
+        }
+
+        // Block 2 (while_body): Jump back to while_cond (back-edge)
+        match &func.blocks[2].terminator {
+            Terminator::Jump(label) => {
+                assert!(label.starts_with("while_cond"));
+            }
+            other => panic!("Expected Jump (back-edge), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_compare_uses_cmpkind_ne() {
+        // JStarInstruction::Compare should lower to CmpKind::Ne
+        let prog = TypedProgram {
+            statements: vec![TypedStatement::Execute {
+                op: JStarInstruction::Compare,
+                operands: vec![
+                    TypedOperand::Immediate(1, JStarType::Int),
+                    TypedOperand::Immediate(0, JStarType::Int),
+                ],
+                result_type: JStarType::Boolean,
+            }],
+        };
+        let ir = lower(&prog).unwrap();
+        let block = &ir.functions[0].blocks[0];
+        match &block.instructions[0] {
+            IrInst::Compare { kind: CmpKind::Ne, .. } => {}
+            other => panic!("Expected Compare(Ne), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lower_undeclared_variable_uses_named() {
+        // An undeclared variable should fall back to IrValue::Named
+        let prog = TypedProgram {
+            statements: vec![TypedStatement::Return {
+                value: Some(TypedOperand::Variable {
+                    name: "unknown".to_string(),
+                    scope: ScopeKind::Local,
+                    ty: JStarType::Int,
+                }),
+                ty: JStarType::Int,
+            }],
+        };
+        let ir = lower(&prog).unwrap();
+        let block = &ir.functions[0].blocks[0];
+        match &block.terminator {
+            Terminator::Return(Some(IrValue::Named(name))) if name == "unknown" => {}
+            other => panic!("Expected Return(Named(unknown)), got {:?}", other),
         }
     }
 }

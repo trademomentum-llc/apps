@@ -98,6 +98,10 @@ struct CodeGen {
     /// Map virtual register -> stack offset from rbp
     vreg_offsets: std::collections::HashMap<VReg, i32>,
     next_stack_offset: i32,
+    /// Label name -> byte offset in .text (recorded when emitting each block)
+    label_offsets: std::collections::HashMap<String, usize>,
+    /// (patch_offset, target_label) — forward references to be resolved after emission
+    fixups: Vec<(usize, String)>,
 }
 
 impl CodeGen {
@@ -108,6 +112,8 @@ impl CodeGen {
             stack_size: 0,
             vreg_offsets: std::collections::HashMap::new(),
             next_stack_offset: -8, // first slot at rbp-8
+            label_offsets: std::collections::HashMap::new(),
+            fixups: Vec::new(),
         }
     }
 
@@ -144,7 +150,7 @@ impl CodeGen {
                     | IrInst::Syscall { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
-                    IrInst::Store { .. } | IrInst::Nop => {}
+                    IrInst::Store { .. } | IrInst::Print { .. } | IrInst::Nop => {}
                 }
             }
         }
@@ -159,10 +165,14 @@ impl CodeGen {
             self.emit_sub_reg_imm(X86Reg::Rsp, self.stack_size as i32);
         }
 
-        // Emit each basic block
+        // Emit each basic block, recording label offsets
         for block in &func.blocks {
+            self.label_offsets.insert(block.label.clone(), self.text.len());
             self.emit_block(block)?;
         }
+
+        // Resolve all fixups (forward jumps patched with actual offsets)
+        self.apply_fixups();
 
         Ok(())
     }
@@ -234,29 +244,47 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
-            IrInst::Compare { dest, lhs, rhs, .. } => {
+            IrInst::Compare { dest, lhs, rhs, kind, .. } => {
                 self.emit_load_value(X86Reg::Rax, lhs);
                 self.emit_load_value(X86Reg::Rcx, rhs);
                 self.emit_cmp_reg_reg(X86Reg::Rax, X86Reg::Rcx);
-                // Set result based on flags (sete for equality)
-                self.emit_sete(X86Reg::Rax);
+                // Set result based on CmpKind (setcc al; movzx rax, al)
+                self.emit_setcc(*kind);
                 let offset = self.vreg_offset(*dest);
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
             IrInst::Load { dest, addr, .. } => {
-                self.emit_load_value(X86Reg::Rax, addr);
-                // Dereference: mov rax, [rax]
-                self.emit_load_indirect(X86Reg::Rax, X86Reg::Rax);
+                match addr {
+                    // Stack-slot variable: load directly from [rbp+offset]
+                    IrValue::Reg(vreg) => {
+                        let src_offset = self.vreg_offset(*vreg);
+                        self.emit_load_from_rbp_offset(X86Reg::Rax, src_offset);
+                    }
+                    // Pointer/address: dereference via [rax]
+                    _ => {
+                        self.emit_load_value(X86Reg::Rax, addr);
+                        self.emit_load_indirect(X86Reg::Rax, X86Reg::Rax);
+                    }
+                }
                 let offset = self.vreg_offset(*dest);
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
             IrInst::Store { addr, value, .. } => {
                 self.emit_load_value(X86Reg::Rcx, value);
-                self.emit_load_value(X86Reg::Rax, addr);
-                // Store: mov [rax], rcx
-                self.emit_store_indirect(X86Reg::Rax, X86Reg::Rcx);
+                match addr {
+                    // Stack-slot variable: store directly to [rbp+offset]
+                    IrValue::Reg(vreg) => {
+                        let offset = self.vreg_offset(*vreg);
+                        self.emit_store_reg_to_rbp_offset(X86Reg::Rcx, offset);
+                    }
+                    // Pointer/address: store via [rax]
+                    _ => {
+                        self.emit_load_value(X86Reg::Rax, addr);
+                        self.emit_store_indirect(X86Reg::Rax, X86Reg::Rcx);
+                    }
+                }
             }
 
             IrInst::Syscall {
@@ -288,6 +316,10 @@ impl CodeGen {
                 // Placeholder for function calls — will be resolved in linker
                 let offset = self.vreg_offset(*dest);
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
+            }
+
+            IrInst::Print { value } => {
+                self.emit_print_integer(value);
             }
 
             IrInst::Alloca { .. } => {
@@ -322,14 +354,30 @@ impl CodeGen {
                 self.emit_syscall();
             }
 
-            Terminator::Jump(_label) => {
-                // Placeholder: would need label resolution
-                self.emit_nop();
+            Terminator::Jump(label) => {
+                // jmp rel32 (0xE9 + 4-byte signed displacement)
+                self.text.push(0xE9);
+                let patch_offset = self.text.len();
+                self.text.extend_from_slice(&0i32.to_le_bytes()); // placeholder
+                self.fixups.push((patch_offset, label.clone()));
             }
 
-            Terminator::Branch { .. } => {
-                // Placeholder: would need label resolution
-                self.emit_nop();
+            Terminator::Branch { cond, true_label, false_label } => {
+                // Load condition vreg into rax
+                let offset = self.vreg_offset(*cond);
+                self.emit_load_from_rbp_offset(X86Reg::Rax, offset);
+                // test rax, rax (sets ZF if rax == 0)
+                self.text.extend_from_slice(&[0x48, 0x85, 0xC0]);
+                // jnz true_label (0x0F 0x85 rel32) — jump if nonzero
+                self.text.extend_from_slice(&[0x0F, 0x85]);
+                let patch_true = self.text.len();
+                self.text.extend_from_slice(&0i32.to_le_bytes()); // placeholder
+                self.fixups.push((patch_true, true_label.clone()));
+                // jmp false_label (0xE9 rel32) — fall through to false
+                self.text.push(0xE9);
+                let patch_false = self.text.len();
+                self.text.extend_from_slice(&0i32.to_le_bytes()); // placeholder
+                self.fixups.push((patch_false, false_label.clone()));
             }
 
             Terminator::Unreachable => {
@@ -338,6 +386,90 @@ impl CodeGen {
             }
         }
         Ok(())
+    }
+
+    /// Emit x86-64 code to print an integer value to stdout as decimal ASCII + newline.
+    ///
+    /// Algorithm: load value into rax, convert to decimal digits in a stack buffer
+    /// (right-to-left via repeated unsigned div by 10), append newline, sys_write.
+    ///
+    /// Uses 32 bytes of stack space temporarily. Clobbers rax, rcx, rdx, rsi, rdi.
+    /// All caller-saved — no preservation needed.
+    ///
+    /// The routine is 78 bytes of fixed x86-64 with precomputed internal jump offsets:
+    ///   .zero_check → .convert (skip zero case)
+    ///   .zero_case  → .write  (skip convert loop)
+    ///   .convert    → .convert (back-edge: more digits?)
+    fn emit_print_integer(&mut self, value: &IrValue) {
+        // Load the value to print into rax
+        self.emit_load_value(X86Reg::Rax, value);
+
+        // The print routine as hand-encoded x86-64.
+        // See codegen.rs doc comments for the full assembly listing.
+        //
+        // Layout:
+        //   [rsp+0..29]  digit buffer (filled right-to-left)
+        //   [rsp+30]     last digit position
+        //   [rsp+31]     newline (0x0A)
+        //
+        // Registers during routine:
+        //   rax = quotient (shrinks toward 0)
+        //   rcx = 10 (divisor)
+        //   rdx = remainder (becomes digit)
+        //   rsi = write pointer (moves left)
+        //   rdi = fd (1 = stdout, set before syscall)
+        let print_code: [u8; 78] = [
+            // sub rsp, 32
+            0x48, 0x83, 0xEC, 0x20,
+            // mov byte [rsp+31], 0x0A (newline)
+            0xC6, 0x44, 0x24, 0x1F, 0x0A,
+            // lea rsi, [rsp+30] (write pointer = rightmost digit slot)
+            0x48, 0x8D, 0x74, 0x24, 0x1E,
+            // mov ecx, 10 (divisor, zero-extends to rcx)
+            0xB9, 0x0A, 0x00, 0x00, 0x00,
+            // test rax, rax (zero check)
+            0x48, 0x85, 0xC0,
+            // jnz .convert (+8 bytes, skip zero case)
+            0x75, 0x08,
+            // --- zero case ---
+            // mov byte [rsi], 0x30 ('0')
+            0xC6, 0x06, 0x30,
+            // dec rsi
+            0x48, 0xFF, 0xCE,
+            // jmp .write (+0x13 bytes)
+            0xEB, 0x13,
+            // --- .convert (itoa loop) ---
+            // xor rdx, rdx (clear for unsigned div)
+            0x48, 0x31, 0xD2,
+            // div rcx (rax = rax/10, rdx = rax%10)
+            0x48, 0xF7, 0xF1,
+            // add dl, 0x30 (remainder -> ASCII digit)
+            0x80, 0xC2, 0x30,
+            // mov [rsi], dl (store digit)
+            0x88, 0x16,
+            // dec rsi (move write pointer left)
+            0x48, 0xFF, 0xCE,
+            // test rax, rax (more digits?)
+            0x48, 0x85, 0xC0,
+            // jnz .convert (-0x13 bytes, back-edge)
+            0x75, 0xED,
+            // --- .write ---
+            // inc rsi (point to first digit)
+            0x48, 0xFF, 0xC6,
+            // lea rdx, [rsp+32] (end of buffer, past newline)
+            0x48, 0x8D, 0x54, 0x24, 0x20,
+            // sub rdx, rsi (length = end - start)
+            0x48, 0x29, 0xF2,
+            // mov edi, 1 (fd = stdout)
+            0xBF, 0x01, 0x00, 0x00, 0x00,
+            // mov eax, 1 (sys_write)
+            0xB8, 0x01, 0x00, 0x00, 0x00,
+            // syscall
+            0x0F, 0x05,
+            // add rsp, 32 (deallocate buffer)
+            0x48, 0x83, 0xC4, 0x20,
+        ];
+        self.text.extend_from_slice(&print_code);
     }
 
     /// Load an IrValue into a register.
@@ -547,12 +679,38 @@ impl CodeGen {
         self.text.push(Self::modrm_reg(rhs, lhs));
     }
 
-    /// sete al; movzx rax, al (set rax to 1 if ZF=1, else 0)
-    fn emit_sete(&mut self, _dest: X86Reg) {
-        // sete al
-        self.text.extend_from_slice(&[0x0F, 0x94, 0xC0]);
-        // movzx rax, al
+    /// setcc al; movzx rax, al — set rax to 0 or 1 based on CmpKind.
+    fn emit_setcc(&mut self, kind: CmpKind) {
+        // All setcc instructions are 0x0F followed by the condition opcode, then ModR/M for al (0xC0)
+        let opcode = match kind {
+            CmpKind::Eq => 0x94, // sete
+            CmpKind::Ne => 0x95, // setne
+            CmpKind::Lt => 0x9C, // setl
+            CmpKind::Le => 0x9E, // setle
+            CmpKind::Gt => 0x9F, // setg
+            CmpKind::Ge => 0x9D, // setge
+        };
+        self.text.extend_from_slice(&[0x0F, opcode, 0xC0]);
+        // movzx rax, al (zero-extend al into full rax)
         self.text.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]);
+    }
+
+    /// Resolve all jump fixups after all blocks have been emitted.
+    ///
+    /// Each fixup is (patch_offset, target_label). The displacement is
+    /// target_address - (patch_offset + 4), because the CPU reads IP
+    /// past the displacement field before adding it.
+    fn apply_fixups(&mut self) {
+        for (patch_offset, target_label) in &self.fixups {
+            let target = *self.label_offsets.get(target_label).unwrap_or(&0);
+            let disp = (target as i32) - (*patch_offset as i32 + 4);
+            let bytes = disp.to_le_bytes();
+            self.text[*patch_offset] = bytes[0];
+            self.text[*patch_offset + 1] = bytes[1];
+            self.text[*patch_offset + 2] = bytes[2];
+            self.text[*patch_offset + 3] = bytes[3];
+        }
+        self.fixups.clear();
     }
 
     /// mov reg, [rax] (load indirect)
