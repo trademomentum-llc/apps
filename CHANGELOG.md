@@ -6,6 +6,38 @@ Format: [Semantic Versioning](https://semver.org/). Each entry includes the date
 
 ---
 
+## [0.2.5] - 2026-03-10
+
+### Added
+- **Function definitions and calls** -- `define <name> [with <type> <param>...] <body> end` / `call <name> [args...]`
+  - `define answer\nreturn 42\nend\ncall answer\nreturn it` -> exit code 42
+  - `define adder with integer left integer right\nadd left right\nreturn it\nend\ncall adder 17 25\nreturn it` -> exit code 42
+  - Functions use System V AMD64 ABI (args in rdi/rsi/rdx/rcx/r8/r9, return in rax)
+  - `call rel32` fixups resolved after all functions are emitted
+- **String literals and sys_write** -- `print "hello"` writes to stdout via syscall
+  - Segment-based tokenizer splits input into Code/Str segments before morphlex processing
+  - String data accumulated in .data section, addresses patched by linker
+  - `mov rsi, imm64` pattern (0x48 0xBE) scanned and patched with data_vaddr
+- **Parser robustness for non-keyword identifiers** -- `call` now accepts any token as function name regardless of POS; TypeModifier tokens (adjective-classified variable names like "left", "right") fall back to variable names instead of erroring; function def parameter names accept any non-control-flow token
+- **6 new e2e tests** (125 total) -- string printing, function calls, function args, mixed strings and numbers
+
+### Changed
+- `src/jstar/linker.rs` -- Single PT_LOAD segment (R+W+X) instead of dual text/data segments. Simpler ELF layout, avoids kernel mapping issues
+- `src/jstar/ir.rs` -- `lower_to_function()` preserves param Alloca instructions instead of clearing them
+- `src/jstar/codegen.rs` -- `MachineCode` gains `data_vaddr` field; `CodeGen` tracks `function_offsets`, `call_fixups`, `is_entry_point` for multi-function emission
+- `src/jstar/grammar.rs` -- Added `FunctionDef` statement, `StringLiteral` operand, `TypedStatement::FunctionDef`, `TypedOperand::StringLiteral`
+- `src/jstar/token_map.rs` -- Added `FunctionDef` category, `POS_STRING` constant, "define"/"function"/"with" keywords
+
+### Fixed
+- **ETXTBSY race condition** -- Thread ID added to binary name hash; stale binaries removed before writing
+- **Parameter alloca loss** -- `lower_to_function()` was clearing `current_insts` which contained param allocas from the caller
+- **Function name POS mismatch** -- "call answer" failed because morphlex classified "answer" as a verb (Operation), not an operand
+
+### Milestone
+**Functions and strings work end-to-end.** The language has procedures, arguments, return values, and I/O.
+
+---
+
 ## [0.2.2] - 2026-03-09
 
 ### Added

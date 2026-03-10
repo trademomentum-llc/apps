@@ -55,7 +55,10 @@ const VADDR_BASE: u64 = 0x400000;
 
 /// Link machine code into an ELF64 executable.
 pub fn link(code: &MachineCode, output_path: &Path) -> MorphResult<()> {
-    let elf = build_elf(code)?;
+    // Patch data section addresses in the .text before building ELF
+    let mut code = code.clone();
+    patch_data_addresses(&mut code);
+    let elf = build_elf(&code)?;
 
     std::fs::write(output_path, &elf)
         .map_err(|e| MorphlexError::IoError(e))?;
@@ -72,103 +75,101 @@ pub fn link(code: &MachineCode, output_path: &Path) -> MorphResult<()> {
     Ok(())
 }
 
+/// Patch data section addresses in the .text section.
+///
+/// The codegen emits `mov rsi, <data_offset>` for string literals.
+/// We need to add the actual data vaddr (VADDR_BASE + headers + text_size)
+/// to each of these offsets.
+///
+/// Pattern to find: 0x48 0xBE (mov rsi, imm64) followed by 8 bytes.
+/// We scan for this pattern and add the data vaddr to the value.
+fn patch_data_addresses(code: &mut MachineCode) {
+    if code.data.is_empty() {
+        return;
+    }
+
+    // Single PT_LOAD segment — always 1 program header
+    let headers_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE;
+    let text_offset = headers_size;
+    let data_offset = text_offset + code.text.len();
+    let data_vaddr = VADDR_BASE + data_offset as u64;
+
+    // Scan .text for mov rsi, imm64 pattern (0x48 0xBE)
+    // This is emitted by emit_print_string and contains a data_offset placeholder
+    let mut i = 0;
+    while i + 10 <= code.text.len() {
+        if code.text[i] == 0x48 && code.text[i + 1] == 0xBE {
+            // Read the current 8-byte value
+            let offset_bytes: [u8; 8] = code.text[i+2..i+10].try_into().unwrap();
+            let current_val = u64::from_le_bytes(offset_bytes);
+            // Only patch if the value looks like a data offset (small number)
+            if current_val < code.data.len() as u64 {
+                let patched = current_val + data_vaddr;
+                code.text[i+2..i+10].copy_from_slice(&patched.to_le_bytes());
+            }
+            i += 10;
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// Build the complete ELF64 binary in memory.
+///
+/// Uses a single PT_LOAD segment (R+W+X) for the bootstrap compiler.
+/// This avoids multi-segment mapping complexity. All code and data
+/// are in one segment mapped at VADDR_BASE.
 fn build_elf(code: &MachineCode) -> MorphResult<Vec<u8>> {
     let text_size = code.text.len();
     let data_size = code.data.len();
 
-    // Calculate number of program headers
-    let num_phdrs = if data_size > 0 { 2 } else { 1 };
-    let headers_size = ELF64_EHDR_SIZE + (num_phdrs * ELF64_PHDR_SIZE);
+    let headers_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE;
 
-    // .text starts right after headers
-    let text_offset = headers_size;
-    let text_vaddr = VADDR_BASE + text_offset as u64;
+    // Total segment size = text + data
+    let segment_size = text_size + data_size;
 
-    // .data follows .text (page-aligned)
-    let data_offset = text_offset + text_size;
-    let data_vaddr = VADDR_BASE + data_offset as u64;
+    // Entry point = start of .text (right after headers)
+    let entry_point = VADDR_BASE + headers_size as u64;
 
-    // Entry point = start of .text
-    let entry_point = text_vaddr;
-
-    let mut elf = Vec::with_capacity(headers_size + text_size + data_size);
+    let mut elf = Vec::with_capacity(headers_size + segment_size);
 
     // ─── ELF Header (64 bytes) ──────────────────────────────────────────
 
-    // e_ident[0..4]: magic
     elf.extend_from_slice(&ELF_MAGIC);
-    // e_ident[4]: class (64-bit)
     elf.push(ELFCLASS64);
-    // e_ident[5]: data (little-endian)
     elf.push(ELFDATA2LSB);
-    // e_ident[6]: version
     elf.push(EV_CURRENT);
-    // e_ident[7]: OS/ABI
     elf.push(ELFOSABI_NONE);
-    // e_ident[8..16]: padding
-    elf.extend_from_slice(&[0u8; 8]);
+    elf.extend_from_slice(&[0u8; 8]); // padding
 
-    // e_type: executable
     elf.extend_from_slice(&ET_EXEC.to_le_bytes());
-    // e_machine: x86-64
     elf.extend_from_slice(&EM_X86_64.to_le_bytes());
-    // e_version
-    elf.extend_from_slice(&1u32.to_le_bytes());
-    // e_entry: entry point virtual address
+    elf.extend_from_slice(&1u32.to_le_bytes()); // version
     elf.extend_from_slice(&entry_point.to_le_bytes());
-    // e_phoff: program header table offset (right after ELF header)
-    elf.extend_from_slice(&(ELF64_EHDR_SIZE as u64).to_le_bytes());
-    // e_shoff: section header table offset (0 = none)
-    elf.extend_from_slice(&0u64.to_le_bytes());
-    // e_flags
-    elf.extend_from_slice(&0u32.to_le_bytes());
-    // e_ehsize: ELF header size
+    elf.extend_from_slice(&(ELF64_EHDR_SIZE as u64).to_le_bytes()); // phoff
+    elf.extend_from_slice(&0u64.to_le_bytes()); // shoff
+    elf.extend_from_slice(&0u32.to_le_bytes()); // flags
     elf.extend_from_slice(&(ELF64_EHDR_SIZE as u16).to_le_bytes());
-    // e_phentsize: program header entry size
     elf.extend_from_slice(&(ELF64_PHDR_SIZE as u16).to_le_bytes());
-    // e_phnum: number of program headers
-    elf.extend_from_slice(&(num_phdrs as u16).to_le_bytes());
-    // e_shentsize: section header entry size (0 = none)
-    elf.extend_from_slice(&0u16.to_le_bytes());
-    // e_shnum: number of section headers
-    elf.extend_from_slice(&0u16.to_le_bytes());
-    // e_shstrndx: section name string table index
-    elf.extend_from_slice(&0u16.to_le_bytes());
+    elf.extend_from_slice(&1u16.to_le_bytes()); // phnum = 1
+    elf.extend_from_slice(&0u16.to_le_bytes()); // shentsize
+    elf.extend_from_slice(&0u16.to_le_bytes()); // shnum
+    elf.extend_from_slice(&0u16.to_le_bytes()); // shstrndx
 
     assert_eq!(elf.len(), ELF64_EHDR_SIZE);
 
-    // ─── Program Header: .text (PT_LOAD, R+X) ──────────────────────────
+    // ─── Single Program Header: PT_LOAD (R+W+X) ────────────────────────
+    // Maps the entire file from offset 0 so header/text/data are all in one segment.
 
-    // p_type
     elf.extend_from_slice(&PT_LOAD.to_le_bytes());
-    // p_flags: read + execute
-    elf.extend_from_slice(&(PF_R | PF_X).to_le_bytes());
-    // p_offset: file offset of segment
-    elf.extend_from_slice(&(text_offset as u64).to_le_bytes());
-    // p_vaddr: virtual address
-    elf.extend_from_slice(&text_vaddr.to_le_bytes());
-    // p_paddr: physical address (same as vaddr)
-    elf.extend_from_slice(&text_vaddr.to_le_bytes());
-    // p_filesz: size in file
-    elf.extend_from_slice(&(text_size as u64).to_le_bytes());
-    // p_memsz: size in memory
-    elf.extend_from_slice(&(text_size as u64).to_le_bytes());
-    // p_align: alignment
-    elf.extend_from_slice(&0x1000u64.to_le_bytes());
-
-    // ─── Program Header: .data (PT_LOAD, R+W) if needed ────────────────
-
-    if data_size > 0 {
-        elf.extend_from_slice(&PT_LOAD.to_le_bytes());
-        elf.extend_from_slice(&(PF_R | PF_W).to_le_bytes());
-        elf.extend_from_slice(&(data_offset as u64).to_le_bytes());
-        elf.extend_from_slice(&data_vaddr.to_le_bytes());
-        elf.extend_from_slice(&data_vaddr.to_le_bytes());
-        elf.extend_from_slice(&(data_size as u64).to_le_bytes());
-        elf.extend_from_slice(&(data_size as u64).to_le_bytes());
-        elf.extend_from_slice(&0x1000u64.to_le_bytes());
-    }
+    elf.extend_from_slice(&(PF_R | PF_W | PF_X).to_le_bytes()); // rwx
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset: start of file
+    elf.extend_from_slice(&VADDR_BASE.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&VADDR_BASE.to_le_bytes()); // p_paddr
+    let total_file_size = (headers_size + segment_size) as u64;
+    elf.extend_from_slice(&total_file_size.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&total_file_size.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&0x1000u64.to_le_bytes()); // p_align
 
     assert_eq!(elf.len(), headers_size);
 
@@ -194,6 +195,7 @@ mod tests {
     #[test]
     fn test_elf_magic() {
         let code = MachineCode {
+            data_vaddr: 0,
             text: vec![0x90], // nop
             data: vec![],
             stack_size: 0,
@@ -205,6 +207,7 @@ mod tests {
     #[test]
     fn test_elf_class_64() {
         let code = MachineCode {
+            data_vaddr: 0,
             text: vec![0x90],
             data: vec![],
             stack_size: 0,
@@ -216,6 +219,7 @@ mod tests {
     #[test]
     fn test_elf_machine_x86_64() {
         let code = MachineCode {
+            data_vaddr: 0,
             text: vec![0x90],
             data: vec![],
             stack_size: 0,
@@ -228,6 +232,7 @@ mod tests {
     #[test]
     fn test_elf_header_size() {
         let code = MachineCode {
+            data_vaddr: 0,
             text: vec![0x90],
             data: vec![],
             stack_size: 0,
@@ -240,6 +245,7 @@ mod tests {
     #[test]
     fn test_elf_entry_point() {
         let code = MachineCode {
+            data_vaddr: 0,
             text: vec![0x90],
             data: vec![],
             stack_size: 0,
@@ -253,24 +259,26 @@ mod tests {
     #[test]
     fn test_elf_with_data_section() {
         let code = MachineCode {
+            data_vaddr: 0,
             text: vec![0x90],
             data: vec![0x42, 0x43],
             stack_size: 0,
         };
         let elf = build_elf(&code).unwrap();
-        // Should have 2 program headers
+        // Single PT_LOAD segment — always 1 program header
         let phnum = u16::from_le_bytes([elf[56], elf[57]]);
-        assert_eq!(phnum, 2);
-        // Total size: header + 2 phdrs + 1 text + 2 data
+        assert_eq!(phnum, 1);
+        // Total size: header + 1 phdr + 1 text + 2 data
         assert_eq!(
             elf.len(),
-            ELF64_EHDR_SIZE + 2 * ELF64_PHDR_SIZE + 1 + 2
+            ELF64_EHDR_SIZE + ELF64_PHDR_SIZE + 1 + 2
         );
     }
 
     #[test]
     fn test_elf_determinism() {
         let code = MachineCode {
+            data_vaddr: 0,
             text: vec![0xB8, 0x01, 0x00, 0x00, 0x00], // mov eax, 1
             data: vec![],
             stack_size: 0,

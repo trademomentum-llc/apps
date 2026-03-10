@@ -86,7 +86,7 @@ impl TypeChecker {
                 })
             }
 
-            JStarStatement::ControlFlow { kind, condition, body } => {
+            JStarStatement::ControlFlow { kind, condition, body, else_body } => {
                 let typed_condition = match condition {
                     Some(cond) => Some(Box::new(self.check_statement(cond)?)),
                     None => None,
@@ -95,11 +95,16 @@ impl TypeChecker {
                     .iter()
                     .map(|s| self.check_statement(s))
                     .collect::<MorphResult<Vec<_>>>()?;
+                let typed_else: Vec<TypedStatement> = else_body
+                    .iter()
+                    .map(|s| self.check_statement(s))
+                    .collect::<MorphResult<Vec<_>>>()?;
 
                 Ok(TypedStatement::ControlFlow {
                     kind: *kind,
                     condition: typed_condition,
                     body: typed_body,
+                    else_body: typed_else,
                 })
             }
 
@@ -116,6 +121,26 @@ impl TypeChecker {
                 Ok(TypedStatement::Return {
                     value: typed_value,
                     ty,
+                })
+            }
+
+            JStarStatement::FunctionDef { name, params, body, return_type } => {
+                // Register function parameters as symbols
+                for (pname, pty) in params {
+                    self.symbols.insert(
+                        pname.clone(),
+                        Symbol { name: pname.clone(), ty: *pty, scope: ScopeKind::Local },
+                    );
+                }
+                let typed_body: Vec<TypedStatement> = body
+                    .iter()
+                    .map(|s| self.check_statement(s))
+                    .collect::<MorphResult<Vec<_>>>()?;
+                Ok(TypedStatement::FunctionDef {
+                    name: name.clone(),
+                    params: params.clone(),
+                    body: typed_body,
+                    return_type: *return_type,
                 })
             }
 
@@ -161,6 +186,10 @@ impl TypeChecker {
             JStarOperand::Register(reg) => {
                 // Registers default to Int
                 Ok(TypedOperand::Register(*reg, JStarType::Int))
+            }
+
+            JStarOperand::StringLiteral(s) => {
+                Ok(TypedOperand::StringLiteral(s.clone()))
             }
 
             JStarOperand::Addressed { mode, target } => {
