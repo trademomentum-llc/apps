@@ -78,6 +78,10 @@ enum JStarAction {
         /// Output path for the binary
         #[arg(short, long, default_value = "a.out")]
         output: PathBuf,
+
+        /// Use raw tokenization (bypass NLP pipeline, for self-hosting verification)
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Parse a .jstr source file and display the AST (for debugging)
@@ -175,16 +179,22 @@ fn main() {
         }
 
         Commands::Jstar { action } => match action {
-            JStarAction::Compile { input, include, output } => {
+            JStarAction::Compile { input, include, output, raw } => {
+                let mode = if raw { "raw" } else { "nlp" };
                 if include.is_empty() {
-                    println!("Compiling {} -> {}", input.display(), output.display());
-                    morphlex::jstar::compile_file(&input, &output)
-                        .expect("JStar compilation failed");
+                    println!("Compiling {} -> {} ({})", input.display(), output.display(), mode);
+                    if raw {
+                        morphlex::jstar::compile_file_raw(&input, &output)
+                            .expect("JStar compilation failed");
+                    } else {
+                        morphlex::jstar::compile_file(&input, &output)
+                            .expect("JStar compilation failed");
+                    }
                 } else {
                     let mut sources: Vec<PathBuf> = include;
                     sources.push(input.clone());
                     let paths: Vec<&std::path::Path> = sources.iter().map(|p| p.as_path()).collect();
-                    println!("Compiling {} files -> {}", paths.len(), output.display());
+                    println!("Compiling {} files -> {} ({})", paths.len(), output.display(), mode);
                     morphlex::jstar::compile_multi(&paths, &output)
                         .expect("JStar compilation failed");
                 }

@@ -192,6 +192,121 @@ fn preprocess_hex_literals(input: &str) -> String {
     result
 }
 
+// ─── Raw Tokenization (--raw mode for self-hosting verification) ──────────
+//
+// Bypasses the morphlex NLP pipeline entirely. Tokenizes by whitespace,
+// classifies by BLAKE3 keyword hash. Produces identical TokenCategory
+// sequences as the NLP pipeline for valid JStar programs.
+//
+// The self-hosted compiler (compiler.jstr) tokenizes byte-by-byte, which
+// is equivalent to this raw tokenizer. If both produce the same ELF binary,
+// self-hosting is verified.
+
+/// Tokenize input for JStar using raw whitespace splitting (no NLP).
+///
+/// Same contract as `tokenize_jstar()`: returns (lemmas, vectors).
+/// Keywords resolve identically via BLAKE3 hash. Non-keywords get POS_NOUN (0)
+/// which maps to TokenCategory::Data — correct for variable names.
+pub fn tokenize_jstar_raw(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVector>)> {
+    let mut lemmas = Vec::new();
+    let mut vectors = Vec::new();
+
+    // Phase 0: strip comments (lines starting with #)
+    let filtered: String = input
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Phase 1: extract string literals, split into Code/Str segments
+    struct Seg { is_str: bool, text: String }
+    let mut segments: Vec<Seg> = Vec::new();
+    let mut current = String::new();
+    let mut chars = filtered.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            if !current.is_empty() {
+                segments.push(Seg { is_str: false, text: std::mem::take(&mut current) });
+            }
+            let mut s = String::new();
+            for c in chars.by_ref() {
+                if c == '"' { break; }
+                s.push(c);
+            }
+            segments.push(Seg { is_str: true, text: s });
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        segments.push(Seg { is_str: false, text: current });
+    }
+
+    for seg in &segments {
+        if seg.is_str {
+            // String literal
+            lemmas.push(seg.text.clone());
+            vectors.push(TokenVector {
+                id: crate::vectorizer::hash_to_i32(&seg.text),
+                lemma_id: crate::vectorizer::hash_to_i32(&seg.text),
+                pos: token_map::POS_STRING,
+                role: 0,
+                morph: 0,
+            });
+        } else {
+            // Code segment: preprocess hex, split on whitespace
+            let processed = preprocess_hex_literals(&seg.text);
+            for token in processed.split_whitespace() {
+                let lower = token.to_lowercase();
+                let clean = lower.replace(',', "");
+
+                // Check if it is a number
+                if clean.parse::<i64>().is_ok() {
+                    lemmas.push(clean.clone());
+                    vectors.push(TokenVector {
+                        id: crate::vectorizer::hash_to_i32(&lower),
+                        lemma_id: crate::vectorizer::hash_to_i32(&clean),
+                        pos: token_map::POS_LITERAL,
+                        role: 0,
+                        morph: 0,
+                    });
+                } else {
+                    // Word token: POS_NOUN for all (keywords resolved by id in resolve())
+                    lemmas.push(lower.clone());
+                    vectors.push(TokenVector {
+                        id: crate::vectorizer::hash_to_i32(&lower),
+                        lemma_id: crate::vectorizer::hash_to_i32(&lower),
+                        pos: 0, // POS_NOUN
+                        role: 0,
+                        morph: 0,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok((lemmas, vectors))
+}
+
+/// Compile JStar source text to a native ELF binary using raw tokenization.
+pub fn compile_source_raw(source: &str, output_path: &Path) -> MorphResult<()> {
+    let (lemmas, vectors) = tokenize_jstar_raw(source)?;
+    let ast = parser::parse(&lemmas, &vectors)?;
+    let typed_ast = typechecker::check(&ast)?;
+    let ir_program = ir::lower(&typed_ast)?;
+    let machine_code = codegen::generate(&ir_program)?;
+    linker::link(&machine_code, output_path)?;
+    Ok(())
+}
+
+/// Compile a .jstr source file using raw tokenization.
+pub fn compile_file_raw(source_path: &Path, output_path: &Path) -> MorphResult<()> {
+    let source = std::fs::read_to_string(source_path)
+        .map_err(MorphlexError::IoError)?;
+    compile_source_raw(&source, output_path)
+}
+
 // ─── Compiler Pipeline ─────────────────────────────────────────────────────
 
 /// Compile a .jstr source file to a native ELF binary.
@@ -564,48 +679,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
-    fn test_debug_print_string_binary() {
-        let source = "print \"hello\"";
-        let (lemmas, vectors) = tokenize_jstar(source).unwrap();
-        let ast = parser::parse(&lemmas, &vectors).unwrap();
-        let typed = typechecker::check(&ast).unwrap();
-        let ir_prog = ir::lower(&typed).unwrap();
-        let mc = codegen::generate(&ir_prog).unwrap();
-
-        eprintln!("string_data: {:?}", String::from_utf8_lossy(&ir_prog.string_data));
-        eprintln!("mc.data: {:?}", String::from_utf8_lossy(&mc.data));
-        eprintln!("mc.text len: {}", mc.text.len());
-
-        // Check for 0x48 0xBE pattern in text
-        for i in 0..mc.text.len().saturating_sub(10) {
-            if mc.text[i] == 0x48 && mc.text[i+1] == 0xBE {
-                let val = u64::from_le_bytes(mc.text[i+2..i+10].try_into().unwrap());
-                eprintln!("mov rsi, imm64 at offset {}: value={:#x}", i, val);
-            }
-        }
-
-        // Compile to binary and inspect
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        source.hash(&mut hasher);
-        std::thread::current().id().hash(&mut hasher);
-        let dir = std::env::temp_dir().join("jstar_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let binary = dir.join(format!("test_dbg_{:016x}", hasher.finish()));
-        let _ = std::fs::remove_file(&binary);
-        compile_source(source, &binary).unwrap();
-
-        let output = std::process::Command::new(&binary).output().unwrap();
-        eprintln!("exit: {:?}, stdout: {:?}, stderr: {:?}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr));
-        assert!(!output.stdout.is_empty(), "Should produce stdout output");
-    }
-
-    #[test]
     fn test_print_string_ir() {
         let (lemmas, vectors) = tokenize_jstar("print \"hello\"").unwrap();
         assert_eq!(lemmas.len(), 2);
@@ -935,5 +1008,775 @@ mod tests {
     fn test_preprocess_hex_uppercase() {
         assert_eq!(preprocess_hex_literals("0XFF"), "255");
         assert_eq!(preprocess_hex_literals("0xAbCd"), "43981");
+    }
+
+    // ── Raw tokenizer tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_raw_tokenize_return_42() {
+        let (lemmas, vectors) = tokenize_jstar_raw("return 42").unwrap();
+        assert_eq!(lemmas.len(), 2);
+        assert_eq!(lemmas[0], "return");
+        assert_eq!(lemmas[1], "42");
+        // Keywords resolve identically via BLAKE3 hash
+        let cat0 = resolve(&vectors[0], &lemmas[0]);
+        assert_eq!(cat0, TokenCategory::Operation(JStarInstruction::Return));
+        let cat1 = resolve(&vectors[1], &lemmas[1]);
+        assert_eq!(cat1, TokenCategory::Literal);
+    }
+
+    #[test]
+    fn test_raw_tokenize_keywords_equivalent() {
+        // Test that all common keywords resolve identically between NLP and raw
+        let programs = [
+            "return 42",
+            "add 3 5",
+            "subtract 10 3",
+            "multiply 4 7",
+            "divide 20 4",
+            "a counter",
+            "store 42 into counter",
+            "print 99",
+        ];
+        for source in &programs {
+            let (nlp_lemmas, nlp_vecs) = tokenize_jstar(source).unwrap();
+            let (raw_lemmas, raw_vecs) = tokenize_jstar_raw(source).unwrap();
+            assert_eq!(nlp_lemmas.len(), raw_lemmas.len(),
+                "Token count mismatch for '{}'", source);
+            // resolve() should produce the same TokenCategory for each token
+            for i in 0..nlp_lemmas.len() {
+                let nlp_cat = resolve(&nlp_vecs[i], &nlp_lemmas[i]);
+                let raw_cat = resolve(&raw_vecs[i], &raw_lemmas[i]);
+                assert_eq!(nlp_cat, raw_cat,
+                    "Token {} category mismatch for '{}': nlp={:?} raw={:?}",
+                    i, source, nlp_cat, raw_cat);
+            }
+        }
+    }
+
+    #[test]
+    fn test_raw_tokenize_string_literal() {
+        let (lemmas, vectors) = tokenize_jstar_raw("print \"hello world\"").unwrap();
+        assert_eq!(lemmas.len(), 2);
+        assert_eq!(lemmas[1], "hello world");
+        assert_eq!(vectors[1].pos, token_map::POS_STRING);
+    }
+
+    #[test]
+    fn test_raw_tokenize_hex_literals() {
+        let (lemmas, vectors) = tokenize_jstar_raw("return 0x2A").unwrap();
+        assert_eq!(lemmas.len(), 2);
+        assert_eq!(lemmas[1], "42"); // hex preprocessed to decimal
+        assert_eq!(vectors[1].pos, token_map::POS_LITERAL);
+    }
+
+    #[test]
+    fn test_raw_tokenize_comments_stripped() {
+        let (lemmas, _) = tokenize_jstar_raw("# this is a comment\nreturn 42").unwrap();
+        assert_eq!(lemmas.len(), 2);
+        assert_eq!(lemmas[0], "return");
+    }
+
+    #[test]
+    fn test_raw_tokenize_empty() {
+        let (lemmas, vectors) = tokenize_jstar_raw("").unwrap();
+        assert!(lemmas.is_empty());
+        assert!(vectors.is_empty());
+    }
+
+    /// Helper: compile JStar source with raw tokenization and run it, return exit code.
+    #[cfg(target_os = "linux")]
+    fn compile_and_run_raw(source: &str) -> i32 {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join("jstar_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(format!("tr_{}", n));
+        let _ = std::fs::remove_file(&binary);
+        compile_source_raw(source, &binary).unwrap();
+        let output = run_binary(&binary);
+        let _ = std::fs::remove_file(&binary);
+        output.status.code().unwrap_or(-1)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_raw_e2e_return_42() {
+        let exit = compile_and_run_raw("return 42");
+        assert_eq!(exit, 42, "raw: return 42 should exit 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_raw_e2e_arithmetic() {
+        let exit = compile_and_run_raw("add 17 25\nreturn it");
+        assert_eq!(exit, 42, "raw: 17 + 25 = 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_raw_e2e_variables() {
+        let exit = compile_and_run_raw(
+            "a counter\nstore 42 into counter\nreturn counter"
+        );
+        assert_eq!(exit, 42, "raw: variable store/load");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_raw_e2e_if_else() {
+        let exit = compile_and_run_raw(
+            "a result\nstore 0 into result\nif compare 1 0\nstore 42 into result\nelse\nstore 99 into result\nend\nreturn result"
+        );
+        assert_eq!(exit, 42, "raw: if-else true branch");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_raw_e2e_while_loop() {
+        let exit = compile_and_run_raw(
+            "a counter\nstore 5 into counter\nwhile compare counter 0\nsubtract counter 1\nstore it into counter\nend\nreturn counter"
+        );
+        assert_eq!(exit, 0, "raw: while countdown to 0");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_raw_e2e_function_call() {
+        let exit = compile_and_run_raw(
+            "define answer\nreturn 42\nend\ncall answer\nreturn it"
+        );
+        assert_eq!(exit, 42, "raw: function call returns 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_raw_e2e_hex_literal() {
+        let exit = compile_and_run_raw("return 0x2A");
+        assert_eq!(exit, 42, "raw: 0x2A = 42");
+    }
+
+    // ── ELF identity tests: NLP vs raw produce same binary ───────────────
+
+    #[cfg(target_os = "linux")]
+    fn compile_to_bytes(source: &str, raw: bool) -> Vec<u8> {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join("jstar_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(format!("elf_{}", n));
+        let _ = std::fs::remove_file(&binary);
+        if raw {
+            compile_source_raw(source, &binary).unwrap();
+        } else {
+            compile_source(source, &binary).unwrap();
+        }
+        let bytes = std::fs::read(&binary).unwrap();
+        let _ = std::fs::remove_file(&binary);
+        bytes
+    }
+
+    // ── AddressOf tests ───────────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_addressof_basic() {
+        // addressof gets the stack address of a variable — non-zero pointer
+        let exit = compile_and_run(
+            "a counter\nstore 42 into counter\naddressof counter\ncompare it 0\nreturn it"
+        );
+        assert_eq!(exit, 1, "addressof should return non-zero address");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_addressof_syscall_write() {
+        // Use addressof to pass a buffer address to sys_write
+        // Store bytes 'H','i','\n' into a byte buffer, then sys_write(1, addr, 3)
+        let stdout = compile_and_capture(
+            "a byte buf 8\na ptr\nstore 72 into buf at 0\nstore 105 into buf at 1\nstore 10 into buf at 2\naddressof buf\nstore it into ptr\nsyscall 1 1 ptr 3"
+        );
+        assert_eq!(stdout, "Hi\n", "addressof + sys_write should output 'Hi'");
+    }
+
+    // ── ELF identity tests: NLP vs raw produce same binary ───────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_elf_identity_return_42() {
+        let nlp = compile_to_bytes("return 42", false);
+        let raw = compile_to_bytes("return 42", true);
+        assert_eq!(nlp, raw, "ELF identity: 'return 42' should be byte-identical");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_elf_identity_arithmetic() {
+        let nlp = compile_to_bytes("add 17 25\nreturn it", false);
+        let raw = compile_to_bytes("add 17 25\nreturn it", true);
+        assert_eq!(nlp, raw, "ELF identity: arithmetic should be byte-identical");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_elf_identity_variables() {
+        let nlp = compile_to_bytes("a counter\nstore 42 into counter\nreturn counter", false);
+        let raw = compile_to_bytes("a counter\nstore 42 into counter\nreturn counter", true);
+        assert_eq!(nlp, raw, "ELF identity: variables should be byte-identical");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_elf_identity_control_flow() {
+        let source = "a counter\nstore 5 into counter\nwhile compare counter 0\nsubtract counter 1\nstore it into counter\nend\nreturn counter";
+        let nlp = compile_to_bytes(source, false);
+        let raw = compile_to_bytes(source, true);
+        assert_eq!(nlp, raw, "ELF identity: control flow should be byte-identical");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_elf_identity_if_else() {
+        let source = "a result\nstore 0 into result\nif compare 1 0\nstore 42 into result\nelse\nstore 99 into result\nend\nreturn result";
+        let nlp = compile_to_bytes(source, false);
+        let raw = compile_to_bytes(source, true);
+        assert_eq!(nlp, raw, "ELF identity: if-else should be byte-identical");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_elf_identity_function() {
+        let source = "define answer\nreturn 42\nend\ncall answer\nreturn it";
+        let nlp = compile_to_bytes(source, false);
+        let raw = compile_to_bytes(source, true);
+        assert_eq!(nlp, raw, "ELF identity: function should be byte-identical");
+    }
+
+    // ── Self-hosting tests: compiler.jstr compiles JStar programs ─────
+
+    /// Compile compiler.jstr with the Rust bootstrap (raw mode), return path
+    /// to the resulting binary (caller is responsible for cleanup).
+    #[cfg(target_os = "linux")]
+    fn build_self_hosted_compiler() -> std::path::PathBuf {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join("jstar_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let compiler_bin = dir.join(format!("selfhost_compiler_{}", n));
+        let _ = std::fs::remove_file(&compiler_bin);
+        let compiler_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("jstar")
+            .join("compiler.jstr");
+        compile_file_raw(&compiler_src, &compiler_bin)
+            .expect("Failed to compile compiler.jstr with Rust bootstrap");
+        compiler_bin
+    }
+
+    /// Run a compiled binary with input on stdin, with a timeout.
+    /// Returns (exit_code, stdout_bytes, stderr_string).
+    #[cfg(target_os = "linux")]
+    fn run_with_stdin_timeout(
+        binary: &std::path::Path,
+        input: &[u8],
+        timeout_secs: u64,
+    ) -> (Option<i32>, Vec<u8>, String) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let mut child = Command::new(binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn binary");
+
+        // Write input and close stdin (drop sends EOF)
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input).expect("Failed to write to stdin");
+        }
+
+        // Wait with timeout
+        let start = Instant::now();
+        let deadline = Duration::from_secs(timeout_secs);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let out = child.wait_with_output().unwrap();
+                    return (
+                        status.code(),
+                        out.stdout,
+                        String::from_utf8_lossy(&out.stderr).to_string(),
+                    );
+                }
+                Ok(None) => {
+                    if start.elapsed() > deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return (None, vec![], "TIMEOUT".to_string());
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    return (None, vec![], format!("wait error: {}", e));
+                }
+            }
+        }
+    }
+
+    /// Compile compiler.jstr with the Rust bootstrap, then feed it a JStar
+    /// program on stdin. Capture the ELF binary from stdout, write it to
+    /// disk, run it, and return (exit_code, stdout_string).
+    #[cfg(target_os = "linux")]
+    fn self_hosted_compile_and_run(jstar_source: &str) -> (i32, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let compiler_bin = build_self_hosted_compiler();
+
+        // Run the self-hosted compiler with jstar_source on stdin (10s timeout)
+        let (code, elf_bytes, stderr) =
+            run_with_stdin_timeout(&compiler_bin, jstar_source.as_bytes(), 10);
+        let _ = std::fs::remove_file(&compiler_bin);
+
+        assert!(
+            code.is_some(),
+            "Self-hosted compiler timed out (10s). Likely stuck in a loop."
+        );
+
+        let exit_code = code.unwrap();
+        assert_eq!(
+            exit_code, 0,
+            "Self-hosted compiler exited with code {} (stderr: {})",
+            exit_code, stderr
+        );
+
+        assert!(
+            !elf_bytes.is_empty(),
+            "Self-hosted compiler produced no output (exit={}, stderr: {})",
+            exit_code, stderr
+        );
+
+        // Write the ELF binary to a temp file and run it
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join("jstar_test");
+        let compiled_bin = dir.join(format!("selfhost_out_{}", n));
+        let _ = std::fs::remove_file(&compiled_bin);
+        std::fs::write(&compiled_bin, &elf_bytes)
+            .expect("Failed to write self-hosted output binary");
+        std::fs::set_permissions(&compiled_bin, std::fs::Permissions::from_mode(0o755))
+            .expect("Failed to chmod self-hosted binary");
+
+        let run_output = run_binary(&compiled_bin);
+        let _ = std::fs::remove_file(&compiled_bin);
+
+        let run_exit = run_output.status.code().unwrap_or(-1);
+        let stdout_str = String::from_utf8_lossy(&run_output.stdout).to_string();
+        (run_exit, stdout_str)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_selfhost_return_42() {
+        let (exit, _) = self_hosted_compile_and_run("return 42\n");
+        assert_eq!(exit, 42, "self-hosted: return 42 should exit 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_long_array_basic() {
+        let exit = compile_and_run(
+            "a long arr 10\nstore 42 into arr at 0\nload from arr at 0\nreturn it"
+        );
+        assert_eq!(exit, 42, "long array: store/load at index 0");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_long_array_large() {
+        // Test with a larger array to check alloca sizing
+        let exit = compile_and_run(
+            "a long arr 1000\nstore 99 into arr at 500\nload from arr at 500\nreturn it"
+        );
+        assert_eq!(exit, 99, "long array: store/load at index 500");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_huge_stack_frame() {
+        // Simulate compiler.jstr's stack frame size: ~400KB
+        let exit = compile_and_run(
+            "a byte buf1 65536\na byte buf2 65536\na byte buf3 32768\na long arr1 8192\na long arr2 8192\na long arr3 8192\nreturn 42"
+        );
+        assert_eq!(exit, 42, "huge stack frame (~400KB) should work");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_sys_read_stdin() {
+        // Test sys_read from stdin (fd 0) with piped input
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join("jstar_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(format!("sysread_{}", n));
+        let _ = std::fs::remove_file(&binary);
+
+        // Program: read stdin into buffer, return byte count
+        compile_source_raw(
+            "a byte buf 256\na nread\na ptr\naddressof buf\nstore it into ptr\nsyscall 0 0 ptr 256\nstore it into nread\nreturn nread",
+            &binary,
+        ).unwrap();
+
+        let mut child = Command::new(&binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(b"hello").unwrap();
+        }
+
+        let output = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_file(&binary);
+        let exit = output.status.code().unwrap_or(-1);
+        assert_eq!(exit, 5, "sys_read should return 5 bytes for 'hello'");
+    }
+
+    /// Quick stats test: compile compiler.jstr and print IR/codegen stats.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_selfhost_compile_stats() {
+        let compiler_bin = build_self_hosted_compiler();
+        let size = std::fs::metadata(&compiler_bin).unwrap().len();
+        assert!(size > 10_000, "selfhost binary should be >10KB, got {} bytes", size);
+        let _ = std::fs::remove_file(&compiler_bin);
+    }
+
+    /// Minimal test: single if-equal block
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_equal_basic() {
+        let exit = compile_and_run_raw(
+            "a result\nstore 0 into result\nif equal 1 1\nstore 42 into result\nend\nreturn result"
+        );
+        assert_eq!(exit, 42, "if equal 1 1 should enter body");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_equal_false() {
+        let exit = compile_and_run_raw(
+            "a result\nstore 0 into result\nif equal 1 2\nstore 42 into result\nend\nreturn result"
+        );
+        assert_eq!(exit, 0, "if equal 1 2 should skip body");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_equal_var_simple() {
+        // Exact same source as the dump test — should produce identical bytes
+        let exit = compile_and_run_raw(
+            "a val\nstore 99 into val\nif equal val 0\nstore 10 into val\nend\nreturn val"
+        );
+        // val=99, equal val 0 → false, body skipped, return val=99
+        assert_eq!(exit, 99, "if equal val 0 (false) should return 99");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_equal_two_vars() {
+        // Regression: parser used to consume second declaration as operand of previous stmt
+        let exit = compile_and_run_raw(
+            "a result\nstore 0 into result\na val\nstore 99 into val\nif equal val 0\nstore 10 into result\nend\nreturn result"
+        );
+        assert_eq!(exit, 0, "two-vars: equal val 0 is false, result stays 0");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_two_vars_no_if() {
+        // Just two variables, no if-block
+        let exit = compile_and_run_raw(
+            "a result\nstore 42 into result\na val\nstore 99 into val\nreturn result"
+        );
+        assert_eq!(exit, 42, "two vars: return result=42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_two_vars_return_second() {
+        let exit = compile_and_run_raw(
+            "a result\nstore 42 into result\na val\nstore 99 into val\nreturn val"
+        );
+        assert_eq!(exit, 99, "two vars raw: return val=99");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_two_vars_nlp() {
+        // Same program but with NLP tokenization
+        let exit = compile_and_run(
+            "a result\nstore 42 into result\na val\nstore 99 into val\nreturn result"
+        );
+        assert_eq!(exit, 42, "two vars nlp: return result=42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_equal_threshold() {
+        // Stress test: multiple if-equal blocks with two variables
+        for count in 1..=6 {
+            let mut source = String::from("a result\nstore 0 into result\na val\nstore 99 into val\n");
+            for i in 0..count {
+                source.push_str(&format!(
+                    "if equal val {}\nstore {} into result\nend\n",
+                    i, i + 10
+                ));
+            }
+            source.push_str("return result\n");
+            let exit = compile_and_run_raw(&source);
+            // val=99, none of equal val 0..5 are true, result stays 0
+            assert_eq!(exit, 0, "threshold count={}: result should stay 0", count);
+        }
+    }
+
+    /// Tests compiler.jstr's Phase 1 logic (read + tokenize) in isolation.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_selfhost_phase1_tokenize() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        // Build a minimal program that mimics compiler.jstr Phase 1:
+        // read from stdin, tokenize by whitespace, return token count.
+        let source = "\
+a byte input 4096
+a input_len
+a i
+a ch
+a match
+a tok_count
+a temp
+
+# Read stdin
+addressof input
+store it into temp
+syscall 0 0 temp 4096
+store it into input_len
+
+# Tokenize: count non-whitespace tokens
+store 0 into i
+store 0 into tok_count
+
+while compare i input_len
+    load from input at i
+    store it into ch
+
+    store 0 into match
+    if equal ch 32
+        store 1 into match
+    end
+    if equal ch 10
+        store 1 into match
+    end
+
+    if equal match 0
+        # Non-whitespace: scan to next whitespace
+        store 0 into match
+        while equal match 0
+            if equal i input_len
+                store 1 into match
+            else
+                load from input at i
+                store it into ch
+                store 0 into temp
+                if equal ch 32
+                    store 1 into temp
+                end
+                if equal ch 10
+                    store 1 into temp
+                end
+                if equal temp 0
+                    add i 1
+                    store it into i
+                else
+                    store 1 into match
+                end
+            end
+        end
+
+        add tok_count 1
+        store it into tok_count
+    else
+        add i 1
+        store it into i
+    end
+end
+
+return tok_count";
+
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join("jstar_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(format!("phase1_{}", n));
+        let _ = std::fs::remove_file(&binary);
+
+        compile_source_raw(source, &binary).unwrap();
+
+        let mut child = Command::new(&binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(b"return 42\n").unwrap();
+        }
+
+        let output = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_file(&binary);
+
+        let code = output.status.code();
+        // "return 42\n" has 2 tokens: "return" and "42"
+        assert_eq!(code, Some(2), "Should find 2 tokens in 'return 42'");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_bitand_byte_extract() {
+        // Test the byte extraction pattern used in compiler.jstr
+        // Extract low byte of 0x1234 → should be 0x34 = 52
+        let exit = compile_and_run(
+            "a val\nstore 0x1234 into val\nbitand val 0xFF\nreturn it"
+        );
+        assert_eq!(exit, 0x34, "bitand: low byte of 0x1234 should be 0x34");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_bitand_divide_byte2() {
+        // Extract second byte: (val & 0xFF00) / 256
+        let exit = compile_and_run(
+            "a val\nstore 0x1234 into val\nbitand val 0xFF00\ndivide it 256\nreturn it"
+        );
+        assert_eq!(exit, 0x12, "bitand+divide: second byte of 0x1234 should be 0x12");
+    }
+
+    /// Phase 1 with long arrays: store token boundaries in long arrays.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_selfhost_phase1_with_long_arrays() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let source = "\
+a byte input 4096
+a input_len
+a i
+a ch
+a match
+a tok_count
+a temp
+a temp2
+a temp3
+
+a long tok_start 256
+a long tok_len 256
+a long tok_type 256
+
+# Read stdin
+addressof input
+store it into temp
+syscall 0 0 temp 4096
+store it into input_len
+
+# Tokenize with long array storage
+store 0 into i
+store 0 into tok_count
+
+while compare i input_len
+    load from input at i
+    store it into ch
+
+    store 0 into match
+    if equal ch 32
+        store 1 into match
+    end
+    if equal ch 10
+        store 1 into match
+    end
+
+    if equal match 0
+        # Start of token: record position
+        store i into tok_start at tok_count
+
+        # Scan to end of token
+        store i into temp2
+        store 0 into match
+        while equal match 0
+            if equal i input_len
+                store 1 into match
+            else
+                load from input at i
+                store it into ch
+                store 0 into temp3
+                if equal ch 32
+                    store 1 into temp3
+                end
+                if equal ch 10
+                    store 1 into temp3
+                end
+                if equal temp3 0
+                    add i 1
+                    store it into i
+                else
+                    store 1 into match
+                end
+            end
+        end
+
+        # Record token length and type
+        subtract i temp2
+        store it into tok_len at tok_count
+        store 52 into tok_type at tok_count
+
+        add tok_count 1
+        store it into tok_count
+    else
+        add i 1
+        store it into i
+    end
+end
+
+# Verify: load back tok_len[0] (should be 6 for 'return')
+load from tok_len at 0
+return it";
+
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join("jstar_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(format!("phase1b_{}", n));
+        let _ = std::fs::remove_file(&binary);
+
+        compile_source_raw(source, &binary).unwrap();
+
+        let mut child = Command::new(&binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(b"return 42\n").unwrap();
+        }
+
+        let output = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_file(&binary);
+
+        let code = output.status.code();
+        // "return" is 6 chars
+        assert_eq!(code, Some(6), "tok_len[0] should be 6 for 'return'");
     }
 }

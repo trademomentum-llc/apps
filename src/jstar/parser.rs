@@ -555,10 +555,15 @@ impl Parser {
     }
 
     /// Check if the current token can start an operand.
+    ///
+    /// Note: Scope (a/the) is NOT included — articles start declarations,
+    /// not operands. Without this, `store 42 into result` followed by
+    /// `a val` on the next line would consume `a val` as a third operand.
+    /// Scope tokens are still handled by parse_operand when reached via
+    /// recursive calls (e.g., from Addressing: `into the counter`).
     fn is_operand_start(&self) -> bool {
         match self.peek().map(|t| &t.category) {
             Some(TokenCategory::Data) => true,
-            Some(TokenCategory::Scope(_)) => true,
             Some(TokenCategory::Register(_)) => true,
             Some(TokenCategory::Addressing(_)) => true,
             Some(TokenCategory::Literal) => true,

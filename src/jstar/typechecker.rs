@@ -218,6 +218,9 @@ impl TypeChecker {
             | JStarInstruction::Less
             | JStarInstruction::Greater => JStarType::Boolean,
 
+            // Address-of produces a pointer (Long = 8 bytes)
+            JStarInstruction::AddressOf => JStarType::Long,
+
             // Void operations
             JStarInstruction::Store
             | JStarInstruction::Push

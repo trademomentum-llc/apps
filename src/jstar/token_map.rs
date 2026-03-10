@@ -58,6 +58,9 @@ pub enum JStarInstruction {
     // I/O
     Print,
 
+    // Address
+    AddressOf,
+
     // System
     Syscall,
     Halt,
@@ -231,6 +234,7 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("bitnot",   TokenCategory::Operation(JStarInstruction::Not)),
         ("shift",    TokenCategory::Operation(JStarInstruction::Shift)),
         ("allocate", TokenCategory::Operation(JStarInstruction::Allocate)),
+        ("addressof", TokenCategory::Operation(JStarInstruction::AddressOf)),
         // ── Data (type primitives and common nouns) ──
         ("integer",   TokenCategory::Data),
         ("int",       TokenCategory::Data),

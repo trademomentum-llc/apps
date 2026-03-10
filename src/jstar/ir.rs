@@ -393,7 +393,11 @@ impl Lowerer {
 
             TypedStatement::Declare { name, ty, size, .. } => {
                 let dest = self.alloc_vreg();
-                let alloc_size = size.unwrap_or_else(|| ty.size_bytes());
+                // size is element count; multiply by element size for byte allocation
+                let alloc_size = match size {
+                    Some(n) => *n * ty.size_bytes(),
+                    None => ty.size_bytes(),
+                };
                 self.current_insts.push(IrInst::Alloca {
                     dest,
                     size: alloc_size,
@@ -634,7 +638,10 @@ impl Lowerer {
 
             TypedStatement::Declare { name, ty, size, .. } => {
                 let dest = self.alloc_vreg();
-                let alloc_size = size.unwrap_or_else(|| ty.size_bytes());
+                let alloc_size = match size {
+                    Some(n) => *n * ty.size_bytes(),
+                    None => ty.size_bytes(),
+                };
                 self.variables.insert(name.clone(), dest);
                 Ok(vec![IrInst::Alloca {
                     dest,
@@ -778,6 +785,13 @@ impl Lowerer {
             JStarInstruction::Load => {
                 let addr = self.get_one_operand(operands)?;
 
+                // Get the array element type from the source variable's declared type.
+                // For "load from buffer at INDEX", the type comes from the "from buffer" operand.
+                let array_ty = match &operands[0] {
+                    TypedOperand::Addressed { target, .. } => target.ty(),
+                    other => other.ty(),
+                };
+
                 // Check for indexed addressing: "load from buffer at INDEX"
                 let index_operand = operands.get(1).and_then(|op| {
                     if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = op {
@@ -794,7 +808,7 @@ impl Lowerer {
                             dest,
                             base: base_vreg,
                             index: idx,
-                            ty: result_type,
+                            ty: array_ty,
                         });
                     } else {
                         insts.push(IrInst::Load { dest, addr, ty: result_type });
@@ -807,6 +821,13 @@ impl Lowerer {
                 if operands.len() >= 2 {
                     let value = self.lower_operand(&operands[0])?;
                     let addr = self.lower_operand(&operands[1])?;
+
+                    // Get the array element type from the destination variable's declared type.
+                    // For "store X into buffer at INDEX", the type comes from the "into buffer" operand.
+                    let array_ty = match &operands[1] {
+                        TypedOperand::Addressed { target, .. } => target.ty(),
+                        other => other.ty(),
+                    };
 
                     // Check for indexed addressing: "store X into buffer at INDEX"
                     let index_operand = operands.get(2).and_then(|op| {
@@ -824,7 +845,7 @@ impl Lowerer {
                                 base: base_vreg,
                                 index: idx,
                                 value,
-                                ty: result_type,
+                                ty: array_ty,
                             });
                         }
                     } else {
@@ -879,6 +900,27 @@ impl Lowerer {
                     number,
                     args,
                 });
+            }
+
+            JStarInstruction::AddressOf => {
+                // addressof X — get the stack address of variable X
+                let src = self.get_one_operand(operands)?;
+                match src {
+                    IrValue::Reg(src_vreg) => {
+                        insts.push(IrInst::AddressOf {
+                            dest,
+                            src: src_vreg,
+                        });
+                    }
+                    _ => {
+                        // For non-register operands, treat as no-op
+                        insts.push(IrInst::Copy {
+                            dest,
+                            src,
+                            ty: result_type,
+                        });
+                    }
+                }
             }
 
             JStarInstruction::Allocate => {
