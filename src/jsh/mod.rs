@@ -9,6 +9,7 @@
 pub mod repl;
 pub mod scripting;
 pub mod builtins;
+pub mod shell;
 
 use crate::types::{MorphResult, MorphlexError};
 use std::collections::hash_map::DefaultHasher;

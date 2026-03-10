@@ -187,6 +187,10 @@ pub fn compile_source(source: &str, output_path: &Path) -> MorphResult<()> {
 mod tests {
     use super::*;
     use super::token_map::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Monotonic counter to guarantee unique binary names across parallel tests.
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn test_tokenize_jstar_return_42() {
@@ -243,23 +247,15 @@ mod tests {
     /// Uses a hash of source + thread ID to generate a unique binary name per test.
     #[cfg(target_os = "linux")]
     fn compile_and_run(source: &str) -> i32 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        source.hash(&mut hasher);
-        std::thread::current().id().hash(&mut hasher);
-        let hash = hasher.finish();
-
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join("jstar_test");
         std::fs::create_dir_all(&dir).unwrap();
-        let binary = dir.join(format!("test_{:016x}", hash));
-        // Remove stale binary to avoid ETXTBSY if OS still has it mapped
-        let _ = std::fs::remove_file(&binary);
+        let binary = dir.join(format!("t_{}", n));
         compile_source(source, &binary).unwrap();
-
         let output = std::process::Command::new(&binary)
             .output()
             .expect("Failed to run compiled binary");
+        let _ = std::fs::remove_file(&binary);
         output.status.code().unwrap_or(-1)
     }
 
@@ -286,23 +282,15 @@ mod tests {
     /// Helper: compile JStar source and capture stdout from execution.
     #[cfg(target_os = "linux")]
     fn compile_and_capture(source: &str) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        source.hash(&mut hasher);
-        std::thread::current().id().hash(&mut hasher);
-        let hash = hasher.finish();
-
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join("jstar_test");
         std::fs::create_dir_all(&dir).unwrap();
-        let binary = dir.join(format!("test_cap_{:016x}", hash));
-        // Remove stale binary to avoid ETXTBSY if OS still has it mapped
-        let _ = std::fs::remove_file(&binary);
+        let binary = dir.join(format!("tc_{}", n));
         compile_source(source, &binary).unwrap();
-
         let output = std::process::Command::new(&binary)
             .output()
             .expect("Failed to run compiled binary");
+        let _ = std::fs::remove_file(&binary);
         String::from_utf8_lossy(&output.stdout).to_string()
     }
 

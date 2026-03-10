@@ -43,6 +43,15 @@ pub fn try_builtin(line: &str) -> BuiltinResult {
              \x20 echo <text>    Print text\n\
              \x20 env            Print environment variables\n\
              \x20 tokenize <text> Run morphlex tokenizer\n\
+             \nShell features:\n\
+             \x20 set VAR value  Set a shell variable\n\
+             \x20 unset VAR      Remove a shell variable\n\
+             \x20 export VAR [v] Export variable to child processes\n\
+             \x20 $VAR           Variable expansion in any command\n\
+             \x20 cmd > file     Redirect output (overwrite)\n\
+             \x20 cmd >> file    Redirect output (append)\n\
+             \x20 cmd < file     Redirect input from file\n\
+             \x20 cmd1 | cmd2    Pipe output of cmd1 to cmd2\n\
              \nAnything else is compiled and executed as JStar code."
                 .to_string(),
         ),
