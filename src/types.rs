@@ -279,6 +279,9 @@ pub enum MorphlexError {
     #[error("Encryption error: {0}")]
     EncryptionError(String),
 
+    #[error("Crawler error: {0}")]
+    CrawlError(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }

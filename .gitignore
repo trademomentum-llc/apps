@@ -42,6 +42,9 @@ Thumbs.db
 # JStar self-hosted compiler — IP, not yet public
 jstar/compiler.jstr
 
+# Crawl output
+crawl_data/
+
 # Test output binaries
 *.bin
 *.out
