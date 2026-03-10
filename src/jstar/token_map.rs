@@ -84,6 +84,8 @@ pub enum TokenCategory {
     Register(RegAlias),
     /// Number literal
     Literal,
+    /// Function definition keyword
+    FunctionDef,
     /// Interjection/Particle → ignored or comment marker
     Ignored,
 }
@@ -161,9 +163,12 @@ const POS_CONJUNCTION: i8 = 6;
 const POS_DETERMINER: i8 = 7;
 const POS_INTERJECTION: i8 = 8;
 
-/// Numeric/string literals — not a natural language POS.
+/// Numeric literals — not a natural language POS.
 /// Used by the JStar tokenizer for number tokens that bypass morphlex.
 pub(crate) const POS_LITERAL: i8 = 10;
+
+/// String literals — extracted before morphlex processing.
+pub(crate) const POS_STRING: i8 = 11;
 
 // ─── Keyword Hash Table ─────────────────────────────────────────────────────
 //
@@ -254,6 +259,11 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         // ensures they always resolve to ControlFlow regardless of POS.
         ("if",    TokenCategory::ControlFlow(FlowKind::Conditional)),
         ("while", TokenCategory::ControlFlow(FlowKind::Loop)),
+        // ── Function definition ──
+        ("define",   TokenCategory::FunctionDef),
+        ("function", TokenCategory::FunctionDef),
+        // ── Addressing (additional) ──
+        ("with",  TokenCategory::Addressing(AddrMode::By)),
     ];
 
     let mut map = HashMap::with_capacity(entries.len());
@@ -296,6 +306,7 @@ pub fn resolve(tv: &TokenVector, lemma: &str) -> TokenCategory {
         POS_PRONOUN => TokenCategory::Register(resolve_pronoun(&lemma_lower)),
         POS_INTERJECTION => TokenCategory::Ignored,
         POS_LITERAL => TokenCategory::Literal,
+        POS_STRING => TokenCategory::Literal, // string literals route through Literal
         _ => TokenCategory::Ignored, // Particle, unknown
     }
 }

@@ -61,6 +61,15 @@ pub enum JStarStatement {
     /// Label for jump targets
     Label(String),
 
+    /// Function definition
+    /// e.g., "define greet ... end"
+    FunctionDef {
+        name: String,
+        params: Vec<(String, JStarType)>,
+        body: Vec<JStarStatement>,
+        return_type: JStarType,
+    },
+
     /// No-op (unrecognized or ignored tokens)
     Nop,
 }
@@ -83,6 +92,10 @@ pub enum JStarOperand {
     /// A register alias
     /// e.g., "it" (accumulator), "that" (last result)
     Register(RegAlias),
+
+    /// A string literal
+    /// e.g., "hello world"
+    StringLiteral(String),
 
     /// An addressed operand (preposition + operand)
     /// e.g., "into buffer", "from counter"
@@ -196,6 +209,12 @@ pub enum TypedStatement {
         value: Option<TypedOperand>,
         ty: JStarType,
     },
+    FunctionDef {
+        name: String,
+        params: Vec<(String, JStarType)>,
+        body: Vec<TypedStatement>,
+        return_type: JStarType,
+    },
     Label(String),
     Nop,
 }
@@ -210,6 +229,7 @@ pub enum TypedOperand {
     },
     Immediate(i64, JStarType),
     Register(RegAlias, JStarType),
+    StringLiteral(String),
     Addressed {
         mode: AddrMode,
         target: Box<TypedOperand>,
@@ -224,6 +244,7 @@ impl TypedOperand {
             TypedOperand::Variable { ty, .. } => *ty,
             TypedOperand::Immediate(_, ty) => *ty,
             TypedOperand::Register(_, ty) => *ty,
+            TypedOperand::StringLiteral(_) => JStarType::Long, // pointer-sized
             TypedOperand::Addressed { ty, .. } => *ty,
         }
     }

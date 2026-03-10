@@ -74,20 +74,29 @@ pub struct MachineCode {
     pub data: Vec<u8>,
     /// Stack frame size for _start
     pub stack_size: usize,
+    /// Virtual address of .data section (set by linker, stored for codegen)
+    pub data_vaddr: u64,
 }
 
 /// Generate x86-64 machine code from IR.
 pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
     let mut emitter = CodeGen::new();
 
+    // Copy string literal data to .data section
+    emitter.data = program.string_data.clone();
+
     for func in &program.functions {
         emitter.emit_function(func)?;
     }
+
+    // Resolve call fixups now that all function offsets are known
+    emitter.apply_call_fixups();
 
     Ok(MachineCode {
         text: emitter.text,
         data: emitter.data,
         stack_size: emitter.stack_size,
+        data_vaddr: 0, // set by linker
     })
 }
 
@@ -102,6 +111,12 @@ struct CodeGen {
     label_offsets: std::collections::HashMap<String, usize>,
     /// (patch_offset, target_label) — forward references to be resolved after emission
     fixups: Vec<(usize, String)>,
+    /// Function name -> byte offset in .text (for call resolution)
+    function_offsets: std::collections::HashMap<String, usize>,
+    /// (patch_offset, function_name) — call fixups
+    call_fixups: Vec<(usize, String)>,
+    /// Whether current function is _start (uses sys_exit) vs regular (uses ret)
+    is_entry_point: bool,
 }
 
 impl CodeGen {
@@ -114,6 +129,9 @@ impl CodeGen {
             next_stack_offset: -8, // first slot at rbp-8
             label_offsets: std::collections::HashMap::new(),
             fixups: Vec::new(),
+            function_offsets: std::collections::HashMap::new(),
+            call_fixups: Vec::new(),
+            is_entry_point: false,
         }
     }
 
@@ -132,6 +150,16 @@ impl CodeGen {
     }
 
     fn emit_function(&mut self, func: &IrFunction) -> MorphResult<()> {
+        // Reset per-function state
+        self.vreg_offsets.clear();
+        self.next_stack_offset = -8;
+        self.label_offsets.clear();
+        self.fixups.clear();
+        self.is_entry_point = func.name == "_start";
+
+        // Record function offset for call resolution
+        self.function_offsets.insert(func.name.clone(), self.text.len());
+
         // Pre-allocate stack slots for all virtual registers
         for block in &func.blocks {
             for inst in &block.instructions {
@@ -150,7 +178,8 @@ impl CodeGen {
                     | IrInst::Syscall { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
-                    IrInst::Store { .. } | IrInst::Print { .. } | IrInst::Nop => {}
+                    IrInst::Store { .. } | IrInst::Print { .. }
+                    | IrInst::PrintStr { .. } | IrInst::Nop => {}
                 }
             }
         }
@@ -163,6 +192,28 @@ impl CodeGen {
         self.emit_mov_reg_reg(X86Reg::Rbp, X86Reg::Rsp);
         if self.stack_size > 0 {
             self.emit_sub_reg_imm(X86Reg::Rsp, self.stack_size as i32);
+        }
+
+        // For non-_start functions: store incoming arguments from registers to stack
+        if !self.is_entry_point {
+            let arg_regs = [
+                X86Reg::Rdi, X86Reg::Rsi, X86Reg::Rdx,
+                X86Reg::Rcx, X86Reg::R8, X86Reg::R9,
+            ];
+            // Parameters are the first N alloca vregs
+            let mut param_vregs: Vec<VReg> = Vec::new();
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let IrInst::Alloca { dest, .. } = inst {
+                        param_vregs.push(*dest);
+                    }
+                }
+            }
+            for (i, vreg) in param_vregs.iter().enumerate() {
+                if i >= arg_regs.len() { break; }
+                let offset = self.vreg_offset(*vreg);
+                self.emit_store_reg_to_rbp_offset(arg_regs[i], offset);
+            }
         }
 
         // Emit each basic block, recording label offsets
@@ -312,14 +363,33 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
-            IrInst::Call { dest, .. } => {
-                // Placeholder for function calls — will be resolved in linker
+            IrInst::Call { dest, name, args, .. } => {
+                // Load arguments into System V ABI registers
+                let arg_regs = [
+                    X86Reg::Rdi, X86Reg::Rsi, X86Reg::Rdx,
+                    X86Reg::Rcx, X86Reg::R8, X86Reg::R9,
+                ];
+                for (i, arg) in args.iter().enumerate() {
+                    if i < arg_regs.len() {
+                        self.emit_load_value(arg_regs[i], arg);
+                    }
+                }
+                // Emit call rel32 (0xE8 + 4-byte signed displacement)
+                self.text.push(0xE8);
+                let patch_offset = self.text.len();
+                self.text.extend_from_slice(&0i32.to_le_bytes()); // placeholder
+                self.call_fixups.push((patch_offset, name.clone()));
+                // Store return value (rax) to dest's stack slot
                 let offset = self.vreg_offset(*dest);
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
             IrInst::Print { value } => {
                 self.emit_print_integer(value);
+            }
+
+            IrInst::PrintStr { data_offset, len } => {
+                self.emit_print_string(*data_offset, *len);
             }
 
             IrInst::Alloca { .. } => {
@@ -340,18 +410,31 @@ impl CodeGen {
                 if let Some(val) = value {
                     self.emit_load_value(X86Reg::Rax, val);
                 }
-                // Exit via syscall (for _start, not a function return)
-                // mov rdi, rax (exit code)
-                self.emit_mov_reg_reg(X86Reg::Rdi, X86Reg::Rax);
-                // mov rax, 60 (sys_exit)
-                self.emit_mov_reg_imm64(X86Reg::Rax, 60);
-                self.emit_syscall();
+                if self.is_entry_point {
+                    // _start: exit via syscall
+                    self.emit_mov_reg_reg(X86Reg::Rdi, X86Reg::Rax);
+                    self.emit_mov_reg_imm64(X86Reg::Rax, 60);
+                    self.emit_syscall();
+                } else {
+                    // Regular function: epilogue + ret
+                    self.emit_mov_reg_reg(X86Reg::Rsp, X86Reg::Rbp);
+                    self.emit_pop_reg(X86Reg::Rbp);
+                    self.text.push(0xC3); // ret
+                }
             }
 
             Terminator::Halt(code) => {
-                self.emit_load_value(X86Reg::Rdi, code);
-                self.emit_mov_reg_imm64(X86Reg::Rax, 60);
-                self.emit_syscall();
+                if self.is_entry_point {
+                    self.emit_load_value(X86Reg::Rdi, code);
+                    self.emit_mov_reg_imm64(X86Reg::Rax, 60);
+                    self.emit_syscall();
+                } else {
+                    // Non-_start: treat halt as return 0
+                    self.emit_mov_reg_imm64(X86Reg::Rax, 0);
+                    self.emit_mov_reg_reg(X86Reg::Rsp, X86Reg::Rbp);
+                    self.emit_pop_reg(X86Reg::Rbp);
+                    self.text.push(0xC3); // ret
+                }
             }
 
             Terminator::Jump(label) => {
@@ -713,6 +796,43 @@ impl CodeGen {
         self.fixups.clear();
     }
 
+    /// Resolve all call fixups after all functions have been emitted.
+    fn apply_call_fixups(&mut self) {
+        for (patch_offset, func_name) in &self.call_fixups {
+            let target = *self.function_offsets.get(func_name).unwrap_or(&0);
+            let disp = (target as i32) - (*patch_offset as i32 + 4);
+            let bytes = disp.to_le_bytes();
+            self.text[*patch_offset] = bytes[0];
+            self.text[*patch_offset + 1] = bytes[1];
+            self.text[*patch_offset + 2] = bytes[2];
+            self.text[*patch_offset + 3] = bytes[3];
+        }
+        self.call_fixups.clear();
+    }
+
+    /// Emit x86-64 code to print a string from the .data section.
+    ///
+    /// Uses sys_write(1, data_vaddr + offset, len).
+    /// The absolute address is computed at link time — we emit a movabs
+    /// with a placeholder that the linker patches.
+    fn emit_print_string(&mut self, data_offset: usize, len: usize) {
+        // mov eax, 1 (sys_write)
+        self.text.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
+        // mov edi, 1 (fd = stdout)
+        self.text.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]);
+        // mov rsi, <data_vaddr + offset> — placeholder, will be patched by linker
+        // For now, encode offset as 64-bit immediate; linker adds VADDR_BASE + headers
+        self.text.push(0x48); // REX.W
+        self.text.push(0xBE); // MOV rsi, imm64
+        // Store the data_offset as placeholder — linker will add base address
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        // mov edx, len
+        self.text.push(0xBA); // MOV edx, imm32
+        self.text.extend_from_slice(&(len as u32).to_le_bytes());
+        // syscall
+        self.text.extend_from_slice(&[0x0F, 0x05]);
+    }
+
     /// mov reg, [rax] (load indirect)
     fn emit_load_indirect(&mut self, dest: X86Reg, addr: X86Reg) {
         self.text.push(Self::rex_w(dest, addr));
@@ -764,6 +884,7 @@ mod tests {
     #[test]
     fn test_generate_empty_program() {
         let ir = IrProgram {
+            string_data: vec![],
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
@@ -782,6 +903,7 @@ mod tests {
     #[test]
     fn test_generate_return_42() {
         let ir = IrProgram {
+            string_data: vec![],
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
@@ -810,6 +932,7 @@ mod tests {
     #[test]
     fn test_codegen_determinism() {
         let ir = IrProgram {
+            string_data: vec![],
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,

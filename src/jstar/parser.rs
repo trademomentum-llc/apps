@@ -87,6 +87,7 @@ impl Parser {
                 let kind = *kind;
                 self.parse_control_flow(kind)
             }
+            TokenCategory::FunctionDef => self.parse_function_def(),
             TokenCategory::Scope(_) => self.parse_declaration_or_operand_stmt(),
             TokenCategory::Data => self.parse_declaration_from_noun(),
             TokenCategory::Literal => self.parse_literal_statement(),
@@ -117,6 +118,26 @@ impl Parser {
                 None
             };
             return Ok(JStarStatement::Return { value });
+        }
+
+        // Special case: call — first token is the function name regardless of POS
+        if op == JStarInstruction::Call {
+            let mut operands = Vec::new();
+            if let Some(tok) = self.peek() {
+                // Take the next token's lemma as the function name
+                let name = tok.lemma.clone();
+                self.advance();
+                operands.push(JStarOperand::Variable {
+                    name,
+                    scope: ScopeKind::Local,
+                    modifiers: vec![],
+                });
+            }
+            // Remaining tokens are arguments (normal operand parsing)
+            while !self.is_at_end() && self.is_operand_start() {
+                operands.push(self.parse_operand()?);
+            }
+            return Ok(JStarStatement::Execute { op, operands });
         }
 
         // Collect operands until we hit another statement-starting token or end
@@ -352,16 +373,22 @@ impl Parser {
                 Ok(JStarOperand::Register(reg))
             }
 
-            // Number literal
+            // Number or string literal
             TokenCategory::Literal => {
                 let lemma = current.lemma.clone();
+                let pos = current.vector.pos;
                 self.advance();
-                let value = lemma.parse::<i64>().unwrap_or(0);
-                Ok(JStarOperand::Immediate(value))
+                if pos == POS_STRING {
+                    Ok(JStarOperand::StringLiteral(lemma))
+                } else {
+                    let value = lemma.parse::<i64>().unwrap_or(0);
+                    Ok(JStarOperand::Immediate(value))
+                }
             }
 
             // Type modifier without a preceding scope — treat as part of operand
             TokenCategory::TypeModifier(m) => {
+                let first_lemma = current.lemma.clone();
                 let mut modifiers = vec![*m];
                 self.advance();
                 while let Some(tok) = self.peek() {
@@ -384,9 +411,14 @@ impl Parser {
                         });
                     }
                 }
-                Err(MorphlexError::AstError(
-                    "Expected noun after type modifier in operand".to_string(),
-                ))
+                // No Data noun found — treat the modifier itself as a variable name.
+                // This handles cases where morphlex classifies variable names
+                // (like "left", "right") as adjectives instead of nouns.
+                Ok(JStarOperand::Variable {
+                    name: first_lemma,
+                    scope: ScopeKind::Local,
+                    modifiers: vec![],
+                })
             }
 
             // Sequence conjunction — stop collecting operands
@@ -401,6 +433,86 @@ impl Parser {
                 other
             ))),
         }
+    }
+
+    /// Parse a function definition: "define <name> [with <type> <name>...] ... end"
+    ///
+    /// Syntax:
+    ///   define greet ... end
+    ///   define add_nums with integer left integer right ... end
+    fn parse_function_def(&mut self) -> MorphResult<JStarStatement> {
+        self.advance(); // consume "define"
+
+        // Function name — next token must be a data/noun token
+        let name = match self.peek() {
+            Some(tok) => {
+                let n = tok.lemma.clone();
+                self.advance();
+                n
+            }
+            None => {
+                return Err(MorphlexError::AstError(
+                    "Expected function name after 'define'".to_string(),
+                ));
+            }
+        };
+
+        // Optional parameters: "with <type> <name> [<type> <name>]..."
+        let mut params = Vec::new();
+        if let Some(tok) = self.peek() {
+            if matches!(tok.category, TokenCategory::Addressing(AddrMode::By)) {
+                self.advance(); // consume "with"
+                // Parse parameter pairs: <type-noun> <name>
+                // Type token must be Data; name token can be any category
+                // (morphlex may classify parameter names as adjectives, verbs, etc.)
+                while let Some(tok) = self.peek() {
+                    if matches!(tok.category, TokenCategory::Data) {
+                        let type_lemma = tok.lemma.clone();
+                        let ty = JStarType::from_noun(&type_lemma);
+                        self.advance();
+                        // Next token is the parameter name — accept regardless of POS
+                        if let Some(name_tok) = self.peek() {
+                            if !matches!(name_tok.category,
+                                TokenCategory::Operation(JStarInstruction::Halt)
+                                | TokenCategory::ControlFlow(_)
+                                | TokenCategory::FunctionDef
+                            ) {
+                                let param_name = name_tok.lemma.clone();
+                                self.advance();
+                                params.push((param_name, ty));
+                                continue;
+                            }
+                        }
+                        // Single noun — treat as name with default type
+                        params.push((type_lemma, JStarType::Int));
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Parse body statements until "end"
+        let mut body = Vec::new();
+        while !self.is_at_end() {
+            if let Some(tok) = self.peek() {
+                if matches!(tok.category, TokenCategory::Operation(JStarInstruction::Halt)) {
+                    self.advance(); // consume "end"
+                    break;
+                }
+            }
+            match self.parse_statement() {
+                Ok(stmt) => body.push(stmt),
+                Err(_) => { self.advance(); }
+            }
+        }
+
+        Ok(JStarStatement::FunctionDef {
+            name,
+            params,
+            body,
+            return_type: JStarType::Void,
+        })
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────

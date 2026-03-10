@@ -22,6 +22,8 @@ pub type VReg = u32;
 #[derive(Debug, Clone, PartialEq)]
 pub struct IrProgram {
     pub functions: Vec<IrFunction>,
+    /// Accumulated string literal data for the .data section.
+    pub string_data: Vec<u8>,
 }
 
 /// An IR function — entry point with a body of basic blocks.
@@ -119,6 +121,13 @@ pub enum IrInst {
         value: IrValue,
     },
 
+    /// Print a string literal to stdout (no newline appended).
+    /// data_offset = byte offset in .data section, len = string length.
+    PrintStr {
+        data_offset: usize,
+        len: usize,
+    },
+
     /// No-op (placeholder)
     Nop,
 }
@@ -194,8 +203,8 @@ pub enum Terminator {
 
 /// Lower a typed program to IR.
 ///
-/// Currently wraps all top-level statements in a single `_start` function
-/// (the ELF entry point). Future: support function definitions.
+/// Function definitions are lowered to separate IrFunctions.
+/// Top-level statements go into `_start` (the ELF entry point).
 pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
     let mut lowerer = Lowerer {
         next_vreg: 0,
@@ -205,10 +214,46 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
         current_label: String::new(),
         current_insts: Vec::new(),
         block_counter: 0,
+        string_data: Vec::new(),
     };
-    let main_fn = lowerer.lower_to_function("_start", &program.statements)?;
+
+    // Separate function definitions from top-level statements
+    let mut functions = Vec::new();
+    let mut top_level = Vec::new();
+
+    for stmt in &program.statements {
+        match stmt {
+            TypedStatement::FunctionDef { name, params, body, return_type } => {
+                // Lower each function definition
+                lowerer.reset();
+                // Declare parameters as variables
+                for (pname, pty) in params {
+                    let dest = lowerer.alloc_vreg();
+                    lowerer.current_insts.push(IrInst::Alloca {
+                        dest,
+                        size: pty.size_bytes(),
+                        ty: *pty,
+                    });
+                    lowerer.variables.insert(pname.clone(), dest);
+                }
+                let func = lowerer.lower_to_function(name, body)?;
+                functions.push(IrFunction {
+                    return_type: *return_type,
+                    ..func
+                });
+            }
+            other => top_level.push(other.clone()),
+        }
+    }
+
+    // Lower top-level statements into _start
+    lowerer.reset();
+    let main_fn = lowerer.lower_to_function("_start", &top_level)?;
+    functions.insert(0, main_fn);
+
     Ok(IrProgram {
-        functions: vec![main_fn],
+        functions,
+        string_data: lowerer.string_data,
     })
 }
 
@@ -231,6 +276,10 @@ struct Lowerer {
     current_insts: Vec<IrInst>,
     /// Counter for generating unique block labels
     block_counter: u32,
+
+    /// Accumulated string literal data for the .data section.
+    /// Each entry is the raw bytes. Strings are appended with a newline.
+    string_data: Vec<u8>,
 }
 
 impl Lowerer {
@@ -238,6 +287,18 @@ impl Lowerer {
         let v = self.next_vreg;
         self.next_vreg += 1;
         v
+    }
+
+    /// Reset per-function state for lowering a new function.
+    fn reset(&mut self) {
+        self.next_vreg = 0;
+        self.last_result = None;
+        self.variables.clear();
+        self.blocks.clear();
+        self.current_label.clear();
+        self.current_insts.clear();
+        self.block_counter = 0;
+        // Note: string_data is NOT cleared — it accumulates across functions
     }
 
     /// Generate a unique block label with a prefix.
@@ -264,7 +325,7 @@ impl Lowerer {
         statements: &[TypedStatement],
     ) -> MorphResult<IrFunction> {
         self.current_label = "entry".to_string();
-        self.current_insts.clear();
+        // Preserve any instructions already in current_insts (e.g. param Allocas)
         self.blocks.clear();
 
         let mut final_terminator: Option<Terminator> = None;
@@ -341,6 +402,10 @@ impl Lowerer {
                         }
                     }
                 }
+            }
+
+            TypedStatement::FunctionDef { .. } => {
+                // Function definitions are handled at the top level in lower()
             }
 
             TypedStatement::Label(_) => {
@@ -696,10 +761,15 @@ impl Lowerer {
                         _ => "unknown".to_string(),
                     })
                     .unwrap_or_else(|| "unknown".to_string());
+                // Remaining operands are arguments
+                let mut args = Vec::new();
+                for op in operands.iter().skip(1) {
+                    args.push(self.lower_operand(op)?);
+                }
                 insts.push(IrInst::Call {
                     dest,
                     name,
-                    args: vec![],
+                    args,
                     ty: result_type,
                 });
             }
@@ -775,14 +845,31 @@ impl Lowerer {
 
             // I/O
             JStarInstruction::Print => {
-                let value = self.get_one_operand(operands)?;
-                insts.push(IrInst::Print { value: value.clone() });
-                // Also copy value to dest so "it" tracks the printed value
-                insts.push(IrInst::Copy {
-                    dest,
-                    src: value,
-                    ty: result_type,
-                });
+                // Check if the first operand is a string literal
+                if let Some(TypedOperand::StringLiteral(s)) = operands.first() {
+                    let offset = self.string_data.len();
+                    let bytes = s.as_bytes();
+                    self.string_data.extend_from_slice(bytes);
+                    self.string_data.push(b'\n'); // append newline
+                    insts.push(IrInst::PrintStr {
+                        data_offset: offset,
+                        len: bytes.len() + 1, // include newline
+                    });
+                    insts.push(IrInst::Copy {
+                        dest,
+                        src: IrValue::Imm(0),
+                        ty: result_type,
+                    });
+                } else {
+                    let value = self.get_one_operand(operands)?;
+                    insts.push(IrInst::Print { value: value.clone() });
+                    // Also copy value to dest so "it" tracks the printed value
+                    insts.push(IrInst::Copy {
+                        dest,
+                        src: value,
+                        ty: result_type,
+                    });
+                }
             }
 
             // Stack ops (push/pop) — lower to store/load on stack pointer
@@ -815,6 +902,11 @@ impl Lowerer {
                     Some(vreg) => Ok(IrValue::Reg(vreg)),
                     None => Ok(IrValue::Imm(0)), // no prior result
                 }
+            }
+            TypedOperand::StringLiteral(_) => {
+                // String literals are handled at the instruction level (PrintStr),
+                // not as operand values. If one reaches here, treat as 0.
+                Ok(IrValue::Imm(0))
             }
             TypedOperand::Addressed { target, .. } => self.lower_operand(target),
         }

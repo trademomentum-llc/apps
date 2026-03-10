@@ -27,73 +27,121 @@ use std::path::Path;
 // them as literal operands. This tokenizer runs words through morphlex and
 // synthesizes TokenVector entries for numbers, preserving original order.
 
-/// Tokenize input for JStar: words through morphlex, numbers as literals.
+/// Tokenize input for JStar: words through morphlex, numbers and strings as literals.
 ///
-/// Returns (lemmas, vectors) where number tokens appear in their original
-/// position with POS_LITERAL and the numeric string as their lemma.
+/// Returns (lemmas, vectors) where number/string tokens appear in their original
+/// position with POS_LITERAL/POS_STRING and the literal value as their lemma.
+///
+/// String literals (text between double quotes) are extracted before morphlex
+/// processing so they aren't decomposed into individual words.
 pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVector>)> {
-    let all_tokens = crate::lexer::lex(input)?;
-
-    // Separate words from numbers, tracking original order
-    enum Slot {
-        Word(usize),
-        Number(usize),
+    // Phase 0: Extract string literals and split input into segments.
+    // Each segment between strings gets processed by morphlex separately.
+    // Strings are interleaved at their original positions.
+    struct Segment {
+        kind: SegKind,
+        text: String,
     }
+    enum SegKind { Code, Str }
 
-    let mut order: Vec<Slot> = Vec::new();
-    let mut word_tokens: Vec<Token> = Vec::new();
-    let mut number_lexemes: Vec<String> = Vec::new();
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
 
-    for token in &all_tokens {
-        match token.kind {
-            TokenKind::Word | TokenKind::Contraction | TokenKind::Hyphenated => {
-                order.push(Slot::Word(word_tokens.len()));
-                word_tokens.push(token.clone());
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            // Flush current code segment
+            if !current.is_empty() {
+                segments.push(Segment { kind: SegKind::Code, text: std::mem::take(&mut current) });
             }
-            TokenKind::Number => {
-                order.push(Slot::Number(number_lexemes.len()));
-                number_lexemes.push(token.lexeme.clone());
+            // Extract string literal
+            let mut s = String::new();
+            for c in chars.by_ref() {
+                if c == '"' { break; }
+                s.push(c);
             }
-            _ => {} // skip whitespace, punctuation
+            segments.push(Segment { kind: SegKind::Str, text: s });
+        } else {
+            current.push(ch);
         }
     }
+    if !current.is_empty() {
+        segments.push(Segment { kind: SegKind::Code, text: current });
+    }
 
-    // Run word tokens through the full morphlex pipeline
-    let morphs = crate::morphology::analyze(&word_tokens)?;
-    let word_lemmas: Vec<String> = morphs.iter().map(|m| m.lemma.clone()).collect();
-
-    // Only run the rest of the pipeline if there are words
-    let word_vectors = if morphs.is_empty() {
-        Vec::new()
-    } else {
-        let tree = crate::ast::build(&morphs)?;
-        let semnodes = crate::semantics::annotate(&tree)?;
-        crate::vectorizer::vectorize(&semnodes)?
-    };
-
-    // Interleave words and numbers in original order
+    // Process each segment
     let mut lemmas = Vec::new();
     let mut vectors = Vec::new();
 
-    for slot in &order {
-        match slot {
-            Slot::Word(i) => {
-                if *i < word_lemmas.len() {
-                    lemmas.push(word_lemmas[*i].clone());
-                    vectors.push(word_vectors[*i]);
-                }
-            }
-            Slot::Number(i) => {
-                let raw = &number_lexemes[*i];
-                let clean = raw.replace(',', "");
-                lemmas.push(clean.clone());
+    for seg in &segments {
+        match seg.kind {
+            SegKind::Str => {
+                lemmas.push(seg.text.clone());
                 vectors.push(TokenVector {
-                    id: crate::vectorizer::hash_to_i32(&raw.to_lowercase()),
-                    lemma_id: crate::vectorizer::hash_to_i32(&clean),
-                    pos: token_map::POS_LITERAL,
+                    id: crate::vectorizer::hash_to_i32(&seg.text),
+                    lemma_id: crate::vectorizer::hash_to_i32(&seg.text),
+                    pos: token_map::POS_STRING,
                     role: 0,
                     morph: 0,
                 });
+            }
+            SegKind::Code => {
+                let all_tokens = crate::lexer::lex(&seg.text)?;
+
+                let mut word_tokens: Vec<Token> = Vec::new();
+                let mut number_lexemes: Vec<String> = Vec::new();
+
+                enum Slot { Word(usize), Number(usize) }
+                let mut order: Vec<Slot> = Vec::new();
+
+                for token in &all_tokens {
+                    match token.kind {
+                        TokenKind::Word | TokenKind::Contraction | TokenKind::Hyphenated => {
+                            order.push(Slot::Word(word_tokens.len()));
+                            word_tokens.push(token.clone());
+                        }
+                        TokenKind::Number => {
+                            order.push(Slot::Number(number_lexemes.len()));
+                            number_lexemes.push(token.lexeme.clone());
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Run word tokens through the full morphlex pipeline
+                let morphs = crate::morphology::analyze(&word_tokens)?;
+                let word_lemmas: Vec<String> = morphs.iter().map(|m| m.lemma.clone()).collect();
+
+                let word_vectors = if morphs.is_empty() {
+                    Vec::new()
+                } else {
+                    let tree = crate::ast::build(&morphs)?;
+                    let semnodes = crate::semantics::annotate(&tree)?;
+                    crate::vectorizer::vectorize(&semnodes)?
+                };
+
+                for slot in &order {
+                    match slot {
+                        Slot::Word(i) => {
+                            if *i < word_lemmas.len() {
+                                lemmas.push(word_lemmas[*i].clone());
+                                vectors.push(word_vectors[*i]);
+                            }
+                        }
+                        Slot::Number(i) => {
+                            let raw = &number_lexemes[*i];
+                            let clean = raw.replace(',', "");
+                            lemmas.push(clean.clone());
+                            vectors.push(TokenVector {
+                                id: crate::vectorizer::hash_to_i32(&raw.to_lowercase()),
+                                lemma_id: crate::vectorizer::hash_to_i32(&clean),
+                                pos: token_map::POS_LITERAL,
+                                role: 0,
+                                morph: 0,
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -435,4 +483,150 @@ mod tests {
         let stdout = compile_and_capture("multiply 111 111\nprint it");
         assert_eq!(stdout.trim(), "12321", "111 * 111 = 12321");
     }
+
+    // ── String literal tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_tokenize_jstar_string_literal() {
+        let (lemmas, vectors) = tokenize_jstar("print \"hello world\"").unwrap();
+        assert_eq!(lemmas.len(), 2);
+        assert_eq!(lemmas[1], "hello world");
+        assert_eq!(vectors[1].pos, token_map::POS_STRING);
+    }
+
+    #[test]
+    fn test_tokenize_jstar_mixed_strings_and_numbers() {
+        let (lemmas, vectors) = tokenize_jstar("print \"hi\" print 42").unwrap();
+        assert_eq!(lemmas.len(), 4);
+        assert_eq!(lemmas[1], "hi");
+        assert_eq!(vectors[1].pos, token_map::POS_STRING);
+        assert_eq!(lemmas[3], "42");
+        assert_eq!(vectors[3].pos, token_map::POS_LITERAL);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_debug_print_string_binary() {
+        let source = "print \"hello\"";
+        let (lemmas, vectors) = tokenize_jstar(source).unwrap();
+        let ast = parser::parse(&lemmas, &vectors).unwrap();
+        let typed = typechecker::check(&ast).unwrap();
+        let ir_prog = ir::lower(&typed).unwrap();
+        let mc = codegen::generate(&ir_prog).unwrap();
+
+        eprintln!("string_data: {:?}", String::from_utf8_lossy(&ir_prog.string_data));
+        eprintln!("mc.data: {:?}", String::from_utf8_lossy(&mc.data));
+        eprintln!("mc.text len: {}", mc.text.len());
+
+        // Check for 0x48 0xBE pattern in text
+        for i in 0..mc.text.len().saturating_sub(10) {
+            if mc.text[i] == 0x48 && mc.text[i+1] == 0xBE {
+                let val = u64::from_le_bytes(mc.text[i+2..i+10].try_into().unwrap());
+                eprintln!("mov rsi, imm64 at offset {}: value={:#x}", i, val);
+            }
+        }
+
+        // Compile to binary and inspect
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        source.hash(&mut hasher);
+        std::thread::current().id().hash(&mut hasher);
+        let dir = std::env::temp_dir().join("jstar_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(format!("test_dbg_{:016x}", hasher.finish()));
+        let _ = std::fs::remove_file(&binary);
+        compile_source(source, &binary).unwrap();
+
+        let output = std::process::Command::new(&binary).output().unwrap();
+        eprintln!("exit: {:?}, stdout: {:?}, stderr: {:?}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr));
+        assert!(!output.stdout.is_empty(), "Should produce stdout output");
+    }
+
+    #[test]
+    fn test_print_string_ir() {
+        let (lemmas, vectors) = tokenize_jstar("print \"hello\"").unwrap();
+        assert_eq!(lemmas.len(), 2);
+        let ast = parser::parse(&lemmas, &vectors).unwrap();
+        let typed = typechecker::check(&ast).unwrap();
+        let ir = ir::lower(&typed).unwrap();
+        assert!(!ir.string_data.is_empty(), "string_data should contain hello + newline");
+        assert_eq!(&ir.string_data, b"hello\n");
+        // Check that PrintStr instruction exists
+        let has_print_str = ir.functions[0].blocks.iter().any(|b| {
+            b.instructions.iter().any(|i| matches!(i, ir::IrInst::PrintStr { .. }))
+        });
+        assert!(has_print_str, "Should have PrintStr instruction");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_print_string() {
+        let stdout = compile_and_capture("print \"hello\"");
+        assert_eq!(stdout, "hello\n", "print string literal");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_print_string_and_number() {
+        let stdout = compile_and_capture("print \"answer:\" print 42");
+        assert_eq!(stdout, "answer:\n42\n", "print string then number");
+    }
+
+    // ── Function definition and call tests ──────────────────────────────
+
+    #[test]
+    fn test_parse_function_def() {
+        let prog = crate::jstar::parser::parse(
+            &["define", "greet", "print", "42", "end"]
+                .iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            &["define", "greet", "print", "42", "end"]
+                .iter().map(|w| {
+                    crate::types::TokenVector {
+                        id: crate::vectorizer::hash_to_i32(w),
+                        lemma_id: crate::vectorizer::hash_to_i32(w),
+                        pos: if *w == "42" { token_map::POS_LITERAL } else { 0 },
+                        role: 0,
+                        morph: 0,
+                    }
+                }).collect::<Vec<_>>(),
+        ).unwrap();
+        let has_func_def = prog.statements.iter().any(|s| {
+            matches!(s, grammar::JStarStatement::FunctionDef { .. })
+        });
+        assert!(has_func_def, "Should parse function definition");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_function_call_return() {
+        // Define a function that returns 42, call it, return the result
+        let exit = compile_and_run(
+            "define answer\nreturn 42\nend\ncall answer\nreturn it"
+        );
+        assert_eq!(exit, 42, "function call should return 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_function_with_print() {
+        let stdout = compile_and_capture(
+            "define greet\nprint \"hello\"\nend\ncall greet"
+        );
+        assert_eq!(stdout, "hello\n", "function with print should output hello");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_function_call_with_args() {
+        // Define a function that adds its two parameters
+        let exit = compile_and_run(
+            "define adder with integer left integer right\nadd left right\nreturn it\nend\ncall adder 17 25\nreturn it"
+        );
+        assert_eq!(exit, 42, "function with args: 17 + 25 = 42");
+    }
+
 }

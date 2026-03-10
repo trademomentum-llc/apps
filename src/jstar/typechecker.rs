@@ -119,6 +119,26 @@ impl TypeChecker {
                 })
             }
 
+            JStarStatement::FunctionDef { name, params, body, return_type } => {
+                // Register function parameters as symbols
+                for (pname, pty) in params {
+                    self.symbols.insert(
+                        pname.clone(),
+                        Symbol { name: pname.clone(), ty: *pty, scope: ScopeKind::Local },
+                    );
+                }
+                let typed_body: Vec<TypedStatement> = body
+                    .iter()
+                    .map(|s| self.check_statement(s))
+                    .collect::<MorphResult<Vec<_>>>()?;
+                Ok(TypedStatement::FunctionDef {
+                    name: name.clone(),
+                    params: params.clone(),
+                    body: typed_body,
+                    return_type: *return_type,
+                })
+            }
+
             JStarStatement::Label(name) => Ok(TypedStatement::Label(name.clone())),
 
             JStarStatement::Nop => Ok(TypedStatement::Nop),
@@ -161,6 +181,10 @@ impl TypeChecker {
             JStarOperand::Register(reg) => {
                 // Registers default to Int
                 Ok(TypedOperand::Register(*reg, JStarType::Int))
+            }
+
+            JStarOperand::StringLiteral(s) => {
+                Ok(TypedOperand::StringLiteral(s.clone()))
             }
 
             JStarOperand::Addressed { mode, target } => {
