@@ -9,6 +9,10 @@ use super::builtins::{self, BuiltinResult};
 use std::path::Path;
 
 /// Execute a .jsh script file.
+///
+/// Built-in commands (echo, cd, pwd, etc.) are intercepted and executed inline.
+/// All remaining lines are collected as JStar source, compiled as a single
+/// program, and executed via the full pipeline (codegen → ELF → execute).
 pub fn run_script(path: &Path) -> MorphResult<()> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| MorphlexError::IoError(e))?;
@@ -22,7 +26,9 @@ pub fn run_script(path: &Path) -> MorphResult<()> {
         }
     }
 
-    for (line_num, line) in lines.enumerate() {
+    let mut jstar_lines: Vec<String> = Vec::new();
+
+    for line in lines {
         let trimmed = line.trim();
 
         // Skip empty lines and comments
@@ -30,7 +36,7 @@ pub fn run_script(path: &Path) -> MorphResult<()> {
             continue;
         }
 
-        // Try built-in commands first
+        // Try built-in commands first — execute them immediately
         match builtins::try_builtin(trimmed) {
             BuiltinResult::Output(text) => {
                 println!("{}", text);
@@ -43,26 +49,26 @@ pub fn run_script(path: &Path) -> MorphResult<()> {
             BuiltinResult::NotBuiltin => {}
         }
 
-        // Compile and execute as JStar
-        match compile_and_run(trimmed) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("Error at line {}: {}", line_num + 1, e);
-                return Err(e);
-            }
+        // Accumulate JStar lines
+        jstar_lines.push(trimmed.to_string());
+    }
+
+    // Compile and execute all JStar lines as a single program
+    if !jstar_lines.is_empty() {
+        let source = jstar_lines.join("\n");
+        let result = super::execute_jstar(&source)?;
+
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        if result.exit_code != 0 {
+            std::process::exit(result.exit_code);
         }
     }
 
-    Ok(())
-}
-
-/// Compile a single line of JStar and execute it.
-/// Currently: compile to typed AST (full execution comes with Phase 7).
-fn compile_and_run(input: &str) -> MorphResult<()> {
-    let (lemmas, vectors) = crate::compile(input)?;
-    let program = crate::jstar::parser::parse(&lemmas, &vectors)?;
-    let _typed = crate::jstar::typechecker::check(&program)?;
-    // TODO: Phase 7 — codegen and execute (JIT-style)
     Ok(())
 }
 
@@ -96,6 +102,40 @@ mod tests {
         {
             let mut f = std::fs::File::create(&path).unwrap();
             writeln!(f, "# empty script").unwrap();
+        }
+        let result = run_script(&path);
+        assert!(result.is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_run_script_jstar_code() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_jsh_jstar.jsh");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "#!/usr/bin/env jsh").unwrap();
+            writeln!(f, "# JStar code in script").unwrap();
+            writeln!(f, "print 42").unwrap();
+        }
+        let result = run_script(&path);
+        assert!(result.is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_run_script_multiline_jstar() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_jsh_multiline.jsh");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "a counter").unwrap();
+            writeln!(f, "store 10 into counter").unwrap();
+            writeln!(f, "add counter 5").unwrap();
+            writeln!(f, "store it into counter").unwrap();
+            writeln!(f, "print counter").unwrap();
         }
         let result = run_script(&path);
         assert!(result.is_ok());
