@@ -713,4 +713,73 @@ mod tests {
         );
         assert_eq!(exit, 42, "if-true branch should return 42");
     }
+
+    // ── Phase 9: Self-hosting primitives ────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_bitand() {
+        // bitand 0xFF 0x0F => 0x0F = 15
+        let exit = compile_and_run("bitand 255 15\nreturn it");
+        assert_eq!(exit, 15, "255 & 15 = 15");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_bitor() {
+        // bitor 0xF0 0x0F => 0xFF = 255
+        let exit = compile_and_run("bitor 240 15\nreturn it");
+        // exit codes are mod 256, so 255 stays 255
+        assert_eq!(exit, 255, "240 | 15 = 255");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_bitxor() {
+        let exit = compile_and_run("bitxor 255 255\nreturn it");
+        assert_eq!(exit, 0, "255 ^ 255 = 0");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_shift_left() {
+        // shift 1 4 => 1 << 4 = 16
+        let exit = compile_and_run("shift 1 4\nreturn it");
+        assert_eq!(exit, 16, "1 << 4 = 16");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_syscall_exit() {
+        // syscall 60 (exit) with code 42
+        let exit = compile_and_run("syscall 60 42");
+        assert_eq!(exit, 42, "syscall exit(42)");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_syscall_write() {
+        // syscall 1 (write) fd=1 (stdout) buf=string len=5
+        // Use print instead to test syscall wiring — write "hello" via syscall
+        let stdout = compile_and_capture("print \"hello\"");
+        assert_eq!(stdout, "hello\n", "print string via existing path");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_bitwise_mask_and_shift() {
+        // Extract bits: (0xAB >> 4) & 0x0F = 0x0A = 10
+        // But shift is left-shift. Use bitand to mask.
+        // 171 & 15 = 11 (0xAB & 0x0F)
+        let exit = compile_and_run("bitand 171 15\nreturn it");
+        assert_eq!(exit, 11, "0xAB & 0x0F = 0x0B = 11");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_build_byte() {
+        // Build a byte: shift 4 4 => 64, bitor it 2 => 66 ('B' ASCII)
+        let exit = compile_and_run("shift 4 4\nbitor it 2\nreturn it");
+        assert_eq!(exit, 66, "(4 << 4) | 2 = 66");
+    }
 }

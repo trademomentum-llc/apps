@@ -40,6 +40,7 @@ pub enum JStarInstruction {
     Move,
     Push,
     Pop,
+    Allocate,
 
     // Control flow
     Jump,
@@ -223,6 +224,13 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("push",     TokenCategory::Operation(JStarInstruction::Push)),
         ("pop",      TokenCategory::Operation(JStarInstruction::Pop)),
         ("negate",   TokenCategory::Operation(JStarInstruction::Neg)),
+        ("syscall",  TokenCategory::Operation(JStarInstruction::Syscall)),
+        ("bitand",   TokenCategory::Operation(JStarInstruction::And)),
+        ("bitor",    TokenCategory::Operation(JStarInstruction::Or)),
+        ("bitxor",   TokenCategory::Operation(JStarInstruction::Xor)),
+        ("bitnot",   TokenCategory::Operation(JStarInstruction::Not)),
+        ("shift",    TokenCategory::Operation(JStarInstruction::Shift)),
+        ("allocate", TokenCategory::Operation(JStarInstruction::Allocate)),
         // ── Data (type primitives and common nouns) ──
         ("integer",   TokenCategory::Data),
         ("int",       TokenCategory::Data),
@@ -352,6 +360,7 @@ fn resolve_verb(lemma: &str) -> JStarInstruction {
         // System
         "halt" | "stop" | "exit" | "quit" | "end" | "terminate" => JStarInstruction::Halt,
         "syscall" | "interrupt" | "signal" => JStarInstruction::Syscall,
+        "allocate" | "alloc" | "reserve" => JStarInstruction::Allocate,
 
         // Default: treat unknown verbs as no-op
         _ => JStarInstruction::Nop,

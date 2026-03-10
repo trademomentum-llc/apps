@@ -175,7 +175,8 @@ impl CodeGen {
                     }
                     IrInst::Compare { dest, .. }
                     | IrInst::Call { dest, .. }
-                    | IrInst::Syscall { dest, .. } => {
+                    | IrInst::Syscall { dest, .. }
+                    | IrInst::AddressOf { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
                     IrInst::Store { .. } | IrInst::Print { .. }
@@ -394,6 +395,14 @@ impl CodeGen {
 
             IrInst::Alloca { .. } => {
                 // Stack space already allocated in prologue
+            }
+
+            IrInst::AddressOf { dest, src } => {
+                // lea rax, [rbp+src_offset]; store rax → [rbp+dest_offset]
+                let src_offset = self.vreg_offset(*src);
+                self.emit_lea_rbp_offset(X86Reg::Rax, src_offset);
+                let dest_offset = self.vreg_offset(*dest);
+                self.emit_store_reg_to_rbp_offset(X86Reg::Rax, dest_offset);
             }
 
             IrInst::Nop => {
@@ -860,6 +869,14 @@ impl CodeGen {
         self.text.push(Self::rex_w(src, X86Reg::Rbp));
         self.text.push(0x89); // MOV r/m64, r64
         self.text.push(Self::modrm_rbp_disp32(src));
+        self.text.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    /// lea reg, [rbp+offset]
+    fn emit_lea_rbp_offset(&mut self, dest: X86Reg, offset: i32) {
+        self.text.push(Self::rex_w(dest, X86Reg::Rbp));
+        self.text.push(0x8D); // LEA r64, m
+        self.text.push(Self::modrm_rbp_disp32(dest));
         self.text.extend_from_slice(&offset.to_le_bytes());
     }
 

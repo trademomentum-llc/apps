@@ -84,6 +84,12 @@ pub enum IrInst {
         ty: JStarType,
     },
 
+    /// dest = &vreg (address of stack slot)
+    AddressOf {
+        dest: VReg,
+        src: VReg,
+    },
+
     /// dest = call name(args...)
     Call {
         dest: VReg,
@@ -802,11 +808,35 @@ impl Lowerer {
             }
 
             JStarInstruction::Syscall => {
-                let number = self.get_one_operand(operands)?;
+                // syscall NUMBER arg1 arg2 ... arg6
+                let number = self.lower_operand(&operands[0])?;
+                let mut args = Vec::new();
+                for op in operands.iter().skip(1) {
+                    args.push(self.lower_operand(op)?);
+                }
                 insts.push(IrInst::Syscall {
                     dest,
                     number,
-                    args: vec![],
+                    args,
+                });
+            }
+
+            JStarInstruction::Allocate => {
+                // allocate N — reserve N bytes on stack, dest = pointer to buffer
+                let size_val = self.get_one_operand(operands)?;
+                let size = match size_val {
+                    IrValue::Imm(n) => n as usize,
+                    _ => 256,
+                };
+                let buf_vreg = self.alloc_vreg();
+                insts.push(IrInst::Alloca {
+                    dest: buf_vreg,
+                    size,
+                    ty: result_type,
+                });
+                insts.push(IrInst::AddressOf {
+                    dest,
+                    src: buf_vreg,
                 });
             }
 
