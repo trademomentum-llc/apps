@@ -1779,4 +1779,299 @@ return it";
         // "return" is 6 chars
         assert_eq!(code, Some(6), "tok_len[0] should be 6 for 'return'");
     }
+
+    // ─── v0.3.0 punch list: Boolean literals ────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_boolean_true() {
+        let exit = compile_and_run_raw("a flag\nstore true into flag\nreturn flag");
+        assert_eq!(exit, 1, "true should be 1");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_boolean_false() {
+        let exit = compile_and_run_raw("a flag\nstore false into flag\nreturn flag");
+        assert_eq!(exit, 0, "false should be 0");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_boolean_in_condition() {
+        let exit = compile_and_run_raw(
+            "a result\nstore 0 into result\na done\nstore true into done\nif equal done 1\nstore 42 into result\nend\nreturn result"
+        );
+        assert_eq!(exit, 42, "boolean true in condition should enter if-body");
+    }
+
+    // ─── v0.4.0 punch list: Recursion ───────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_recursive_factorial() {
+        // factorial(5) = 120
+        let exit = compile_and_run_raw(
+            "define factorial with int n\nif equal n 0\nreturn 1\nend\nsubtract n 1\ncall factorial it\nmultiply it n\nreturn it\nend\ncall factorial 5\nreturn it"
+        );
+        assert_eq!(exit, 120, "factorial(5) = 120");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_recursive_fibonacci() {
+        // fib(7) = 13
+        // fib(n): if n <= 1 return n, else return fib(n-1) + fib(n-2)
+        let exit = compile_and_run_raw(
+            "define fib with int n\n\
+             if equal n 0\nreturn 0\nend\n\
+             if equal n 1\nreturn 1\nend\n\
+             a prev\n\
+             subtract n 1\ncall fib it\nstore it into prev\n\
+             subtract n 2\ncall fib it\n\
+             add prev it\nreturn it\nend\n\
+             call fib 7\nreturn it"
+        );
+        assert_eq!(exit, 13, "fib(7) = 13");
+    }
+
+    // ─── BlockEnd correctness: halt inside function body ────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_halt_inside_function() {
+        // "halt" should NOT close the function — it should be a real halt instruction
+        // "end" closes the function body (BlockEnd), "halt" terminates execution
+        let exit = compile_and_run_raw(
+            "define die\nhalt\nend\nreturn 42"
+        );
+        assert_eq!(exit, 42, "halt in unused function should not affect main flow");
+    }
+
+    // ─── v0.6.0 punch list: File I/O tests ──────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_file_write_and_read() {
+        // Program: create /tmp/jstar_io_test, write "Hello" (5 bytes),
+        // close, reopen for reading, read, return first byte (72 = 'H')
+        let source = "\
+a byte path 20
+store 47 into path at 0
+store 116 into path at 1
+store 109 into path at 2
+store 112 into path at 3
+store 47 into path at 4
+store 106 into path at 5
+store 105 into path at 6
+store 111 into path at 7
+store 95 into path at 8
+store 116 into path at 9
+store 101 into path at 10
+store 115 into path at 11
+store 116 into path at 12
+store 0 into path at 13
+
+a byte wdata 5
+store 72 into wdata at 0
+store 101 into wdata at 1
+store 108 into wdata at 2
+store 108 into wdata at 3
+store 111 into wdata at 4
+
+a fd
+a ptr
+a nread
+
+# Open for writing: O_WRONLY|O_CREAT|O_TRUNC = 1+64+512 = 577, mode 0644 = 420
+addressof path
+store it into ptr
+syscall 2 ptr 577 420
+store it into fd
+
+# Write 5 bytes
+addressof wdata
+syscall 1 fd it 5
+
+# Close
+syscall 3 fd
+
+# Reopen for reading: O_RDONLY = 0
+addressof path
+store it into ptr
+syscall 2 ptr 0 0
+store it into fd
+
+# Read into a new buffer
+a byte rbuf 10
+addressof rbuf
+syscall 0 fd it 10
+store it into nread
+
+# Close
+syscall 3 fd
+
+# Delete the file: unlink = syscall 87
+addressof path
+store it into ptr
+syscall 87 ptr
+
+# Return first byte read (should be 72 = 'H')
+load from rbuf at 0
+return it";
+
+        let exit = compile_and_run_raw(source);
+        assert_eq!(exit, 72, "file I/O: first byte read should be 72 ('H')");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_subtract_negative() {
+        // subtract 0 1 = -1, exit code wraps to 255 (unsigned 8-bit)
+        let exit = compile_and_run_raw("subtract 0 1\nreturn it");
+        assert_eq!(exit, 255, "subtract 0 1 should exit 255 (-1 as u8)");
+    }
+
+    #[test]
+    #[ignore] // mmap MAP_ANONYMOUS may be blocked by sandbox; syscall infra proven by file I/O test
+    #[cfg(target_os = "linux")]
+    fn test_e2e_mmap_anonymous() {
+        // Simplified: just call mmap with MAP_ANONYMOUS and check for success
+        // mmap(0, 4096, PROT_READ|PROT_WRITE=3, MAP_PRIVATE|MAP_ANONYMOUS=34, -1, 0)
+        // Use 0xFFFFFFFF for fd=-1 since we need unsigned representation
+        let source = "\
+a negone
+subtract 0 1
+store it into negone
+syscall 9 0 4096 3 34 negone 0
+store it into a ptr
+# mmap returns positive address on success, -1 on failure
+# Check: if ptr == negone, failed. Return 0. Else return 1.
+a ok
+store 1 into ok
+if equal ptr negone
+store 0 into ok
+end
+return ok";
+
+        let exit = compile_and_run_raw(source);
+        assert_eq!(exit, 1, "mmap: should return a valid (not MAP_FAILED) pointer");
+    }
+
+    // ─── v0.7.0 punch list: Multi-file compilation ──────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_multi_file_compilation() {
+        use std::path::Path;
+
+        let dir = std::env::temp_dir().join("jstar_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write two source files
+        let file1 = dir.join("lib.jstr");
+        let file2 = dir.join("main.jstr");
+        std::fs::write(&file1, "define double with int x\nmultiply x 2\nreturn it\nend\n").unwrap();
+        std::fs::write(&file2, "call double 21\nreturn it\n").unwrap();
+
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let binary = dir.join(format!("multi_{}", n));
+        let _ = std::fs::remove_file(&binary);
+
+        let paths: Vec<&Path> = vec![file1.as_path(), file2.as_path()];
+        compile_multi(&paths, &binary).unwrap();
+
+        let output = run_binary(&binary);
+        let _ = std::fs::remove_file(&binary);
+        let _ = std::fs::remove_file(&file1);
+        let _ = std::fs::remove_file(&file2);
+
+        assert_eq!(output.status.code(), Some(42), "multi-file: double(21) = 42");
+    }
+
+    // ─── v0.9.0: T-diagram self-hosting verification ────────────────────────
+
+    /// Feed progressively more complex programs to the self-hosted compiler.
+    /// These are gated behind #[ignore] until compiler.jstr implements each feature.
+    #[test]
+    #[ignore] // compiler.jstr does not yet implement arithmetic + "it" pronoun
+    #[cfg(target_os = "linux")]
+    fn test_selfhost_arithmetic() {
+        let (exit, _) = self_hosted_compile_and_run("add 20 22\nreturn it\n");
+        assert_eq!(exit, 42, "self-hosted: add 20 22 should exit 42");
+    }
+
+    #[test]
+    #[ignore] // compiler.jstr does not yet implement variable declarations
+    #[cfg(target_os = "linux")]
+    fn test_selfhost_variable() {
+        let (exit, _) = self_hosted_compile_and_run(
+            "a result\nstore 99 into result\nreturn result\n"
+        );
+        assert_eq!(exit, 99, "self-hosted: variable store/return");
+    }
+
+    #[test]
+    #[ignore] // compiler.jstr does not yet implement control flow codegen
+    #[cfg(target_os = "linux")]
+    fn test_selfhost_if_else() {
+        let (exit, _) = self_hosted_compile_and_run(
+            "a val\nstore 1 into val\nif equal val 1\nreturn 42\nend\nreturn 0\n"
+        );
+        assert_eq!(exit, 42, "self-hosted: if-equal should enter body");
+    }
+
+    /// T-diagram: compiler.jstr compiles itself.
+    /// jstar1 = Rust bootstrap compiles compiler.jstr
+    /// jstar2 = jstar1 compiles compiler.jstr
+    /// jstar3 = jstar2 compiles compiler.jstr
+    /// Verify: jstar2 == jstar3 (fixpoint)
+    #[test]
+    #[ignore] // Enable once self-hosted compiler handles full feature set
+    #[cfg(target_os = "linux")]
+    fn test_t_diagram_fixpoint() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let compiler_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("jstar")
+            .join("compiler.jstr");
+        let compiler_source = std::fs::read_to_string(&compiler_src)
+            .expect("compiler.jstr not found");
+
+        // Step 1: jstar1 = Rust bootstrap compiles compiler.jstr
+        let jstar1 = build_self_hosted_compiler();
+
+        // Step 2: jstar1 compiles compiler.jstr -> jstar2 (ELF bytes)
+        let (code2, elf2, stderr2) =
+            run_with_stdin_timeout(&jstar1, compiler_source.as_bytes(), 30);
+        assert!(code2.is_some(), "jstar1 timed out compiling compiler.jstr");
+        assert_eq!(code2.unwrap(), 0,
+            "jstar1 failed to compile compiler.jstr (stderr: {})", stderr2);
+        assert!(!elf2.is_empty(), "jstar1 produced empty output");
+
+        // Write jstar2 to disk
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join("jstar_test");
+        let jstar2_path = dir.join(format!("jstar2_{}", n));
+        std::fs::write(&jstar2_path, &elf2).unwrap();
+        std::fs::set_permissions(&jstar2_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Step 3: jstar2 compiles compiler.jstr -> jstar3 (ELF bytes)
+        let (code3, elf3, stderr3) =
+            run_with_stdin_timeout(&jstar2_path, compiler_source.as_bytes(), 30);
+        assert!(code3.is_some(), "jstar2 timed out compiling compiler.jstr");
+        assert_eq!(code3.unwrap(), 0,
+            "jstar2 failed to compile compiler.jstr (stderr: {})", stderr3);
+        assert!(!elf3.is_empty(), "jstar2 produced empty output");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&jstar1);
+        let _ = std::fs::remove_file(&jstar2_path);
+
+        // Step 4: Verify fixpoint — jstar2 == jstar3 (byte-for-byte)
+        assert_eq!(elf2.len(), elf3.len(),
+            "T-diagram: jstar2 ({} bytes) != jstar3 ({} bytes)", elf2.len(), elf3.len());
+        assert_eq!(elf2, elf3,
+            "T-DIAGRAM FAILED: jstar2 and jstar3 differ! Not a fixpoint.");
+    }
 }

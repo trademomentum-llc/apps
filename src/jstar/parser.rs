@@ -164,7 +164,7 @@ impl Parser {
             FlowKind::Conditional | FlowKind::Loop => {
                 if !self.is_at_end() {
                     if let Some(tok) = self.peek() {
-                        if !matches!(tok.category, TokenCategory::Operation(JStarInstruction::Halt)) {
+                        if !matches!(tok.category, TokenCategory::BlockEnd) {
                             match self.parse_statement() {
                                 Ok(stmt) => Some(Box::new(stmt)),
                                 Err(_) => None,
@@ -189,7 +189,7 @@ impl Parser {
         while !self.is_at_end() {
             if let Some(tok) = self.peek() {
                 match &tok.category {
-                    TokenCategory::Operation(JStarInstruction::Halt) => {
+                    TokenCategory::BlockEnd => {
                         self.advance(); // consume "end"
                         break;
                     }
@@ -393,13 +393,17 @@ impl Parser {
                 Ok(JStarOperand::Register(reg))
             }
 
-            // Number or string literal
+            // Number, string, or boolean literal
             TokenCategory::Literal => {
                 let lemma = current.lemma.clone();
                 let pos = current.vector.pos;
                 self.advance();
                 if pos == POS_STRING {
                     Ok(JStarOperand::StringLiteral(lemma))
+                } else if lemma == "true" {
+                    Ok(JStarOperand::Immediate(1))
+                } else if lemma == "false" {
+                    Ok(JStarOperand::Immediate(0))
                 } else {
                     let value = lemma.parse::<i64>().unwrap_or(0);
                     Ok(JStarOperand::Immediate(value))
@@ -493,7 +497,7 @@ impl Parser {
                         // Next token is the parameter name — accept regardless of POS
                         if let Some(name_tok) = self.peek() {
                             if !matches!(name_tok.category,
-                                TokenCategory::Operation(JStarInstruction::Halt)
+                                TokenCategory::BlockEnd
                                 | TokenCategory::ControlFlow(_)
                                 | TokenCategory::FunctionDef
                             ) {
@@ -516,7 +520,7 @@ impl Parser {
         let mut body = Vec::new();
         while !self.is_at_end() {
             if let Some(tok) = self.peek() {
-                if matches!(tok.category, TokenCategory::Operation(JStarInstruction::Halt)) {
+                if matches!(tok.category, TokenCategory::BlockEnd) {
                     self.advance(); // consume "end"
                     break;
                 }

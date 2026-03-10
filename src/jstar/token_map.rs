@@ -90,6 +90,8 @@ pub enum TokenCategory {
     Literal,
     /// Function definition keyword
     FunctionDef,
+    /// Block-closing keyword ("end") — NOT a halt instruction
+    BlockEnd,
     /// Interjection/Particle → ignored or comment marker
     Ignored,
 }
@@ -217,7 +219,9 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("invoke",   TokenCategory::Operation(JStarInstruction::Call)),
         ("halt",     TokenCategory::Operation(JStarInstruction::Halt)),
         ("exit",     TokenCategory::Operation(JStarInstruction::Halt)),
-        ("end",      TokenCategory::Operation(JStarInstruction::Halt)),
+        ("end",      TokenCategory::BlockEnd),
+        ("true",     TokenCategory::Literal),
+        ("false",    TokenCategory::Literal),
         ("compare",  TokenCategory::Operation(JStarInstruction::Compare)),
         ("equal",    TokenCategory::Operation(JStarInstruction::Equal)),
         ("equals",   TokenCategory::Operation(JStarInstruction::Equal)),
