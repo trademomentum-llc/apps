@@ -183,27 +183,39 @@ impl Parser {
         };
 
         let mut body = Vec::new();
-        // Parse statements until we hit "end" (a Halt instruction) or end of input
+        let mut else_body = Vec::new();
+        let mut in_else = false;
+        // Parse statements until we hit "end" or "else" or end of input
         while !self.is_at_end() {
-            // Check for "end" marker (halt verb)
             if let Some(tok) = self.peek() {
                 match &tok.category {
                     TokenCategory::Operation(JStarInstruction::Halt) => {
                         self.advance(); // consume "end"
                         break;
                     }
+                    TokenCategory::ControlFlow(FlowKind::Branch) if !in_else => {
+                        self.advance(); // consume "else"
+                        in_else = true;
+                        continue;
+                    }
                     _ => {}
                 }
             }
             match self.parse_statement() {
-                Ok(stmt) => body.push(stmt),
+                Ok(stmt) => {
+                    if in_else {
+                        else_body.push(stmt);
+                    } else {
+                        body.push(stmt);
+                    }
+                }
                 Err(_) => {
                     self.advance();
                 }
             }
         }
 
-        Ok(JStarStatement::ControlFlow { kind, condition, body })
+        Ok(JStarStatement::ControlFlow { kind, condition, body, else_body })
     }
 
     /// Parse a declaration starting with a determiner (scope).

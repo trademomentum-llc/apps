@@ -387,10 +387,10 @@ impl Lowerer {
                 *final_terminator = Some(Terminator::Return(ir_val));
             }
 
-            TypedStatement::ControlFlow { kind, condition, body } => {
+            TypedStatement::ControlFlow { kind, condition, body, else_body } => {
                 match kind {
                     FlowKind::Conditional => {
-                        self.lower_if(condition, body, final_terminator)?;
+                        self.lower_if(condition, body, else_body, final_terminator)?;
                     }
                     FlowKind::Loop => {
                         self.lower_while(condition, body, final_terminator)?;
@@ -419,51 +419,78 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Lower an `if` block into a 3-block CFG:
+    /// Lower an `if` or `if/else` block into CFG.
     ///
-    ///   current_block:
-    ///     ...pre-if instructions...
-    ///     v_cond = condition
-    ///     Branch(v_cond, if_body, if_end)
+    /// Without else (3 blocks):
+    ///   current: Branch(cond, if_body, if_end)
+    ///   if_body: ...body..., Jump(if_end)
+    ///   if_end:  ...continues...
     ///
-    ///   if_body:
-    ///     ...body statements...
-    ///     Jump(if_end)
+    /// With else (4 blocks):
+    ///   current:   Branch(cond, if_body, else_body)
+    ///   if_body:   ...body..., Jump(if_end) or Return
+    ///   else_body: ...else..., Jump(if_end) or Return
+    ///   if_end:    ...continues...
     ///
-    ///   if_end:
-    ///     ...post-if instructions continue here...
+    /// If a branch contains a `return`, that return becomes the block
+    /// terminator directly instead of Jump(if_end).
     fn lower_if(
         &mut self,
         condition: &Option<Box<TypedStatement>>,
         body: &[TypedStatement],
+        else_body: &[TypedStatement],
         final_terminator: &mut Option<Terminator>,
     ) -> MorphResult<()> {
         let body_label = self.make_label("if_body");
+        let else_label = if else_body.is_empty() {
+            None
+        } else {
+            Some(self.make_label("if_else"))
+        };
         let end_label = self.make_label("if_end");
 
         // Lower the condition into the current block
         let cond_vreg = self.lower_condition(condition)?;
 
         // Finish current block with Branch
+        let false_target = else_label.as_deref().unwrap_or(&end_label).to_string();
         self.finish_block(
             Terminator::Branch {
                 cond: cond_vreg,
                 true_label: body_label.clone(),
-                false_label: end_label.clone(),
+                false_label: false_target,
             },
             &body_label,
         );
 
-        // Emit body statements into the body block
+        // Emit true-branch body
+        // Save final_terminator — if the branch has a return, it should be
+        // the block terminator, not the function-level final terminator.
+        let saved_term = final_terminator.take();
         for s in body {
             self.lower_statement(s, final_terminator)?;
         }
-
-        // Finish body block with Jump to end
+        let true_term = final_terminator
+            .take()
+            .unwrap_or_else(|| Terminator::Jump(end_label.clone()));
         self.finish_block(
-            Terminator::Jump(end_label.clone()),
-            &end_label,
+            true_term,
+            else_label.as_deref().unwrap_or(&end_label),
         );
+
+        // Emit else-branch body (if present)
+        if !else_body.is_empty() {
+            for s in else_body {
+                self.lower_statement(s, final_terminator)?;
+            }
+            let else_term = final_terminator
+                .take()
+                .unwrap_or_else(|| Terminator::Jump(end_label.clone()));
+            self.finish_block(else_term, &end_label);
+        }
+
+        // Restore saved terminator (function-level return from before the if)
+        *final_terminator = saved_term;
 
         // Now current block is if_end — subsequent statements go here
         Ok(())
@@ -1102,6 +1129,7 @@ mod tests {
                         result_type: JStarType::Boolean,
                     })),
                     body: vec![TypedStatement::Nop],
+                    else_body: vec![],
                 },
             ],
         };
@@ -1147,6 +1175,7 @@ mod tests {
                         result_type: JStarType::Boolean,
                     })),
                     body: vec![TypedStatement::Nop],
+                    else_body: vec![],
                 },
             ],
         };

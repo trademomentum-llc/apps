@@ -50,6 +50,7 @@ pub enum JStarStatement {
         kind: FlowKind,
         condition: Option<Box<JStarStatement>>,
         body: Vec<JStarStatement>,
+        else_body: Vec<JStarStatement>,
     },
 
     /// Return a value
@@ -204,6 +205,7 @@ pub enum TypedStatement {
         kind: FlowKind,
         condition: Option<Box<TypedStatement>>,
         body: Vec<TypedStatement>,
+        else_body: Vec<TypedStatement>,
     },
     Return {
         value: Option<TypedOperand>,

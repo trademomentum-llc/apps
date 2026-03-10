@@ -215,6 +215,10 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("exit",     TokenCategory::Operation(JStarInstruction::Halt)),
         ("end",      TokenCategory::Operation(JStarInstruction::Halt)),
         ("compare",  TokenCategory::Operation(JStarInstruction::Compare)),
+        ("equal",    TokenCategory::Operation(JStarInstruction::Equal)),
+        ("equals",   TokenCategory::Operation(JStarInstruction::Equal)),
+        ("less",     TokenCategory::Operation(JStarInstruction::Less)),
+        ("greater",  TokenCategory::Operation(JStarInstruction::Greater)),
         ("print",    TokenCategory::Operation(JStarInstruction::Print)),
         ("push",     TokenCategory::Operation(JStarInstruction::Push)),
         ("pop",      TokenCategory::Operation(JStarInstruction::Pop)),
@@ -258,6 +262,7 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         // Morphlex may classify "if"/"while" as anything — the hash table
         // ensures they always resolve to ControlFlow regardless of POS.
         ("if",    TokenCategory::ControlFlow(FlowKind::Conditional)),
+        ("else",  TokenCategory::ControlFlow(FlowKind::Branch)),
         ("while", TokenCategory::ControlFlow(FlowKind::Loop)),
         // ── Function definition ──
         ("define",   TokenCategory::FunctionDef),

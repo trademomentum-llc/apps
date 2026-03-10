@@ -629,4 +629,100 @@ mod tests {
         assert_eq!(exit, 42, "function with args: 17 + 25 = 42");
     }
 
+    // ── Comparison operator expression tests ─────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_equal_true() {
+        // equal 5 5 => 1 (true)
+        let exit = compile_and_run("equal 5 5\nreturn it");
+        assert_eq!(exit, 1, "5 == 5 should be 1");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_equal_false() {
+        // equal 5 3 => 0 (false)
+        let exit = compile_and_run("equal 5 3\nreturn it");
+        assert_eq!(exit, 0, "5 == 3 should be 0");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_less_true() {
+        // less 3 5 => 1 (true: 3 < 5)
+        let exit = compile_and_run("less 3 5\nreturn it");
+        assert_eq!(exit, 1, "3 < 5 should be 1");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_less_false() {
+        // less 5 3 => 0 (false: 5 < 3)
+        let exit = compile_and_run("less 5 3\nreturn it");
+        assert_eq!(exit, 0, "5 < 3 should be 0");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_greater_true() {
+        // greater 7 2 => 1 (true: 7 > 2)
+        let exit = compile_and_run("greater 7 2\nreturn it");
+        assert_eq!(exit, 1, "7 > 2 should be 1");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_greater_false() {
+        // greater 2 7 => 0 (false: 2 > 7)
+        let exit = compile_and_run("greater 2 7\nreturn it");
+        assert_eq!(exit, 0, "2 > 7 should be 0");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_compare_expression() {
+        // compare 5 0 => 1 (5 != 0), compare 0 0 => 0 (0 != 0 is false)
+        let exit = compile_and_run("compare 5 0\nreturn it");
+        assert_eq!(exit, 1, "5 != 0 should be 1");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_compare_equal_values() {
+        let exit = compile_and_run("compare 0 0\nreturn it");
+        assert_eq!(exit, 0, "0 != 0 should be 0");
+    }
+
+    // ── If/else branch tests ─────────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_else_true_branch() {
+        // condition true => if body runs, else body skipped
+        let exit = compile_and_run(
+            "a result\nstore 0 into result\nif compare 1 0\nstore 42 into result\nelse\nstore 99 into result\nend\nreturn result"
+        );
+        assert_eq!(exit, 42, "if-true should run if-body, not else-body");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_else_false_branch() {
+        // condition false => if body skipped, else body runs
+        let exit = compile_and_run(
+            "a result\nstore 0 into result\nif compare 0 0\nstore 42 into result\nelse\nstore 99 into result\nend\nreturn result"
+        );
+        assert_eq!(exit, 99, "if-false should run else-body, not if-body");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_else_with_return() {
+        // Direct return from branches
+        let exit = compile_and_run(
+            "if compare 5 0\nreturn 42\nelse\nreturn 99\nend"
+        );
+        assert_eq!(exit, 42, "if-true branch should return 42");
+    }
 }
