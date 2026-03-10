@@ -192,18 +192,21 @@ mod tests {
     // ── Control flow end-to-end tests ───────────────────────────────────
 
     /// Helper: compile JStar source to a temp binary and run it, return exit code.
-    /// Uses a hash of the source to generate a unique binary name per test.
+    /// Uses a hash of source + thread ID to generate a unique binary name per test.
     #[cfg(target_os = "linux")]
     fn compile_and_run(source: &str) -> i32 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         source.hash(&mut hasher);
+        std::thread::current().id().hash(&mut hasher);
         let hash = hasher.finish();
 
         let dir = std::env::temp_dir().join("jstar_test");
         std::fs::create_dir_all(&dir).unwrap();
         let binary = dir.join(format!("test_{:016x}", hash));
+        // Remove stale binary to avoid ETXTBSY if OS still has it mapped
+        let _ = std::fs::remove_file(&binary);
         compile_source(source, &binary).unwrap();
 
         let output = std::process::Command::new(&binary)
@@ -239,11 +242,14 @@ mod tests {
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         source.hash(&mut hasher);
+        std::thread::current().id().hash(&mut hasher);
         let hash = hasher.finish();
 
         let dir = std::env::temp_dir().join("jstar_test");
         std::fs::create_dir_all(&dir).unwrap();
         let binary = dir.join(format!("test_cap_{:016x}", hash));
+        // Remove stale binary to avoid ETXTBSY if OS still has it mapped
+        let _ = std::fs::remove_file(&binary);
         compile_source(source, &binary).unwrap();
 
         let output = std::process::Command::new(&binary)
