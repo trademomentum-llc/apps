@@ -32,7 +32,14 @@ use std::path::Path;
 /// Returns (lemmas, vectors) where number tokens appear in their original
 /// position with POS_LITERAL and the numeric string as their lemma.
 pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVector>)> {
-    let all_tokens = crate::lexer::lex(input)?;
+    // Filter out comment lines (starting with #) before tokenization
+    let filtered: String = input
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let all_tokens = crate::lexer::lex(&filtered)?;
 
     // Separate words from numbers, tracking original order
     enum Slot {
@@ -428,5 +435,143 @@ mod tests {
     fn test_e2e_print_multiply_result() {
         let stdout = compile_and_capture("multiply 111 111\nprint it");
         assert_eq!(stdout.trim(), "12321", "111 * 111 = 12321");
+    }
+
+    // ── v0.3.0: Else branches ───────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_else_true() {
+        // Condition true → body runs, else skipped
+        let exit = compile_and_run(
+            "a counter\nstore 1 into counter\nif compare counter 0\nstore 42 into counter\nelse\nstore 99 into counter\nend\nreturn counter"
+        );
+        assert_eq!(exit, 42, "if-else-true: body runs, exit 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_else_false() {
+        // Condition false → else body runs
+        let exit = compile_and_run(
+            "a counter\nstore 0 into counter\nif compare counter 0\nstore 42 into counter\nelse\nstore 99 into counter\nend\nreturn counter"
+        );
+        assert_eq!(exit, 99, "if-else-false: else body runs, exit 99");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_nested_if_else() {
+        // Nested: outer false → else → inner true → body
+        let exit = compile_and_run(
+            "a counter\nstore 0 into counter\na result\nstore 0 into result\nif compare counter 0\nstore 1 into result\nelse\nstore 1 into counter\nif compare counter 0\nstore 42 into result\nelse\nstore 99 into result\nend\nend\nreturn result"
+        );
+        assert_eq!(exit, 42, "nested if-else: outer-else inner-true");
+    }
+
+    // ── v0.3.0: Nested control flow ─────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_inside_while() {
+        // While loop with if inside: count down from 3, add only odd values to result
+        // counter=3 (odd, add 3), counter=2 (even, skip), counter=1 (odd, add 1) → result=4
+        let exit = compile_and_run(
+            "a counter\na result\na remainder\nstore 3 into counter\nstore 0 into result\nwhile compare counter 0\nstore counter into remainder\nsubtract remainder 2\nif compare remainder 0\nadd result counter\nstore it into result\nend\nsubtract counter 1\nstore it into counter\nend\nreturn result"
+        );
+        // counter=3: remainder=3-2=1, 1!=0 → true → result=0+3=3
+        // counter=2: remainder=2-2=0, 0!=0 → false → skip
+        // counter=1: remainder=1-2=-1, -1!=0 → true → result=3+1=4
+        assert_eq!(exit, 4, "if inside while: sum odd-offset values");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_if_inside_if() {
+        // Nested if blocks
+        let exit = compile_and_run(
+            "a counter\nstore 5 into counter\nif compare counter 0\nif compare counter 3\nstore 42 into counter\nend\nend\nreturn counter"
+        );
+        // counter=5, 5!=0 → true → inner: 5!=3 → true → counter=42
+        assert_eq!(exit, 42, "if inside if: both true");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_while_inside_while() {
+        // Outer loop runs 2 times, inner loop runs 3 times each → result = 2*3 = 6
+        let exit = compile_and_run(
+            "a outer\na inner\na result\nstore 2 into outer\nstore 0 into result\nwhile compare outer 0\nstore 3 into inner\nwhile compare inner 0\nadd result 1\nstore it into result\nsubtract inner 1\nstore it into inner\nend\nsubtract outer 1\nstore it into outer\nend\nreturn result"
+        );
+        assert_eq!(exit, 6, "while inside while: 2 * 3 = 6");
+    }
+
+    // ── v0.3.0: Comparison operators ────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_equal_true() {
+        let exit = compile_and_run(
+            "a counter\nstore 5 into counter\nif equal counter 5\nstore 42 into counter\nend\nreturn counter"
+        );
+        assert_eq!(exit, 42, "equal 5 5 → true → body runs");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_equal_false() {
+        let exit = compile_and_run(
+            "a counter\nstore 5 into counter\nif equal counter 3\nstore 42 into counter\nend\nreturn counter"
+        );
+        assert_eq!(exit, 5, "equal 5 3 → false → body skipped");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_less_true() {
+        let exit = compile_and_run(
+            "a counter\nstore 3 into counter\nif less counter 5\nstore 42 into counter\nend\nreturn counter"
+        );
+        assert_eq!(exit, 42, "less 3 5 → true → body runs");
+    }
+
+    // ── v0.3.0: Boolean literals ────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_boolean_true() {
+        let exit = compile_and_run(
+            "a value\nstore true into value\nreturn value"
+        );
+        assert_eq!(exit, 1, "true literal = 1");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_boolean_false() {
+        let exit = compile_and_run(
+            "a value\nstore false into value\nreturn value"
+        );
+        assert_eq!(exit, 0, "false literal = 0");
+    }
+
+    // ── v0.3.0: Comments ────────────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_comment_ignored() {
+        let exit = compile_and_run(
+            "# this is a comment\nreturn 42"
+        );
+        assert_eq!(exit, 42, "comment line ignored");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_comment_between_statements() {
+        let exit = compile_and_run(
+            "a counter\nstore 42 into counter\n# this should be ignored\nreturn counter"
+        );
+        assert_eq!(exit, 42, "comment between statements ignored");
     }
 }

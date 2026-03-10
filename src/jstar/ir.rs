@@ -326,10 +326,10 @@ impl Lowerer {
                 *final_terminator = Some(Terminator::Return(ir_val));
             }
 
-            TypedStatement::ControlFlow { kind, condition, body } => {
+            TypedStatement::ControlFlow { kind, condition, body, else_body } => {
                 match kind {
                     FlowKind::Conditional => {
-                        self.lower_if(condition, body, final_terminator)?;
+                        self.lower_if(condition, body, else_body, final_terminator)?;
                     }
                     FlowKind::Loop => {
                         self.lower_while(condition, body, final_terminator)?;
@@ -354,23 +354,23 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Lower an `if` block into a 3-block CFG:
+    /// Lower an `if` block into a 3-block CFG (no else) or 4-block CFG (with else):
     ///
-    ///   current_block:
-    ///     ...pre-if instructions...
-    ///     v_cond = condition
-    ///     Branch(v_cond, if_body, if_end)
+    /// 3-block (no else):
+    ///   entry: Branch(cond, if_body, if_end)
+    ///   if_body: ...true stmts... Jump(if_end)
+    ///   if_end: ...continues...
     ///
-    ///   if_body:
-    ///     ...body statements...
-    ///     Jump(if_end)
-    ///
-    ///   if_end:
-    ///     ...post-if instructions continue here...
+    /// 4-block (with else):
+    ///   entry: Branch(cond, if_body, if_else)
+    ///   if_body: ...true stmts... Jump(if_end)
+    ///   if_else: ...false stmts... Jump(if_end)
+    ///   if_end: ...continues...
     fn lower_if(
         &mut self,
         condition: &Option<Box<TypedStatement>>,
         body: &[TypedStatement],
+        else_body: &[TypedStatement],
         final_terminator: &mut Option<Terminator>,
     ) -> MorphResult<()> {
         let body_label = self.make_label("if_body");
@@ -379,28 +379,57 @@ impl Lowerer {
         // Lower the condition into the current block
         let cond_vreg = self.lower_condition(condition)?;
 
-        // Finish current block with Branch
-        self.finish_block(
-            Terminator::Branch {
-                cond: cond_vreg,
-                true_label: body_label.clone(),
-                false_label: end_label.clone(),
-            },
-            &body_label,
-        );
+        if else_body.is_empty() {
+            // 3-block CFG: no else branch
+            self.finish_block(
+                Terminator::Branch {
+                    cond: cond_vreg,
+                    true_label: body_label.clone(),
+                    false_label: end_label.clone(),
+                },
+                &body_label,
+            );
 
-        // Emit body statements into the body block
-        for s in body {
-            self.lower_statement(s, final_terminator)?;
+            for s in body {
+                self.lower_statement(s, final_terminator)?;
+            }
+
+            self.finish_block(
+                Terminator::Jump(end_label.clone()),
+                &end_label,
+            );
+        } else {
+            // 4-block CFG: with else branch
+            let else_label = self.make_label("if_else");
+
+            self.finish_block(
+                Terminator::Branch {
+                    cond: cond_vreg,
+                    true_label: body_label.clone(),
+                    false_label: else_label.clone(),
+                },
+                &body_label,
+            );
+
+            for s in body {
+                self.lower_statement(s, final_terminator)?;
+            }
+
+            self.finish_block(
+                Terminator::Jump(end_label.clone()),
+                &else_label,
+            );
+
+            for s in else_body {
+                self.lower_statement(s, final_terminator)?;
+            }
+
+            self.finish_block(
+                Terminator::Jump(end_label.clone()),
+                &end_label,
+            );
         }
 
-        // Finish body block with Jump to end
-        self.finish_block(
-            Terminator::Jump(end_label.clone()),
-            &end_label,
-        );
-
-        // Now current block is if_end — subsequent statements go here
         Ok(())
     }
 
@@ -1010,6 +1039,7 @@ mod tests {
                         result_type: JStarType::Boolean,
                     })),
                     body: vec![TypedStatement::Nop],
+                    else_body: vec![],
                 },
             ],
         };
@@ -1055,6 +1085,7 @@ mod tests {
                         result_type: JStarType::Boolean,
                     })),
                     body: vec![TypedStatement::Nop],
+                    else_body: vec![],
                 },
             ],
         };
@@ -1106,6 +1137,60 @@ mod tests {
         match &block.instructions[0] {
             IrInst::Compare { kind: CmpKind::Ne, .. } => {}
             other => panic!("Expected Compare(Ne), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lower_if_else_creates_4_blocks() {
+        // "if compare X 0 ... else ... end" should produce 4 basic blocks:
+        //   entry: Branch(cond, if_body, if_else)
+        //   if_body: ...true stmts, Jump(if_end)
+        //   if_else: ...false stmts, Jump(if_end)
+        //   if_end: terminator
+        let prog = TypedProgram {
+            statements: vec![
+                TypedStatement::ControlFlow {
+                    kind: FlowKind::Conditional,
+                    condition: Some(Box::new(TypedStatement::Execute {
+                        op: JStarInstruction::Compare,
+                        operands: vec![
+                            TypedOperand::Immediate(1, JStarType::Int),
+                            TypedOperand::Immediate(0, JStarType::Int),
+                        ],
+                        result_type: JStarType::Boolean,
+                    })),
+                    body: vec![TypedStatement::Nop],
+                    else_body: vec![TypedStatement::Nop],
+                },
+            ],
+        };
+        let ir = lower(&prog).unwrap();
+        let func = &ir.functions[0];
+        assert_eq!(func.blocks.len(), 4, "if/else should produce 4 basic blocks");
+
+        // Block 0 (entry): Branch to if_body or if_else
+        match &func.blocks[0].terminator {
+            Terminator::Branch { true_label, false_label, .. } => {
+                assert!(true_label.starts_with("if_body"));
+                assert!(false_label.starts_with("if_else"));
+            }
+            other => panic!("Expected Branch, got {:?}", other),
+        }
+
+        // Block 1 (if_body): Jump to if_end
+        match &func.blocks[1].terminator {
+            Terminator::Jump(label) => {
+                assert!(label.starts_with("if_end"));
+            }
+            other => panic!("Expected Jump, got {:?}", other),
+        }
+
+        // Block 2 (if_else): Jump to if_end
+        match &func.blocks[2].terminator {
+            Terminator::Jump(label) => {
+                assert!(label.starts_with("if_end"));
+            }
+            other => panic!("Expected Jump, got {:?}", other),
         }
     }
 

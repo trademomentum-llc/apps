@@ -138,6 +138,7 @@ pub enum FlowKind {
     Branch,      // "or"
     Conditional, // "if"
     Loop,        // "while"
+    Else,        // "else"
     Default,
 }
 
@@ -254,6 +255,10 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         // ensures they always resolve to ControlFlow regardless of POS.
         ("if",    TokenCategory::ControlFlow(FlowKind::Conditional)),
         ("while", TokenCategory::ControlFlow(FlowKind::Loop)),
+        ("else",  TokenCategory::ControlFlow(FlowKind::Else)),
+        // ── Boolean literals ──
+        ("true",  TokenCategory::Literal),
+        ("false", TokenCategory::Literal),
     ];
 
     let mut map = HashMap::with_capacity(entries.len());

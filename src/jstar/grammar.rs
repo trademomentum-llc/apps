@@ -43,13 +43,15 @@ pub enum JStarStatement {
     },
 
     /// Control flow block
-    /// e.g., "if compare counter 0 ... end"
+    /// e.g., "if compare counter 0 ... end" or "if ... else ... end"
     /// condition: the first statement (e.g. Compare) that produces a truth value.
-    /// body: the statements inside the block.
+    /// body: the statements inside the block (true branch for if/else).
+    /// else_body: the statements in the else branch (empty if no else).
     ControlFlow {
         kind: FlowKind,
         condition: Option<Box<JStarStatement>>,
         body: Vec<JStarStatement>,
+        else_body: Vec<JStarStatement>,
     },
 
     /// Return a value
@@ -191,6 +193,7 @@ pub enum TypedStatement {
         kind: FlowKind,
         condition: Option<Box<TypedStatement>>,
         body: Vec<TypedStatement>,
+        else_body: Vec<TypedStatement>,
     },
     Return {
         value: Option<TypedOperand>,
