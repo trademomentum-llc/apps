@@ -259,18 +259,22 @@ impl Parser {
                     if matches!(tok.category, TokenCategory::Data) {
                         let actual_name = tok.lemma.clone();
                         self.advance();
+                        let size = self.try_parse_array_size();
                         return Ok(JStarStatement::Declare {
                             scope,
                             name: actual_name,
                             ty,
+                            size,
                         });
                     }
                 }
 
+                let size = self.try_parse_array_size();
                 Ok(JStarStatement::Declare {
                     scope,
                     name,
                     ty,
+                    size,
                 })
             }
             _ => {
@@ -294,19 +298,23 @@ impl Parser {
             if matches!(tok.category, TokenCategory::Data) {
                 let name = tok.lemma.clone();
                 self.advance();
+                let size = self.try_parse_array_size();
                 return Ok(JStarStatement::Declare {
                     scope: ScopeKind::Local,
                     name,
                     ty,
+                    size,
                 });
             }
         }
 
         // Single noun — declare it with its own name
+        let size = self.try_parse_array_size();
         Ok(JStarStatement::Declare {
             scope: ScopeKind::Local,
             name: first_lemma,
             ty,
+            size,
         })
     }
 
@@ -528,6 +536,23 @@ impl Parser {
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────
+
+    /// Try to parse an array size literal after a declaration name.
+    /// "a buffer 256" → size = Some(256)
+    /// "a counter"    → size = None
+    fn try_parse_array_size(&mut self) -> Option<usize> {
+        if let Some(tok) = self.peek() {
+            if matches!(tok.category, TokenCategory::Literal) && tok.vector.pos == POS_LITERAL {
+                if let Ok(n) = tok.lemma.parse::<usize>() {
+                    if n > 0 {
+                        self.advance();
+                        return Some(n);
+                    }
+                }
+            }
+        }
+        None
+    }
 
     /// Check if the current token can start an operand.
     fn is_operand_start(&self) -> bool {

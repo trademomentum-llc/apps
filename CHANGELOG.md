@@ -6,6 +6,38 @@ Format: [Semantic Versioning](https://semver.org/). Each entry includes the date
 
 ---
 
+## [0.5.0] - 2026-03-10
+
+### Added
+- **Byte/char operations** -- `movzx` (0x0F 0xB6) for byte loads, 8-bit `mov` (0x88) for byte stores
+  - `is_byte_type()` check on Store/Load IR instructions dispatches to byte-width codegen
+  - Supports JStarType::Byte, JStarType::Boolean, JStarType::Char
+- **Fixed-size stack arrays** -- `a buffer 256` declares 256 bytes on the stack
+  - `store 42 into buffer at 0` / `load from buffer at 0` -- indexed read/write
+  - `StoreIndexed` / `LoadIndexed` IR instructions with SIB-encoded x86-64 addressing
+  - `size: Option<usize>` field on Declare AST nodes flows through parser -> typechecker -> IR -> codegen
+  - SIB byte encoding: scale=1 for bytes, scale=8 for qwords; index=rcx, base=rax
+- **Hex literals** -- `0x2A` preprocessed to decimal before morphlex (keeps NLP pipeline pure)
+  - `preprocess_hex_literals()` converts `0x[0-9a-fA-F]+` to decimal strings
+  - Case-insensitive: `0xFF`, `0XFF`, `0xAbCd` all work
+- **Multi-file compilation** -- `compile_multi()` concatenates source files before compilation
+  - CLI: `jstar compile --input main.jstr --include lib.jstr`
+- **ETXTBSY race fix** -- `run_binary()` retry-with-backoff (10ms increments) for kernel exec lock race
+- **10 new tests** (185 total) -- arrays, hex literals, hex preprocessing, byte operations
+
+### Changed
+- `src/jstar/grammar.rs` -- `Declare` gains `size: Option<usize>` field (both untyped and typed variants)
+- `src/jstar/parser.rs` -- `try_parse_array_size()` helper checks for literal after declaration name
+- `src/jstar/ir.rs` -- `StoreIndexed`/`LoadIndexed` instructions; `AddrMode` import; size-aware Alloca; indexed addressing detection in Store/Load lowering
+- `src/jstar/codegen.rs` -- Byte store/load instructions; indexed store/load with SIB encoding; `is_byte_type` dispatch on Store/Load; `LoadIndexed` pre-allocation
+- `src/jstar/mod.rs` -- `preprocess_hex_literals()`; `compile_multi()`; `run_binary()` ETXTBSY retry
+- `src/main.rs` -- `--include` flag on `jstar compile`
+
+### Milestone
+**Data structures and hex literals complete.** The language can manipulate byte arrays, use hex constants, and compile multi-file projects.
+
+---
+
 ## [0.2.5] - 2026-03-10
 
 ### Added

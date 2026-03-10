@@ -68,7 +68,7 @@ impl TypeChecker {
                 })
             }
 
-            JStarStatement::Declare { scope, name, ty } => {
+            JStarStatement::Declare { scope, name, ty, size } => {
                 // Register in symbol table
                 self.symbols.insert(
                     name.clone(),
@@ -83,6 +83,7 @@ impl TypeChecker {
                     scope: *scope,
                     name: name.clone(),
                     ty: *ty,
+                    size: *size,
                 })
             }
 
@@ -280,6 +281,7 @@ mod tests {
                 scope: ScopeKind::Local,
                 name: "counter".to_string(),
                 ty: JStarType::Int,
+                size: None,
             }],
         };
         let typed = check(&prog).unwrap();
@@ -316,6 +318,7 @@ mod tests {
                     scope: ScopeKind::Global,
                     name: "result".to_string(),
                     ty: JStarType::Long,
+                    size: None,
                 },
                 JStarStatement::Execute {
                     op: JStarInstruction::Load,

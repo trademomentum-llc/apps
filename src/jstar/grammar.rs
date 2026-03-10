@@ -36,10 +36,12 @@ pub enum JStarStatement {
 
     /// Variable/data declaration
     /// e.g., "a mutable integer counter"
+    /// e.g., "a buffer 256" (array of 256 bytes)
     Declare {
         scope: ScopeKind,
         name: String,
         ty: JStarType,
+        size: Option<usize>,
     },
 
     /// Control flow block
@@ -200,6 +202,7 @@ pub enum TypedStatement {
         scope: ScopeKind,
         name: String,
         ty: JStarType,
+        size: Option<usize>,
     },
     ControlFlow {
         kind: FlowKind,

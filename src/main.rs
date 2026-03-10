@@ -71,6 +71,10 @@ enum JStarAction {
         #[arg(short, long)]
         input: PathBuf,
 
+        /// Additional source files to include (concatenated before main input)
+        #[arg(long)]
+        include: Vec<PathBuf>,
+
         /// Output path for the binary
         #[arg(short, long, default_value = "a.out")]
         output: PathBuf,
@@ -171,10 +175,19 @@ fn main() {
         }
 
         Commands::Jstar { action } => match action {
-            JStarAction::Compile { input, output } => {
-                println!("Compiling {} -> {}", input.display(), output.display());
-                morphlex::jstar::compile_file(&input, &output)
-                    .expect("JStar compilation failed");
+            JStarAction::Compile { input, include, output } => {
+                if include.is_empty() {
+                    println!("Compiling {} -> {}", input.display(), output.display());
+                    morphlex::jstar::compile_file(&input, &output)
+                        .expect("JStar compilation failed");
+                } else {
+                    let mut sources: Vec<PathBuf> = include;
+                    sources.push(input.clone());
+                    let paths: Vec<&std::path::Path> = sources.iter().map(|p| p.as_path()).collect();
+                    println!("Compiling {} files -> {}", paths.len(), output.display());
+                    morphlex::jstar::compile_multi(&paths, &output)
+                        .expect("JStar compilation failed");
+                }
                 println!("Binary written to {}", output.display());
             }
             JStarAction::Parse { input, text } => {

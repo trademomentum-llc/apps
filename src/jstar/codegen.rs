@@ -14,6 +14,7 @@
 //! SSA form from IR makes this straightforward.
 
 use crate::types::MorphResult;
+use super::grammar::JStarType;
 use super::ir::*;
 
 // ─── x86-64 Register Encoding ───────────────────────────────────────────────
@@ -179,8 +180,12 @@ impl CodeGen {
                     | IrInst::AddressOf { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
-                    IrInst::Store { .. } | IrInst::Print { .. }
-                    | IrInst::PrintStr { .. } | IrInst::Nop => {}
+                    IrInst::LoadIndexed { dest, .. } => {
+                        self.alloc_stack_slot(*dest, 8);
+                    }
+                    IrInst::Store { .. } | IrInst::StoreIndexed { .. }
+                    | IrInst::Print { .. } | IrInst::PrintStr { .. }
+                    | IrInst::Nop => {}
                 }
             }
         }
@@ -306,12 +311,16 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
-            IrInst::Load { dest, addr, .. } => {
+            IrInst::Load { dest, addr, ty } => {
                 match addr {
                     // Stack-slot variable: load directly from [rbp+offset]
                     IrValue::Reg(vreg) => {
                         let src_offset = self.vreg_offset(*vreg);
-                        self.emit_load_from_rbp_offset(X86Reg::Rax, src_offset);
+                        if Self::is_byte_type(ty) {
+                            self.emit_load_byte_from_rbp_offset(X86Reg::Rax, src_offset);
+                        } else {
+                            self.emit_load_from_rbp_offset(X86Reg::Rax, src_offset);
+                        }
                     }
                     // Pointer/address: dereference via [rax]
                     _ => {
@@ -323,13 +332,17 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
-            IrInst::Store { addr, value, .. } => {
+            IrInst::Store { addr, value, ty } => {
                 self.emit_load_value(X86Reg::Rcx, value);
                 match addr {
                     // Stack-slot variable: store directly to [rbp+offset]
                     IrValue::Reg(vreg) => {
                         let offset = self.vreg_offset(*vreg);
-                        self.emit_store_reg_to_rbp_offset(X86Reg::Rcx, offset);
+                        if Self::is_byte_type(ty) {
+                            self.emit_store_byte_to_rbp_offset(X86Reg::Rcx, offset);
+                        } else {
+                            self.emit_store_reg_to_rbp_offset(X86Reg::Rcx, offset);
+                        }
                     }
                     // Pointer/address: store via [rax]
                     _ => {
@@ -391,6 +404,61 @@ impl CodeGen {
 
             IrInst::PrintStr { data_offset, len } => {
                 self.emit_print_string(*data_offset, *len);
+            }
+
+            IrInst::StoreIndexed { base, index, value, ty } => {
+                // lea rax, [rbp + base_offset] — get base address
+                let base_offset = self.vreg_offset(*base);
+                self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
+                // Load index into rcx
+                self.emit_load_value(X86Reg::Rcx, index);
+                // Load value into rdx
+                self.emit_load_value(X86Reg::Rdx, value);
+                // Store: [rax + rcx] = rdx (byte or qword)
+                if Self::is_byte_type(ty) {
+                    // mov byte [rax+rcx], dl
+                    // REX prefix (0x40 for byte reg access)
+                    self.text.push(0x40);
+                    self.text.push(0x88); // MOV r/m8, r8
+                    // ModR/M: [rax+rcx] with SIB = mod 00, reg=rdx(2), rm=100(SIB)
+                    self.text.push(0x14); // 00 010 100
+                    // SIB: scale=00(1), index=rcx(001), base=rax(000)
+                    self.text.push(0x08); // 00 001 000
+                } else {
+                    // mov qword [rax+rcx*8], rdx
+                    self.text.push(0x48); // REX.W
+                    self.text.push(0x89); // MOV r/m64, r64
+                    self.text.push(0x14); // ModR/M: [SIB], reg=rdx(2)
+                    // SIB: scale=11(8), index=rcx(001), base=rax(000)
+                    self.text.push(0xC8); // 11 001 000
+                }
+            }
+
+            IrInst::LoadIndexed { dest, base, index, ty } => {
+                // lea rax, [rbp + base_offset] — get base address
+                let base_offset = self.vreg_offset(*base);
+                self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
+                // Load index into rcx
+                self.emit_load_value(X86Reg::Rcx, index);
+                if Self::is_byte_type(ty) {
+                    // movzx rax, byte [rax+rcx]
+                    self.text.push(0x48); // REX.W
+                    self.text.push(0x0F);
+                    self.text.push(0xB6); // MOVZX r64, r/m8
+                    // ModR/M: [SIB], reg=rax(0)
+                    self.text.push(0x04); // 00 000 100
+                    // SIB: scale=00(1), index=rcx(001), base=rax(000)
+                    self.text.push(0x08); // 00 001 000
+                } else {
+                    // mov rax, [rax+rcx*8]
+                    self.text.push(0x48); // REX.W
+                    self.text.push(0x8B); // MOV r64, r/m64
+                    self.text.push(0x04); // ModR/M: [SIB], reg=rax(0)
+                    // SIB: scale=11(8), index=rcx(001), base=rax(000)
+                    self.text.push(0xC8); // 11 001 000
+                }
+                let offset = self.vreg_offset(*dest);
+                self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
             IrInst::Alloca { .. } => {
@@ -883,6 +951,35 @@ impl CodeGen {
     /// syscall
     fn emit_syscall(&mut self) {
         self.text.extend_from_slice(&[0x0F, 0x05]);
+    }
+
+    /// mov byte [rbp+offset], src_low8 — store a single byte to stack slot
+    fn emit_store_byte_to_rbp_offset(&mut self, src: X86Reg, offset: i32) {
+        // For r8-r15 we need REX prefix even for byte access
+        let mut rex: u8 = 0x40; // REX (no W — byte operation)
+        if src.needs_rex_ext() {
+            rex |= 0x04; // REX.R
+        }
+        // REX prefix is needed for SPL/BPL/SIL/DIL access or extended regs
+        // Always emit it to be safe with any register
+        self.text.push(rex);
+        self.text.push(0x88); // MOV r/m8, r8
+        self.text.push(Self::modrm_rbp_disp32(src));
+        self.text.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    /// movzx reg64, byte [rbp+offset] — load a single byte, zero-extend to 64 bits
+    fn emit_load_byte_from_rbp_offset(&mut self, dest: X86Reg, offset: i32) {
+        self.text.push(Self::rex_w(dest, X86Reg::Rbp));
+        self.text.push(0x0F);
+        self.text.push(0xB6); // MOVZX r64, r/m8
+        self.text.push(Self::modrm_rbp_disp32(dest));
+        self.text.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    /// Check if a JStarType should use byte-width operations.
+    fn is_byte_type(ty: &JStarType) -> bool {
+        matches!(ty, JStarType::Byte | JStarType::Boolean | JStarType::Char)
     }
 
     /// nop

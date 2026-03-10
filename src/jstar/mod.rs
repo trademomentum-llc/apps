@@ -86,7 +86,9 @@ pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVector>
                 });
             }
             SegKind::Code => {
-                let all_tokens = crate::lexer::lex(&seg.text)?;
+                // Pre-process hex literals: replace 0x[0-9a-fA-F]+ with decimal
+                let processed = preprocess_hex_literals(&seg.text);
+                let all_tokens = crate::lexer::lex(&processed)?;
 
                 let mut word_tokens: Vec<Token> = Vec::new();
                 let mut number_lexemes: Vec<String> = Vec::new();
@@ -149,6 +151,47 @@ pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVector>
     Ok((lemmas, vectors))
 }
 
+/// Pre-process hex literals in source text.
+/// Replaces `0x[0-9a-fA-F]+` with the equivalent decimal string
+/// so the morphlex lexer (which only handles decimal numbers) can parse them.
+fn preprocess_hex_literals(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '0' {
+            if chars.peek() == Some(&'x') || chars.peek() == Some(&'X') {
+                chars.next(); // consume 'x'/'X'
+                let mut hex = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_hexdigit() {
+                        hex.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if !hex.is_empty() {
+                    if let Ok(val) = i64::from_str_radix(&hex, 16) {
+                        result.push_str(&val.to_string());
+                    } else {
+                        // Overflow or invalid — emit as-is
+                        result.push_str("0x");
+                        result.push_str(&hex);
+                    }
+                } else {
+                    // Just "0x" with nothing after — emit literal
+                    result.push_str("0x");
+                }
+            } else {
+                result.push(ch);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 // ─── Compiler Pipeline ─────────────────────────────────────────────────────
 
 /// Compile a .jstr source file to a native ELF binary.
@@ -156,6 +199,19 @@ pub fn compile_file(source_path: &Path, output_path: &Path) -> MorphResult<()> {
     let source = std::fs::read_to_string(source_path)
         .map_err(MorphlexError::IoError)?;
     compile_source(&source, output_path)
+}
+
+/// Compile multiple .jstr source files into a single native ELF binary.
+/// Sources are concatenated in order before compilation.
+pub fn compile_multi(sources: &[&Path], output_path: &Path) -> MorphResult<()> {
+    let mut combined = String::new();
+    for path in sources {
+        let src = std::fs::read_to_string(path)
+            .map_err(MorphlexError::IoError)?;
+        combined.push_str(&src);
+        combined.push('\n');
+    }
+    compile_source(&combined, output_path)
 }
 
 /// Compile JStar source text to a native ELF binary.
@@ -245,16 +301,32 @@ mod tests {
 
     /// Helper: compile JStar source to a temp binary and run it, return exit code.
     /// Uses a hash of source + thread ID to generate a unique binary name per test.
+    /// Run a compiled binary, retrying on ETXTBSY (kernel race condition).
+    /// Linux can briefly hold an exec lock on a binary after a previous process exits.
+    #[cfg(target_os = "linux")]
+    fn run_binary(binary: &std::path::Path) -> std::process::Output {
+        for attempt in 0..5u64 {
+            match std::process::Command::new(binary).output() {
+                Ok(output) => return output,
+                Err(e) if e.raw_os_error() == Some(26) && attempt < 4 => {
+                    std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
+                }
+                Err(e) => panic!("Failed to run compiled binary: {:?}", e),
+            }
+        }
+        unreachable!()
+    }
+
     #[cfg(target_os = "linux")]
     fn compile_and_run(source: &str) -> i32 {
         let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join("jstar_test");
         std::fs::create_dir_all(&dir).unwrap();
         let binary = dir.join(format!("t_{}", n));
+        // Remove stale binary if it exists from a previous test run
+        let _ = std::fs::remove_file(&binary);
         compile_source(source, &binary).unwrap();
-        let output = std::process::Command::new(&binary)
-            .output()
-            .expect("Failed to run compiled binary");
+        let output = run_binary(&binary);
         let _ = std::fs::remove_file(&binary);
         output.status.code().unwrap_or(-1)
     }
@@ -286,10 +358,9 @@ mod tests {
         let dir = std::env::temp_dir().join("jstar_test");
         std::fs::create_dir_all(&dir).unwrap();
         let binary = dir.join(format!("tc_{}", n));
+        let _ = std::fs::remove_file(&binary);
         compile_source(source, &binary).unwrap();
-        let output = std::process::Command::new(&binary)
-            .output()
-            .expect("Failed to run compiled binary");
+        let output = run_binary(&binary);
         let _ = std::fs::remove_file(&binary);
         String::from_utf8_lossy(&output.stdout).to_string()
     }
@@ -781,5 +852,88 @@ mod tests {
         // Build a byte: shift 4 4 => 64, bitor it 2 => 66 ('B' ASCII)
         let exit = compile_and_run("shift 4 4\nbitor it 2\nreturn it");
         assert_eq!(exit, 66, "(4 << 4) | 2 = 66");
+    }
+
+    // ── v0.5.0: Data Structures ───────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_array_declare_and_store() {
+        // Declare a 256-byte buffer, store a byte at index 0, load it back
+        let exit = compile_and_run(
+            "a buffer 256\nstore 42 into buffer at 0\nload from buffer at 0\nreturn it"
+        );
+        assert_eq!(exit, 42, "array store/load at index 0 should return 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_array_multiple_indices() {
+        // Store different values at different indices, read back the second
+        let exit = compile_and_run(
+            "a buffer 256\nstore 10 into buffer at 0\nstore 20 into buffer at 1\nstore 30 into buffer at 2\nload from buffer at 1\nreturn it"
+        );
+        assert_eq!(exit, 20, "array load at index 1 should return 20");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_array_store_ascii() {
+        // Store ASCII 'A' (65) and read it back
+        let exit = compile_and_run(
+            "a buffer 256\nstore 65 into buffer at 0\nload from buffer at 0\nreturn it"
+        );
+        assert_eq!(exit, 65, "array store/load ASCII 'A' should return 65");
+    }
+
+    // ── v0.7.0: Hex literals ──────────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_hex_literal() {
+        // 0x2A = 42
+        let exit = compile_and_run("return 0x2A");
+        assert_eq!(exit, 42, "0x2A should equal 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_hex_literal_add() {
+        // 0x10 = 16, 0x0A = 10, 16 + 10 = 26
+        let exit = compile_and_run("add 0x10 0x0A\nreturn it");
+        assert_eq!(exit, 26, "0x10 + 0x0A should equal 26");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_hex_literal_store() {
+        // 0xFF = 255, but exit code is mod 256, so 0xFF -> 255
+        let exit = compile_and_run("a value\nstore 0xFF into value\nreturn value");
+        assert_eq!(exit, 255, "0xFF stored and returned should be 255");
+    }
+
+    #[test]
+    fn test_preprocess_hex_basic() {
+        assert_eq!(preprocess_hex_literals("0x2A"), "42");
+        assert_eq!(preprocess_hex_literals("0xFF"), "255");
+        assert_eq!(preprocess_hex_literals("0x10"), "16");
+    }
+
+    #[test]
+    fn test_preprocess_hex_in_context() {
+        assert_eq!(preprocess_hex_literals("return 0x2A"), "return 42");
+        assert_eq!(preprocess_hex_literals("add 0x10 0x0A"), "add 16 10");
+    }
+
+    #[test]
+    fn test_preprocess_hex_no_hex() {
+        assert_eq!(preprocess_hex_literals("return 42"), "return 42");
+        assert_eq!(preprocess_hex_literals("add 1 2"), "add 1 2");
+    }
+
+    #[test]
+    fn test_preprocess_hex_uppercase() {
+        assert_eq!(preprocess_hex_literals("0XFF"), "255");
+        assert_eq!(preprocess_hex_literals("0xAbCd"), "43981");
     }
 }

@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use crate::types::MorphResult;
 use super::grammar::*;
-use super::token_map::{JStarInstruction, FlowKind};
+use super::token_map::{JStarInstruction, FlowKind, AddrMode};
 
 // ─── IR Types ───────────────────────────────────────────────────────────────
 
@@ -132,6 +132,22 @@ pub enum IrInst {
     PrintStr {
         data_offset: usize,
         len: usize,
+    },
+
+    /// Store value to array at base + index: base[index] = value
+    StoreIndexed {
+        base: VReg,
+        index: IrValue,
+        value: IrValue,
+        ty: JStarType,
+    },
+
+    /// Load from array at base + index: dest = base[index]
+    LoadIndexed {
+        dest: VReg,
+        base: VReg,
+        index: IrValue,
+        ty: JStarType,
     },
 
     /// No-op (placeholder)
@@ -375,11 +391,12 @@ impl Lowerer {
                 self.last_result = Some(dest);
             }
 
-            TypedStatement::Declare { name, ty, .. } => {
+            TypedStatement::Declare { name, ty, size, .. } => {
                 let dest = self.alloc_vreg();
+                let alloc_size = size.unwrap_or_else(|| ty.size_bytes());
                 self.current_insts.push(IrInst::Alloca {
                     dest,
-                    size: ty.size_bytes(),
+                    size: alloc_size,
                     ty: *ty,
                 });
                 self.variables.insert(name.clone(), dest);
@@ -615,12 +632,13 @@ impl Lowerer {
                 Ok(insts)
             }
 
-            TypedStatement::Declare { name, ty, .. } => {
+            TypedStatement::Declare { name, ty, size, .. } => {
                 let dest = self.alloc_vreg();
+                let alloc_size = size.unwrap_or_else(|| ty.size_bytes());
                 self.variables.insert(name.clone(), dest);
                 Ok(vec![IrInst::Alloca {
                     dest,
-                    size: ty.size_bytes(),
+                    size: alloc_size,
                     ty: *ty,
                 }])
             }
@@ -759,21 +777,63 @@ impl Lowerer {
             // Memory
             JStarInstruction::Load => {
                 let addr = self.get_one_operand(operands)?;
-                insts.push(IrInst::Load {
-                    dest,
-                    addr,
-                    ty: result_type,
+
+                // Check for indexed addressing: "load from buffer at INDEX"
+                let index_operand = operands.get(1).and_then(|op| {
+                    if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = op {
+                        Some(target.as_ref())
+                    } else {
+                        None
+                    }
                 });
+
+                if let Some(idx_op) = index_operand {
+                    let idx = self.lower_operand(idx_op)?;
+                    if let IrValue::Reg(base_vreg) = addr {
+                        insts.push(IrInst::LoadIndexed {
+                            dest,
+                            base: base_vreg,
+                            index: idx,
+                            ty: result_type,
+                        });
+                    } else {
+                        insts.push(IrInst::Load { dest, addr, ty: result_type });
+                    }
+                } else {
+                    insts.push(IrInst::Load { dest, addr, ty: result_type });
+                }
             }
             JStarInstruction::Store => {
                 if operands.len() >= 2 {
                     let value = self.lower_operand(&operands[0])?;
                     let addr = self.lower_operand(&operands[1])?;
-                    insts.push(IrInst::Store {
-                        addr,
-                        value,
-                        ty: result_type,
+
+                    // Check for indexed addressing: "store X into buffer at INDEX"
+                    let index_operand = operands.get(2).and_then(|op| {
+                        if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = op {
+                            Some(target.as_ref())
+                        } else {
+                            None
+                        }
                     });
+
+                    if let Some(idx_op) = index_operand {
+                        let idx = self.lower_operand(idx_op)?;
+                        if let IrValue::Reg(base_vreg) = addr {
+                            insts.push(IrInst::StoreIndexed {
+                                base: base_vreg,
+                                index: idx,
+                                value,
+                                ty: result_type,
+                            });
+                        }
+                    } else {
+                        insts.push(IrInst::Store {
+                            addr,
+                            value,
+                            ty: result_type,
+                        });
+                    }
                 }
             }
             JStarInstruction::Move => {
@@ -1057,6 +1117,7 @@ mod tests {
                 scope: ScopeKind::Local,
                 name: "counter".to_string(),
                 ty: JStarType::Int,
+                size: None,
             }],
         };
         let ir = lower(&prog).unwrap();
@@ -1090,6 +1151,7 @@ mod tests {
                     scope: ScopeKind::Local,
                     name: "counter".to_string(),
                     ty: JStarType::Int,
+                    size: None,
                 },
                 TypedStatement::Execute {
                     op: JStarInstruction::Store,
