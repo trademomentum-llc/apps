@@ -1290,7 +1290,25 @@ mod tests {
 
         // Write input and close stdin (drop sends EOF)
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(input).expect("Failed to write to stdin");
+            if let Err(e) = stdin.write_all(input) {
+                drop(stdin);
+                // Child likely crashed; wait for it and report
+                let output = child.wait_with_output().unwrap();
+                let code = output.status.code();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let signal = {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        output.status.signal()
+                    }
+                    #[cfg(not(unix))]
+                    { None }
+                };
+                eprintln!("write_all failed: {} (child exit={:?}, signal={:?}, stderr={})",
+                    e, code, signal, stderr);
+                return (code, output.stdout, format!("write error: {}, signal: {:?}", e, signal));
+            }
         }
 
         // Wait with timeout

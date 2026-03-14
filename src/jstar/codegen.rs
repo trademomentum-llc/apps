@@ -217,10 +217,26 @@ impl CodeGen {
         self.stack_size = ((-self.next_stack_offset) as usize + 15) & !15;
 
         // Function prologue: push rbp; mov rbp, rsp; sub rsp, frame_size
+        // For large frames (>4096), probe each page to avoid skipping guard pages.
         self.emit_push_reg(X86Reg::Rbp);
         self.emit_mov_reg_reg(X86Reg::Rbp, X86Reg::Rsp);
         if self.stack_size > 0 {
-            self.emit_sub_reg_imm(X86Reg::Rsp, self.stack_size as i32);
+            if self.stack_size > 4096 {
+                // Probe each 4096-byte page by touching it
+                let mut remaining = self.stack_size;
+                while remaining > 4096 {
+                    self.emit_sub_reg_imm(X86Reg::Rsp, 4096);
+                    // test dword [rsp], 0 -- touch the page (read access)
+                    // Encoded as: mov rax, [rsp] = 0x48 0x8B 0x04 0x24
+                    self.text.extend_from_slice(&[0x48, 0x8B, 0x04, 0x24]);
+                    remaining -= 4096;
+                }
+                if remaining > 0 {
+                    self.emit_sub_reg_imm(X86Reg::Rsp, remaining as i32);
+                }
+            } else {
+                self.emit_sub_reg_imm(X86Reg::Rsp, self.stack_size as i32);
+            }
         }
 
         // For non-_start functions: store incoming arguments from registers to stack
