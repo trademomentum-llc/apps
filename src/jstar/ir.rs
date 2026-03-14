@@ -229,6 +229,64 @@ pub enum Terminator {
     Unreachable,
 }
 
+impl Terminator {
+    /// Every label this terminator depends on.
+    /// If any of these labels has no corresponding block, the CFG is broken.
+    pub fn referenced_labels(&self) -> Vec<&str> {
+        match self {
+            Terminator::Jump(label) => vec![label.as_str()],
+            Terminator::Branch { true_label, false_label, .. } => {
+                vec![true_label.as_str(), false_label.as_str()]
+            }
+            Terminator::Return(_)
+            | Terminator::Halt(_)
+            | Terminator::Unreachable => vec![],
+        }
+    }
+}
+
+impl IrFunction {
+    /// Validate that the CFG is structurally sound:
+    /// - No duplicate block labels
+    /// - Every label referenced in a terminator has a corresponding block
+    ///
+    /// This is the spine of the rope. Called immediately after lowering,
+    /// before the IR ever reaches codegen. If this passes, apply_fixups
+    /// can never encounter a missing label.
+    pub fn validate_cfg(&self) -> MorphResult<()> {
+        use std::collections::HashSet;
+        use crate::types::MorphlexError;
+
+        let mut seen = HashSet::new();
+        for block in &self.blocks {
+            if !seen.insert(&block.label) {
+                return Err(MorphlexError::CodegenError(format!(
+                    "function '{}': duplicate block label '{}'",
+                    self.name, block.label
+                )));
+            }
+        }
+
+        // Every referenced label must have a block
+        for block in &self.blocks {
+            for label in block.terminator.referenced_labels() {
+                if !seen.contains(&label.to_string()) {
+                    return Err(MorphlexError::CodegenError(format!(
+                        "function '{}': block '{}' references label '{}' \
+                         which has no block (known: {:?})",
+                        self.name,
+                        block.label,
+                        label,
+                        seen.iter().collect::<Vec<_>>()
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 // ─── Lowering: Typed AST → IR ───────────────────────────────────────────────
 
 /// Lower a typed program to IR.
@@ -440,12 +498,19 @@ impl Lowerer {
 
         let blocks = std::mem::take(&mut self.blocks);
 
-        Ok(IrFunction {
+        let func = IrFunction {
             name: name.to_string(),
             return_type: JStarType::Int,
             blocks,
             next_vreg: self.next_vreg,
-        })
+        };
+
+        // Self-validate: the CFG must be structurally sound before it
+        // ever reaches codegen. Every label referenced in a terminator
+        // must have a corresponding block. No exceptions.
+        func.validate_cfg()?;
+
+        Ok(func)
     }
 
     /// Lower a single statement, appending instructions to current_insts.
@@ -662,16 +727,26 @@ impl Lowerer {
             &body_label,
         );
 
+        // Save final_terminator — a return inside the while body should
+        // terminate the body block, not leak upward to enclosing scopes.
+        // Same pattern as lower_if (symmetric isolation).
+        let saved_term = final_terminator.take();
+
         // Emit body statements
         for s in body {
             self.lower_statement(s, final_terminator)?;
         }
 
-        // Finish body block with Jump back to cond (back-edge)
-        self.finish_block(
-            Terminator::Jump(cond_label.clone()),
-            &end_label,
-        );
+        // If the body contained a return, use it as the block terminator
+        // (the back-edge is unreachable after a return). Otherwise, jump
+        // back to the condition check (normal loop back-edge).
+        let body_term = final_terminator
+            .take()
+            .unwrap_or_else(|| Terminator::Jump(cond_label.clone()));
+        self.finish_block(body_term, &end_label);
+
+        // Restore the outer scope's terminator
+        *final_terminator = saved_term;
 
         // Now current block is while_end
         Ok(())

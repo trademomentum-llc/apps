@@ -282,6 +282,9 @@ pub enum MorphlexError {
     #[error("Crawler error: {0}")]
     CrawlError(String),
 
+    #[error("Codegen error: {0}")]
+    CodegenError(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }

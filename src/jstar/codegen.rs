@@ -13,7 +13,7 @@
 //! Register allocation: simple linear mapping from virtual registers.
 //! SSA form from IR makes this straightforward.
 
-use crate::types::MorphResult;
+use crate::types::{MorphResult, MorphlexError};
 use super::grammar::JStarType;
 use super::ir::*;
 
@@ -106,7 +106,7 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
     }
 
     // Resolve call fixups now that all function offsets are known
-    emitter.apply_call_fixups();
+    emitter.apply_call_fixups()?;
 
     Ok(MachineCode {
         text: emitter.text,
@@ -169,8 +169,15 @@ impl CodeGen {
     }
 
     /// Get the stack offset for a virtual register.
+    /// Panics with a diagnostic if the vreg was never allocated a stack slot.
     fn vreg_offset(&self, vreg: VReg) -> i32 {
-        *self.vreg_offsets.get(&vreg).unwrap_or(&0)
+        *self.vreg_offsets.get(&vreg).unwrap_or_else(|| {
+            panic!(
+                "codegen: vreg {} has no stack slot (allocated vregs: {:?})",
+                vreg,
+                self.vreg_offsets.keys().collect::<Vec<_>>()
+            )
+        })
     }
 
     fn emit_function(&mut self, func: &IrFunction) -> MorphResult<()> {
@@ -268,7 +275,7 @@ impl CodeGen {
         }
 
         // Resolve all fixups (forward jumps patched with actual offsets)
-        self.apply_fixups();
+        self.apply_fixups()?;
 
         Ok(())
     }
@@ -1048,9 +1055,20 @@ impl CodeGen {
     /// Each fixup is (patch_offset, target_label). The displacement is
     /// target_address - (patch_offset + 4), because the CPU reads IP
     /// past the displacement field before adding it.
-    fn apply_fixups(&mut self) {
+    ///
+    /// Returns an error if any target label was never emitted as a block.
+    /// Previously this defaulted to offset 0, silently corrupting the
+    /// function prologue.
+    fn apply_fixups(&mut self) -> MorphResult<()> {
         for (patch_offset, target_label) in &self.fixups {
-            let target = *self.label_offsets.get(target_label).unwrap_or(&0);
+            let target = *self.label_offsets.get(target_label).ok_or_else(|| {
+                MorphlexError::CodegenError(format!(
+                    "missing label '{}' at fixup offset {} (known labels: {:?})",
+                    target_label,
+                    patch_offset,
+                    self.label_offsets.keys().collect::<Vec<_>>()
+                ))
+            })?;
             let disp = (target as i32) - (*patch_offset as i32 + 4);
             let bytes = disp.to_le_bytes();
             self.text[*patch_offset] = bytes[0];
@@ -1059,12 +1077,23 @@ impl CodeGen {
             self.text[*patch_offset + 3] = bytes[3];
         }
         self.fixups.clear();
+        Ok(())
     }
 
     /// Resolve all call fixups after all functions have been emitted.
-    fn apply_call_fixups(&mut self) {
+    ///
+    /// Returns an error if any called function was never emitted.
+    fn apply_call_fixups(&mut self) -> MorphResult<()> {
         for (patch_offset, func_name) in &self.call_fixups {
-            let target = *self.function_offsets.get(func_name).unwrap_or(&0);
+            let target = *self.function_offsets.get(func_name).ok_or_else(|| {
+                MorphlexError::CodegenError(format!(
+                    "missing function '{}' at call fixup offset {} \
+                     (known functions: {:?})",
+                    func_name,
+                    patch_offset,
+                    self.function_offsets.keys().collect::<Vec<_>>()
+                ))
+            })?;
             let disp = (target as i32) - (*patch_offset as i32 + 4);
             let bytes = disp.to_le_bytes();
             self.text[*patch_offset] = bytes[0];
@@ -1073,6 +1102,7 @@ impl CodeGen {
             self.text[*patch_offset + 3] = bytes[3];
         }
         self.call_fixups.clear();
+        Ok(())
     }
 
     /// Emit x86-64 code to print a string from the .data section.
