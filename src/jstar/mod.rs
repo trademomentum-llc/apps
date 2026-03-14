@@ -1994,7 +1994,6 @@ return ok";
     /// Feed progressively more complex programs to the self-hosted compiler.
     /// These are gated behind #[ignore] until compiler.jstr implements each feature.
     #[test]
-    #[ignore] // compiler.jstr does not yet implement arithmetic + "it" pronoun
     #[cfg(target_os = "linux")]
     fn test_selfhost_arithmetic() {
         let (exit, _) = self_hosted_compile_and_run("add 20 22\nreturn it\n");
@@ -2002,7 +2001,6 @@ return ok";
     }
 
     #[test]
-    #[ignore] // compiler.jstr does not yet implement variable declarations
     #[cfg(target_os = "linux")]
     fn test_selfhost_variable() {
         let (exit, _) = self_hosted_compile_and_run(
@@ -2012,7 +2010,6 @@ return ok";
     }
 
     #[test]
-    #[ignore] // compiler.jstr does not yet implement control flow codegen
     #[cfg(target_os = "linux")]
     fn test_selfhost_if_else() {
         let (exit, _) = self_hosted_compile_and_run(
