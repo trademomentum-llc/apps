@@ -77,6 +77,10 @@ pub struct MachineCode {
     pub stack_size: usize,
     /// Virtual address of .data section (set by linker, stored for codegen)
     pub data_vaddr: u64,
+    /// Positions in .text where data-section offsets need patching by the linker.
+    /// Each entry is the byte offset in .text of an 8-byte value to which the
+    /// linker adds data_vaddr.
+    pub data_fixups: Vec<usize>,
 }
 
 /// Generate x86-64 machine code from IR.
@@ -85,6 +89,17 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
 
     // Copy string literal data to .data section
     emitter.data = program.string_data.clone();
+
+    // Append global data after string_data in .data section.
+    // Global offsets in global_vregs are relative to global_data start,
+    // so we adjust them by string_data.len() to get absolute .data offsets.
+    let global_base = emitter.data.len();
+    emitter.data.extend_from_slice(&program.global_data);
+
+    // Build the global_vregs map with adjusted offsets
+    for (&vreg, &offset) in &program.global_vregs {
+        emitter.global_vregs.insert(vreg, global_base + offset);
+    }
 
     for func in &program.functions {
         emitter.emit_function(func)?;
@@ -98,6 +113,7 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
         data: emitter.data,
         stack_size: emitter.stack_size,
         data_vaddr: 0, // set by linker
+        data_fixups: emitter.data_fixups,
     })
 }
 
@@ -118,6 +134,11 @@ struct CodeGen {
     call_fixups: Vec<(usize, String)>,
     /// Whether current function is _start (uses sys_exit) vs regular (uses ret)
     is_entry_point: bool,
+    /// Global vregs: vreg -> data_offset (absolute offset in .data section).
+    /// If a vreg is in this map, it lives in .data, not on the stack.
+    global_vregs: std::collections::HashMap<VReg, usize>,
+    /// Positions in .text where data-section offsets need linker patching.
+    data_fixups: Vec<usize>,
 }
 
 impl CodeGen {
@@ -133,6 +154,8 @@ impl CodeGen {
             function_offsets: std::collections::HashMap::new(),
             call_fixups: Vec::new(),
             is_entry_point: false,
+            global_vregs: std::collections::HashMap::new(),
+            data_fixups: Vec::new(),
         }
     }
 
@@ -313,6 +336,15 @@ impl CodeGen {
 
             IrInst::Load { dest, addr, ty } => {
                 match addr {
+                    IrValue::Reg(vreg) if self.is_global_vreg(*vreg) => {
+                        // Global variable: load from .data section
+                        let data_offset = self.global_vregs[vreg];
+                        if Self::is_byte_type(ty) {
+                            self.emit_load_byte_global(data_offset);
+                        } else {
+                            self.emit_load_global(data_offset);
+                        }
+                    }
                     // Stack-slot variable: load directly from [rbp+offset]
                     IrValue::Reg(vreg) => {
                         let src_offset = self.vreg_offset(*vreg);
@@ -335,6 +367,15 @@ impl CodeGen {
             IrInst::Store { addr, value, ty } => {
                 self.emit_load_value(X86Reg::Rcx, value);
                 match addr {
+                    IrValue::Reg(vreg) if self.is_global_vreg(*vreg) => {
+                        // Global variable: store to .data section
+                        let data_offset = self.global_vregs[vreg];
+                        if Self::is_byte_type(ty) {
+                            self.emit_store_byte_global(data_offset);
+                        } else {
+                            self.emit_store_global(data_offset);
+                        }
+                    }
                     // Stack-slot variable: store directly to [rbp+offset]
                     IrValue::Reg(vreg) => {
                         let offset = self.vreg_offset(*vreg);
@@ -407,9 +448,15 @@ impl CodeGen {
             }
 
             IrInst::StoreIndexed { base, index, value, ty } => {
-                // lea rax, [rbp + base_offset] — get base address
-                let base_offset = self.vreg_offset(*base);
-                self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
+                if self.is_global_vreg(*base) {
+                    // Global array: load base address from .data section
+                    let data_offset = self.global_vregs[base];
+                    self.emit_load_global_addr(data_offset);
+                } else {
+                    // Local array: lea rax, [rbp + base_offset]
+                    let base_offset = self.vreg_offset(*base);
+                    self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
+                }
                 // Load index into rcx
                 self.emit_load_value(X86Reg::Rcx, index);
                 // Load value into rdx
@@ -435,9 +482,15 @@ impl CodeGen {
             }
 
             IrInst::LoadIndexed { dest, base, index, ty } => {
-                // lea rax, [rbp + base_offset] — get base address
-                let base_offset = self.vreg_offset(*base);
-                self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
+                if self.is_global_vreg(*base) {
+                    // Global array: load base address from .data section
+                    let data_offset = self.global_vregs[base];
+                    self.emit_load_global_addr(data_offset);
+                } else {
+                    // Local array: lea rax, [rbp + base_offset]
+                    let base_offset = self.vreg_offset(*base);
+                    self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
+                }
                 // Load index into rcx
                 self.emit_load_value(X86Reg::Rcx, index);
                 if Self::is_byte_type(ty) {
@@ -466,9 +519,15 @@ impl CodeGen {
             }
 
             IrInst::AddressOf { dest, src } => {
-                // lea rax, [rbp+src_offset]; store rax → [rbp+dest_offset]
-                let src_offset = self.vreg_offset(*src);
-                self.emit_lea_rbp_offset(X86Reg::Rax, src_offset);
+                if self.is_global_vreg(*src) {
+                    // Global: the address IS the .data section address
+                    let data_offset = self.global_vregs[src];
+                    self.emit_load_global_addr(data_offset);
+                } else {
+                    // Local: lea rax, [rbp+src_offset]
+                    let src_offset = self.vreg_offset(*src);
+                    self.emit_lea_rbp_offset(X86Reg::Rax, src_offset);
+                }
                 let dest_offset = self.vreg_offset(*dest);
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, dest_offset);
             }
@@ -639,14 +698,127 @@ impl CodeGen {
                 self.emit_mov_reg_imm64(dest, *imm);
             }
             IrValue::Reg(vreg) => {
-                let offset = self.vreg_offset(*vreg);
-                self.emit_load_from_rbp_offset(dest, offset);
+                if let Some(&data_offset) = self.global_vregs.get(vreg) {
+                    // Global variable: load from .data section via absolute address.
+                    // Use dest register itself as temp (movabs dest, addr; mov dest, [dest]).
+                    // This avoids clobbering rax when loading into rcx/rdx/etc.
+                    self.emit_load_global_into(dest, data_offset);
+                } else {
+                    let offset = self.vreg_offset(*vreg);
+                    self.emit_load_from_rbp_offset(dest, offset);
+                }
             }
             IrValue::Named(_name) => {
                 // Named variables: for now, load 0 (resolved later with symbol table)
                 self.emit_mov_reg_imm64(dest, 0);
             }
         }
+    }
+
+    // ─── Global Variable Helpers ────────────────────────────────────────────
+
+    /// Check if a vreg is a global variable (lives in .data, not on stack).
+    fn is_global_vreg(&self, vreg: VReg) -> bool {
+        self.global_vregs.contains_key(&vreg)
+    }
+
+    /// Emit: movabs rax, <data_offset>  (absolute address placeholder)
+    ///       mov rax, [rax]              (dereference to load the value)
+    /// The linker adds data_vaddr to the placeholder.
+    fn emit_load_global(&mut self, data_offset: usize) {
+        // movabs rax, imm64 (address placeholder)
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
+        // mov rax, [rax]
+        self.text.push(0x48); // REX.W
+        self.text.push(0x8B); // MOV r64, r/m64
+        self.text.push(0x00); // ModRM: mod=00, reg=rax(000), rm=rax(000) = [rax]
+    }
+
+    /// Emit: movabs dest, <data_offset>  (absolute address into dest register)
+    ///       mov dest, [dest]             (dereference to load the value)
+    /// Uses the dest register as temp to avoid clobbering other registers.
+    fn emit_load_global_into(&mut self, dest: X86Reg, data_offset: usize) {
+        // movabs dest, imm64
+        let mut rex: u8 = 0x48; // REX.W
+        if dest.needs_rex_ext() {
+            rex |= 0x01; // REX.B
+        }
+        self.text.push(rex);
+        self.text.push(0xB8 + dest.encoding()); // movabs dest
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
+        // mov dest, [dest] — dereference
+        let mut rex2: u8 = 0x48; // REX.W
+        if dest.needs_rex_ext() {
+            rex2 |= 0x04; // REX.R (reg field)
+            rex2 |= 0x01; // REX.B (rm field)
+        }
+        self.text.push(rex2);
+        self.text.push(0x8B); // MOV r64, r/m64
+        // ModRM: mod=00, reg=dest, rm=dest = [dest]
+        self.text.push((dest.encoding() << 3) | dest.encoding());
+    }
+
+    /// Emit: movabs rax, <data_offset>  (absolute address placeholder)
+    ///       mov [rax], rcx              (store rcx to global)
+    /// Value to store must be in rcx before calling this.
+    fn emit_store_global(&mut self, data_offset: usize) {
+        // movabs rax, imm64 (address placeholder)
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
+        // mov [rax], rcx
+        self.text.push(0x48); // REX.W
+        self.text.push(0x89); // MOV r/m64, r64
+        self.text.push(0x08); // ModRM: mod=00, reg=rcx(001), rm=rax(000) = [rax]
+    }
+
+    /// Emit: movabs rax, <data_offset>  (absolute address placeholder)
+    ///       mov byte [rax], cl          (store byte to global)
+    fn emit_store_byte_global(&mut self, data_offset: usize) {
+        // movabs rax, imm64 (address placeholder)
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
+        // mov byte [rax], cl
+        self.text.push(0x88); // MOV r/m8, r8
+        self.text.push(0x08); // ModRM: mod=00, reg=cl(001), rm=rax(000) = [rax]
+    }
+
+    /// Emit: movabs rax, <data_offset>  (absolute address placeholder)
+    ///       movzx rax, byte [rax]       (load byte from global, zero-extend)
+    fn emit_load_byte_global(&mut self, data_offset: usize) {
+        // movabs rax, imm64 (address placeholder)
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
+        // movzx rax, byte [rax]
+        self.text.push(0x48); // REX.W
+        self.text.push(0x0F);
+        self.text.push(0xB6); // MOVZX r64, r/m8
+        self.text.push(0x00); // ModRM: mod=00, reg=rax(000), rm=rax(000) = [rax]
+    }
+
+    /// Emit: movabs rax, <data_offset>  (absolute address, no dereference)
+    /// Used for addressof and as base address for indexed access.
+    fn emit_load_global_addr(&mut self, data_offset: usize) {
+        // movabs rax, imm64 (address placeholder)
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
     }
 
     // ─── x86-64 Instruction Encoding ────────────────────────────────────────
@@ -891,18 +1063,18 @@ impl CodeGen {
     ///
     /// Uses sys_write(1, data_vaddr + offset, len).
     /// The absolute address is computed at link time — we emit a movabs
-    /// with a placeholder that the linker patches.
+    /// with a placeholder that the linker patches via data_fixups.
     fn emit_print_string(&mut self, data_offset: usize, len: usize) {
         // mov eax, 1 (sys_write)
         self.text.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
         // mov edi, 1 (fd = stdout)
         self.text.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]);
-        // mov rsi, <data_vaddr + offset> — placeholder, will be patched by linker
-        // For now, encode offset as 64-bit immediate; linker adds VADDR_BASE + headers
+        // mov rsi, <data_offset> — placeholder, linker adds data_vaddr
         self.text.push(0x48); // REX.W
         self.text.push(0xBE); // MOV rsi, imm64
-        // Store the data_offset as placeholder — linker will add base address
+        let fixup_pos = self.text.len();
         self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
         // mov edx, len
         self.text.push(0xBA); // MOV edx, imm32
         self.text.extend_from_slice(&(len as u32).to_le_bytes());
@@ -999,6 +1171,9 @@ mod tests {
     fn test_generate_empty_program() {
         let ir = IrProgram {
             string_data: vec![],
+            global_data: vec![],
+            global_vars: std::collections::HashMap::new(),
+            global_vregs: std::collections::HashMap::new(),
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
@@ -1018,6 +1193,9 @@ mod tests {
     fn test_generate_return_42() {
         let ir = IrProgram {
             string_data: vec![],
+            global_data: vec![],
+            global_vars: std::collections::HashMap::new(),
+            global_vregs: std::collections::HashMap::new(),
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
@@ -1047,6 +1225,9 @@ mod tests {
     fn test_codegen_determinism() {
         let ir = IrProgram {
             string_data: vec![],
+            global_data: vec![],
+            global_vars: std::collections::HashMap::new(),
+            global_vregs: std::collections::HashMap::new(),
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,

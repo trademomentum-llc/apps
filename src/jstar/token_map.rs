@@ -239,6 +239,8 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("shift",    TokenCategory::Operation(JStarInstruction::Shift)),
         ("allocate", TokenCategory::Operation(JStarInstruction::Allocate)),
         ("addressof", TokenCategory::Operation(JStarInstruction::AddressOf)),
+        // ── Scope (explicit keyword — not a determiner) ──
+        ("global",   TokenCategory::Scope(ScopeKind::Global)),
         // ── Data (type primitives and common nouns) ──
         ("integer",   TokenCategory::Data),
         ("int",       TokenCategory::Data),

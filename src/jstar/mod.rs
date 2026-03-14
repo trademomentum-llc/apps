@@ -1958,6 +1958,80 @@ return ok";
         assert_eq!(exit, 1, "mmap: should return a valid (not MAP_FAILED) pointer");
     }
 
+    // ─── Global variables ──────────────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_global_variable() {
+        let exit = compile_and_run_raw(
+            "global counter\nstore 42 into counter\nreturn counter"
+        );
+        assert_eq!(exit, 42, "global variable store/return");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_global_across_functions() {
+        let exit = compile_and_run_raw(
+            "global result\nstore 0 into result\ndefine setit\nstore 42 into result\nend\ncall setit\nreturn result"
+        );
+        assert_eq!(exit, 42, "function should modify global variable");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_global_byte_array() {
+        let exit = compile_and_run_raw(
+            "global byte buf 256\nstore 99 into buf at 0\nload from buf at 0\nreturn it"
+        );
+        assert_eq!(exit, 99, "global byte array indexed access");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_global_long_array() {
+        let exit = compile_and_run_raw(
+            "global long table 8\nstore 77 into table at 0\nload from table at 0\nreturn it"
+        );
+        assert_eq!(exit, 77, "global long array indexed access");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_global_and_local_mixed() {
+        let exit = compile_and_run_raw(
+            "global counter\na value\nstore 10 into counter\nstore 32 into value\nadd counter value\nreturn it"
+        );
+        assert_eq!(exit, 42, "global + local variable arithmetic");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_global_multiple() {
+        let exit = compile_and_run_raw(
+            "global counter\nglobal result\nstore 20 into counter\nstore 22 into result\nadd counter result\nreturn it"
+        );
+        assert_eq!(exit, 42, "two global variables added");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_global_in_loop() {
+        let exit = compile_and_run_raw(
+            "global counter\nstore 0 into counter\na value\nstore 10 into value\nwhile greater value 0\nadd counter 1\nstore it into counter\nsubtract value 1\nstore it into value\nend\nreturn counter"
+        );
+        assert_eq!(exit, 10, "global variable incremented in loop");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_global_function_reads() {
+        let exit = compile_and_run_raw(
+            "global counter\nstore 42 into counter\ndefine getit\nreturn counter\nend\ncall getit\nreturn it"
+        );
+        assert_eq!(exit, 42, "function should read global variable");
+    }
+
     // ─── v0.7.0 punch list: Multi-file compilation ──────────────────────────
 
     #[test]

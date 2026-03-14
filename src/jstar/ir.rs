@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use crate::types::MorphResult;
 use super::grammar::*;
-use super::token_map::{JStarInstruction, FlowKind, AddrMode};
+use super::token_map::{JStarInstruction, FlowKind, AddrMode, ScopeKind};
 
 // ─── IR Types ───────────────────────────────────────────────────────────────
 
@@ -24,6 +24,14 @@ pub struct IrProgram {
     pub functions: Vec<IrFunction>,
     /// Accumulated string literal data for the .data section.
     pub string_data: Vec<u8>,
+    /// Global variable data (zeroed on allocation, lives in .data section after string_data).
+    pub global_data: Vec<u8>,
+    /// Global variable registry: name -> (data_offset, size, type).
+    /// data_offset is relative to the start of global_data (not string_data).
+    pub global_vars: HashMap<String, (usize, usize, JStarType)>,
+    /// Map from vreg -> data_offset (relative to start of global_data).
+    /// Codegen uses this to distinguish global vregs from stack vregs.
+    pub global_vregs: HashMap<VReg, usize>,
 }
 
 /// An IR function — entry point with a body of basic blocks.
@@ -237,6 +245,11 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
         current_insts: Vec::new(),
         block_counter: 0,
         string_data: Vec::new(),
+        globals: HashMap::new(),
+        global_data_offset: 0,
+        global_data: Vec::new(),
+        global_vregs: HashMap::new(),
+        next_global_vreg: Lowerer::GLOBAL_VREG_BASE,
     };
 
     // Separate function definitions from top-level statements
@@ -245,26 +258,54 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
 
     for stmt in &program.statements {
         match stmt {
-            TypedStatement::FunctionDef { name, params, body, return_type } => {
-                // Lower each function definition
-                lowerer.reset();
-                // Declare parameters as variables
-                for (pname, pty) in params {
-                    let dest = lowerer.alloc_vreg();
-                    lowerer.current_insts.push(IrInst::Alloca {
-                        dest,
-                        size: pty.size_bytes(),
-                        ty: *pty,
-                    });
-                    lowerer.variables.insert(pname.clone(), dest);
-                }
-                let func = lowerer.lower_to_function(name, body)?;
-                functions.push(IrFunction {
-                    return_type: *return_type,
-                    ..func
-                });
+            TypedStatement::FunctionDef { .. } => {
+                // Collected below
             }
             other => top_level.push(other.clone()),
+        }
+    }
+
+    // Pre-scan: register global declarations so they are available in all functions.
+    // This must happen before lowering any function body.
+    for stmt in &top_level {
+        if let TypedStatement::Declare { scope, name, ty, size, .. } = stmt {
+            if *scope == ScopeKind::Global {
+                let alloc_size = match size {
+                    Some(n) => *n * ty.size_bytes(),
+                    None => ty.size_bytes().max(8),
+                };
+                let offset = lowerer.global_data_offset;
+                lowerer.global_data.resize(lowerer.global_data_offset + alloc_size, 0);
+                lowerer.global_data_offset += alloc_size;
+                lowerer.globals.insert(name.clone(), (offset, alloc_size, *ty));
+                let dest = lowerer.next_global_vreg;
+                lowerer.next_global_vreg += 1;
+                lowerer.global_vregs.insert(dest, offset);
+                lowerer.variables.insert(name.clone(), dest);
+            }
+        }
+    }
+
+    // Lower function definitions (globals are already registered)
+    for stmt in &program.statements {
+        if let TypedStatement::FunctionDef { name, params, body, return_type } = stmt {
+            // Lower each function definition
+            lowerer.reset();
+            // Declare parameters as variables
+            for (pname, pty) in params {
+                let dest = lowerer.alloc_vreg();
+                lowerer.current_insts.push(IrInst::Alloca {
+                    dest,
+                    size: pty.size_bytes(),
+                    ty: *pty,
+                });
+                lowerer.variables.insert(pname.clone(), dest);
+            }
+            let func = lowerer.lower_to_function(name, body)?;
+            functions.push(IrFunction {
+                return_type: *return_type,
+                ..func
+            });
         }
     }
 
@@ -276,6 +317,9 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
     Ok(IrProgram {
         functions,
         string_data: lowerer.string_data,
+        global_data: lowerer.global_data,
+        global_vars: lowerer.globals,
+        global_vregs: lowerer.global_vregs,
     })
 }
 
@@ -302,6 +346,18 @@ struct Lowerer {
     /// Accumulated string literal data for the .data section.
     /// Each entry is the raw bytes. Strings are appended with a newline.
     string_data: Vec<u8>,
+
+    // ─── Global variable state ──────────────────────────────────────────
+    /// Global variables: name -> (data_offset, size, type)
+    globals: HashMap<String, (usize, usize, JStarType)>,
+    /// Current offset within the global data section
+    global_data_offset: usize,
+    /// Global data bytes (zeroed on allocation)
+    global_data: Vec<u8>,
+    /// Map from vreg -> data_offset in global_data
+    global_vregs: HashMap<VReg, usize>,
+    /// Next global vreg ID (starts at GLOBAL_VREG_BASE)
+    next_global_vreg: VReg,
 }
 
 impl Lowerer {
@@ -320,8 +376,25 @@ impl Lowerer {
         self.current_label.clear();
         self.current_insts.clear();
         self.block_counter = 0;
-        // Note: string_data is NOT cleared — it accumulates across functions
+        // Note: string_data is NOT cleared — it accumulates across functions.
+        // Note: globals/global_data/global_data_offset/global_vregs are NOT cleared —
+        // they persist across functions so globals are accessible from any function.
+        // Re-register global variables into the new function's variable map.
+        // Global vregs use the high range (GLOBAL_VREG_BASE+) so they never
+        // conflict with locally-allocated vregs that start at 0.
+        for (name, &(offset, _, _)) in &self.globals {
+            for (&vreg, &off) in &self.global_vregs {
+                if off == offset {
+                    self.variables.insert(name.clone(), vreg);
+                    break;
+                }
+            }
+        }
     }
+
+    /// Base vreg ID for global variables. Local vregs start at 0 and grow up;
+    /// global vregs start here and grow up, so they never collide.
+    const GLOBAL_VREG_BASE: VReg = 0x4000_0000;
 
     /// Generate a unique block label with a prefix.
     fn make_label(&mut self, prefix: &str) -> String {
@@ -391,19 +464,40 @@ impl Lowerer {
                 self.last_result = Some(dest);
             }
 
-            TypedStatement::Declare { name, ty, size, .. } => {
-                let dest = self.alloc_vreg();
-                // size is element count; multiply by element size for byte allocation
-                let alloc_size = match size {
-                    Some(n) => *n * ty.size_bytes(),
-                    None => ty.size_bytes(),
-                };
-                self.current_insts.push(IrInst::Alloca {
-                    dest,
-                    size: alloc_size,
-                    ty: *ty,
-                });
-                self.variables.insert(name.clone(), dest);
+            TypedStatement::Declare { scope, name, ty, size, .. } => {
+                if *scope == ScopeKind::Global {
+                    // Global: already pre-registered in the lower() pre-scan.
+                    // Just ensure the variable mapping is current.
+                    if !self.globals.contains_key(name) {
+                        // Not yet registered (shouldn't happen with pre-scan, but safe fallback)
+                        let alloc_size = match size {
+                            Some(n) => *n * ty.size_bytes(),
+                            None => ty.size_bytes().max(8),
+                        };
+                        let offset = self.global_data_offset;
+                        self.global_data.resize(self.global_data_offset + alloc_size, 0);
+                        self.global_data_offset += alloc_size;
+                        self.globals.insert(name.clone(), (offset, alloc_size, *ty));
+                        let dest = self.next_global_vreg;
+                        self.next_global_vreg += 1;
+                        self.global_vregs.insert(dest, offset);
+                        self.variables.insert(name.clone(), dest);
+                    }
+                    // No Alloca emitted — data is pre-allocated in .data
+                } else {
+                    let dest = self.alloc_vreg();
+                    // size is element count; multiply by element size for byte allocation
+                    let alloc_size = match size {
+                        Some(n) => *n * ty.size_bytes(),
+                        None => ty.size_bytes(),
+                    };
+                    self.current_insts.push(IrInst::Alloca {
+                        dest,
+                        size: alloc_size,
+                        ty: *ty,
+                    });
+                    self.variables.insert(name.clone(), dest);
+                }
             }
 
             TypedStatement::Return { value, .. } => {
@@ -636,18 +730,37 @@ impl Lowerer {
                 Ok(insts)
             }
 
-            TypedStatement::Declare { name, ty, size, .. } => {
-                let dest = self.alloc_vreg();
-                let alloc_size = match size {
-                    Some(n) => *n * ty.size_bytes(),
-                    None => ty.size_bytes(),
-                };
-                self.variables.insert(name.clone(), dest);
-                Ok(vec![IrInst::Alloca {
-                    dest,
-                    size: alloc_size,
-                    ty: *ty,
-                }])
+            TypedStatement::Declare { scope, name, ty, size, .. } => {
+                if *scope == ScopeKind::Global {
+                    // Global: already pre-registered in the lower() pre-scan.
+                    if !self.globals.contains_key(name) {
+                        let alloc_size = match size {
+                            Some(n) => *n * ty.size_bytes(),
+                            None => ty.size_bytes().max(8),
+                        };
+                        let offset = self.global_data_offset;
+                        self.global_data.resize(self.global_data_offset + alloc_size, 0);
+                        self.global_data_offset += alloc_size;
+                        self.globals.insert(name.clone(), (offset, alloc_size, *ty));
+                        let dest = self.next_global_vreg;
+                        self.next_global_vreg += 1;
+                        self.global_vregs.insert(dest, offset);
+                        self.variables.insert(name.clone(), dest);
+                    }
+                    Ok(vec![]) // No Alloca emitted
+                } else {
+                    let dest = self.alloc_vreg();
+                    let alloc_size = match size {
+                        Some(n) => *n * ty.size_bytes(),
+                        None => ty.size_bytes(),
+                    };
+                    self.variables.insert(name.clone(), dest);
+                    Ok(vec![IrInst::Alloca {
+                        dest,
+                        size: alloc_size,
+                        ty: *ty,
+                    }])
+                }
             }
 
             TypedStatement::Nop => Ok(vec![IrInst::Nop]),
