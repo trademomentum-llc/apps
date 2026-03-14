@@ -127,6 +127,8 @@ pub enum JStarType {
     Char,
     /// Void (no value — for return type of procedures)
     Void,
+    /// Fixed-size array of 64-bit integers (stack-allocated)
+    Array(usize),
 }
 
 impl JStarType {
@@ -142,6 +144,7 @@ impl JStarType {
             JStarType::Double => 8,
             JStarType::Char => 2,
             JStarType::Void => 0,
+            JStarType::Array(n) => n * 8, // 64-bit elements
         }
     }
 

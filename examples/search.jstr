@@ -1,0 +1,72 @@
+# Morphlex JStar Search Engine
+# Indexes documents by hashing words, searches by hash match
+#
+# This program demonstrates the JStar language extensions:
+#   - Arrays (fixed-size stack-allocated integer arrays)
+#   - For loops (counted iteration)
+#   - Hash function (FNV-1a integer hash)
+#
+# Usage: compile with `morphlex jstar compile --input examples/search.jstr`
+
+# --- Index storage ---
+array 8 keys
+array 8 docs
+array 8 buf
+
+# --- Document 1: "he" (ASCII 104, 101) ---
+store 104 into buf at 0
+store 101 into buf at 1
+hash buf 2
+store it into keys at 0
+store 1 into docs at 0
+
+# --- Document 1: "wo" (ASCII 119, 111) ---
+store 119 into buf at 0
+store 111 into buf at 1
+hash buf 2
+store it into keys at 1
+store 1 into docs at 1
+
+# --- Document 2: "he" (same hash as doc 1 word 1) ---
+store 104 into buf at 0
+store 101 into buf at 1
+hash buf 2
+store it into keys at 2
+store 2 into docs at 2
+
+# --- Document 2: "js" (ASCII 106, 115) ---
+store 106 into buf at 0
+store 115 into buf at 1
+hash buf 2
+store it into keys at 3
+store 2 into docs at 3
+
+a count
+store 4 into count
+
+# --- Search for "he" ---
+print "searching for he:"
+
+store 104 into buf at 0
+store 101 into buf at 1
+hash buf 2
+a target
+store it into target
+
+a found
+store 0 into found
+
+for pos from 0 to 4
+  load keys at pos
+  equal it target
+  if compare it 0
+    load docs at pos
+    print "  doc:"
+    print it
+    add found 1
+    store it into found
+  end
+end
+
+print "total matches:"
+print found

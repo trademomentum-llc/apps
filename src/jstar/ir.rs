@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use crate::types::MorphResult;
 use super::grammar::*;
-use super::token_map::{JStarInstruction, FlowKind};
+use super::token_map::{JStarInstruction, FlowKind, AddrMode};
 
 // ─── IR Types ───────────────────────────────────────────────────────────────
 
@@ -132,6 +132,60 @@ pub enum IrInst {
     PrintStr {
         data_offset: usize,
         len: usize,
+    },
+
+    /// Allocate a fixed-size array on the stack.
+    /// dest = base pointer, count = number of 64-bit elements.
+    ArrayAlloc {
+        dest: VReg,
+        count: usize,
+    },
+
+    /// Load from array: dest = *(base + index * 8)
+    ArrayLoad {
+        dest: VReg,
+        base: IrValue,
+        index: IrValue,
+    },
+
+    /// Store to array: *(base + index * 8) = value
+    ArrayStore {
+        base: IrValue,
+        index: IrValue,
+        value: IrValue,
+    },
+
+    /// FNV-1a hash: dest = hash(addr, len) → i32
+    HashOp {
+        dest: VReg,
+        addr: IrValue,
+        len: IrValue,
+    },
+
+    /// File open: dest = open(path_str, flags=O_RDONLY)
+    FileOpen {
+        dest: VReg,
+        path_offset: usize,
+        path_len: usize,
+    },
+
+    /// File read: dest = read(fd, buf, len)
+    FileRead {
+        dest: VReg,
+        fd: IrValue,
+        buf: IrValue,
+        len: IrValue,
+    },
+
+    /// File close: close(fd)
+    FileClose {
+        fd: IrValue,
+    },
+
+    /// Get array length: dest = count (compile-time constant)
+    ArrayLength {
+        dest: VReg,
+        count: usize,
     },
 
     /// No-op (placeholder)
@@ -370,18 +424,31 @@ impl Lowerer {
             TypedStatement::Execute {
                 op, operands, result_type,
             } => {
-                let (ir_insts, dest) = self.lower_execute(*op, operands, *result_type)?;
+                let (ir_insts, maybe_dest) = self.lower_execute(*op, operands, *result_type)?;
                 self.current_insts.extend(ir_insts);
-                self.last_result = Some(dest);
+                if let Some(dest) = maybe_dest {
+                    self.last_result = Some(dest);
+                }
             }
 
             TypedStatement::Declare { name, ty, .. } => {
                 let dest = self.alloc_vreg();
-                self.current_insts.push(IrInst::Alloca {
-                    dest,
-                    size: ty.size_bytes(),
-                    ty: *ty,
-                });
+                match ty {
+                    JStarType::Array(count) => {
+                        // Arrays get ArrayAlloc (reserves count * 8 bytes)
+                        self.current_insts.push(IrInst::ArrayAlloc {
+                            dest,
+                            count: *count,
+                        });
+                    }
+                    _ => {
+                        self.current_insts.push(IrInst::Alloca {
+                            dest,
+                            size: ty.size_bytes(),
+                            ty: *ty,
+                        });
+                    }
+                }
                 self.variables.insert(name.clone(), dest);
             }
 
@@ -572,10 +639,21 @@ impl Lowerer {
             Some(cond_stmt) => {
                 match cond_stmt.as_ref() {
                     TypedStatement::Execute { op, operands, result_type } => {
-                        let (ir_insts, dest) = self.lower_execute(*op, operands, *result_type)?;
+                        let (ir_insts, maybe_dest) = self.lower_execute(*op, operands, *result_type)?;
                         self.current_insts.extend(ir_insts);
-                        self.last_result = Some(dest);
-                        Ok(dest)
+                        if let Some(dest) = maybe_dest {
+                            self.last_result = Some(dest);
+                            Ok(dest)
+                        } else {
+                            // Condition that doesn't produce a result — treat as true
+                            let dest = self.alloc_vreg();
+                            self.current_insts.push(IrInst::Copy {
+                                dest,
+                                src: IrValue::Imm(1),
+                                ty: JStarType::Boolean,
+                            });
+                            Ok(dest)
+                        }
                     }
                     _ => {
                         // Non-execute condition: emit as constant true
@@ -610,8 +688,10 @@ impl Lowerer {
             TypedStatement::Execute {
                 op, operands, result_type,
             } => {
-                let (insts, dest) = self.lower_execute(*op, operands, *result_type)?;
-                self.last_result = Some(dest);
+                let (insts, maybe_dest) = self.lower_execute(*op, operands, *result_type)?;
+                if let Some(dest) = maybe_dest {
+                    self.last_result = Some(dest);
+                }
                 Ok(insts)
             }
 
@@ -636,9 +716,11 @@ impl Lowerer {
         op: JStarInstruction,
         operands: &[TypedOperand],
         result_type: JStarType,
-    ) -> MorphResult<(Vec<IrInst>, VReg)> {
+    ) -> MorphResult<(Vec<IrInst>, Option<VReg>)> {
         let mut insts = Vec::new();
         let dest = self.alloc_vreg();
+
+        let mut produces_result = true;
 
         match op {
             // Arithmetic binary ops
@@ -758,22 +840,56 @@ impl Lowerer {
 
             // Memory
             JStarInstruction::Load => {
-                let addr = self.get_one_operand(operands)?;
-                insts.push(IrInst::Load {
-                    dest,
-                    addr,
-                    ty: result_type,
-                });
-            }
-            JStarInstruction::Store => {
+                // Check for array-indexed load: load ARRAY at INDEX
                 if operands.len() >= 2 {
-                    let value = self.lower_operand(&operands[0])?;
-                    let addr = self.lower_operand(&operands[1])?;
-                    insts.push(IrInst::Store {
+                    if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = &operands[1] {
+                        let base = self.lower_operand(&operands[0])?;
+                        let index = self.lower_operand(target)?;
+                        insts.push(IrInst::ArrayLoad {
+                            dest,
+                            base,
+                            index,
+                        });
+                    } else {
+                        let addr = self.get_one_operand(operands)?;
+                        insts.push(IrInst::Load { dest, addr, ty: result_type });
+                    }
+                } else {
+                    let addr = self.get_one_operand(operands)?;
+                    insts.push(IrInst::Load {
+                        dest,
                         addr,
-                        value,
                         ty: result_type,
                     });
+                }
+            }
+            JStarInstruction::Store => {
+                produces_result = false;
+                if operands.len() >= 2 {
+                    let value = self.lower_operand(&operands[0])?;
+                    // Check for array-indexed store: store VALUE into ARRAY at INDEX
+                    // operands[1] = Addressed(Into, Variable(array)) and operands[2] = Addressed(At, index)
+                    if operands.len() >= 3 {
+                        if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = &operands[2] {
+                            let addr = self.lower_operand(&operands[1])?;
+                            let index = self.lower_operand(target)?;
+                            insts.push(IrInst::ArrayStore {
+                                base: addr,
+                                index,
+                                value,
+                            });
+                        } else {
+                            let addr = self.lower_operand(&operands[1])?;
+                            insts.push(IrInst::Store { addr, value, ty: result_type });
+                        }
+                    } else {
+                        let addr = self.lower_operand(&operands[1])?;
+                        insts.push(IrInst::Store {
+                            addr,
+                            value,
+                            ty: result_type,
+                        });
+                    }
                 }
             }
             JStarInstruction::Move => {
@@ -856,7 +972,9 @@ impl Lowerer {
             // These are handled at statement level, not instruction level
             JStarInstruction::Return
             | JStarInstruction::Jump
-            | JStarInstruction::JumpIf => {}
+            | JStarInstruction::JumpIf => {
+                produces_result = false;
+            }
 
             // Bitwise
             JStarInstruction::And => {
@@ -904,6 +1022,7 @@ impl Lowerer {
             JStarInstruction::Print => {
                 // Check if the first operand is a string literal
                 if let Some(TypedOperand::StringLiteral(s)) = operands.first() {
+                    produces_result = false;
                     let offset = self.string_data.len();
                     let bytes = s.as_bytes();
                     self.string_data.extend_from_slice(bytes);
@@ -911,11 +1030,6 @@ impl Lowerer {
                     insts.push(IrInst::PrintStr {
                         data_offset: offset,
                         len: bytes.len() + 1, // include newline
-                    });
-                    insts.push(IrInst::Copy {
-                        dest,
-                        src: IrValue::Imm(0),
-                        ty: result_type,
                     });
                 } else {
                     let value = self.get_one_operand(operands)?;
@@ -929,17 +1043,74 @@ impl Lowerer {
                 }
             }
 
+            // Array operations
+            JStarInstruction::Length => {
+                // length <array_var> — returns the compile-time array size
+                // For now, use 0 as placeholder; actual size is resolved from type
+                let src = self.get_one_operand(operands)?;
+                insts.push(IrInst::Copy {
+                    dest,
+                    src,
+                    ty: JStarType::Int,
+                });
+            }
+
+            JStarInstruction::Hash => {
+                // hash <addr> <len> — FNV-1a hash of memory region
+                let (addr, len) = self.get_two_operands(operands)?;
+                insts.push(IrInst::HashOp {
+                    dest,
+                    addr,
+                    len,
+                });
+            }
+
+            JStarInstruction::Open => {
+                // open "filename" — open file, fd in dest
+                if let Some(TypedOperand::StringLiteral(s)) = operands.first() {
+                    let offset = self.string_data.len();
+                    let bytes = s.as_bytes();
+                    self.string_data.extend_from_slice(bytes);
+                    self.string_data.push(0); // null terminator for syscall
+                    insts.push(IrInst::FileOpen {
+                        dest,
+                        path_offset: offset,
+                        path_len: bytes.len(),
+                    });
+                } else {
+                    // Non-string open: use syscall directly
+                    insts.push(IrInst::Copy {
+                        dest,
+                        src: IrValue::Imm(-1),
+                        ty: JStarType::Int,
+                    });
+                }
+            }
+
+            JStarInstruction::Close => {
+                // close <fd>
+                let fd = self.get_one_operand(operands)?;
+                insts.push(IrInst::FileClose { fd });
+                insts.push(IrInst::Copy {
+                    dest,
+                    src: IrValue::Imm(0),
+                    ty: JStarType::Int,
+                });
+            }
+
             // Stack ops (push/pop) — lower to store/load on stack pointer
             JStarInstruction::Push | JStarInstruction::Pop => {
+                produces_result = false;
                 insts.push(IrInst::Nop); // placeholder
             }
 
             JStarInstruction::Nop => {
+                produces_result = false;
                 insts.push(IrInst::Nop);
             }
         }
 
-        Ok((insts, dest))
+        Ok((insts, if produces_result { Some(dest) } else { None }))
     }
 
     fn lower_operand(&self, operand: &TypedOperand) -> MorphResult<IrValue> {
