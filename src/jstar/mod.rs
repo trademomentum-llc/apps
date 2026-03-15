@@ -34,7 +34,23 @@ use std::path::Path;
 ///
 /// String literals (text between double quotes) are extracted before morphlex
 /// processing so they aren't decomposed into individual words.
-pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVector>)> {
+/// Returns (originals, lemmas, vectors).
+/// `originals` = raw lexeme forms (for variable names).
+/// `lemmas` = morphological lemmas (for keyword resolution).
+pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<String>, Vec<TokenVector>)> {
+    // Strip comments: lines starting with # (after optional whitespace)
+    let input: String = input
+        .lines()
+        .map(|line| {
+            if let Some(pos) = line.find('#') {
+                &line[..pos]
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
     // Phase 0: Extract string literals and split input into segments.
     // Each segment between strings gets processed by morphlex separately.
     // Strings are interleaved at their original positions.
@@ -70,12 +86,14 @@ pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVector>
     }
 
     // Process each segment
+    let mut originals = Vec::new();
     let mut lemmas = Vec::new();
     let mut vectors = Vec::new();
 
     for seg in &segments {
         match seg.kind {
             SegKind::Str => {
+                originals.push(seg.text.clone());
                 lemmas.push(seg.text.clone());
                 vectors.push(TokenVector {
                     id: crate::vectorizer::hash_to_i32(&seg.text),
@@ -126,6 +144,7 @@ pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVector>
                     match slot {
                         Slot::Word(i) => {
                             if *i < word_lemmas.len() {
+                                originals.push(word_tokens[*i].lexeme.to_lowercase());
                                 lemmas.push(word_lemmas[*i].clone());
                                 vectors.push(word_vectors[*i]);
                             }
@@ -133,6 +152,7 @@ pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVector>
                         Slot::Number(i) => {
                             let raw = &number_lexemes[*i];
                             let clean = raw.replace(',', "");
+                            originals.push(clean.clone());
                             lemmas.push(clean.clone());
                             vectors.push(TokenVector {
                                 id: crate::vectorizer::hash_to_i32(&raw.to_lowercase()),
@@ -148,7 +168,7 @@ pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVector>
         }
     }
 
-    Ok((lemmas, vectors))
+    Ok((originals, lemmas, vectors))
 }
 
 /// Pre-process hex literals in source text.
@@ -292,7 +312,7 @@ pub fn tokenize_jstar_raw(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVec
 /// Compile JStar source text to a native ELF binary using raw tokenization.
 pub fn compile_source_raw(source: &str, output_path: &Path) -> MorphResult<()> {
     let (lemmas, vectors) = tokenize_jstar_raw(source)?;
-    let ast = parser::parse(&lemmas, &vectors)?;
+    let ast = parser::parse(&lemmas, &lemmas, &vectors)?;
     let typed_ast = typechecker::check(&ast)?;
     let ir_program = ir::lower(&typed_ast)?;
     let machine_code = codegen::generate(&ir_program)?;
@@ -332,10 +352,10 @@ pub fn compile_multi(sources: &[&Path], output_path: &Path) -> MorphResult<()> {
 /// Compile JStar source text to a native ELF binary.
 pub fn compile_source(source: &str, output_path: &Path) -> MorphResult<()> {
     // Phase 0: Tokenize (morphlex + number literals)
-    let (lemmas, vectors) = tokenize_jstar(source)?;
+    let (originals, lemmas, vectors) = tokenize_jstar(source)?;
 
     // Phase 1-2: Parse token stream into JStar AST
-    let ast = parser::parse(&lemmas, &vectors)?;
+    let ast = parser::parse(&originals, &lemmas, &vectors)?;
 
     // Phase 3: Type check
     let typed_ast = typechecker::check(&ast)?;
@@ -365,7 +385,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_jstar_return_42() {
-        let (lemmas, vectors) = tokenize_jstar("return 42").unwrap();
+        let (_originals, lemmas, vectors) = tokenize_jstar("return 42").unwrap();
         assert_eq!(lemmas.len(), 2);
         assert_eq!(vectors.len(), 2);
 
@@ -381,7 +401,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_jstar_numbers_preserved() {
-        let (lemmas, vectors) = tokenize_jstar("add 3 to 5").unwrap();
+        let (_originals, lemmas, vectors) = tokenize_jstar("add 3 to 5").unwrap();
         // Should have 4 tokens: add, 3, to, 5
         assert_eq!(lemmas.len(), 4);
         assert_eq!(vectors.len(), 4);
@@ -391,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_jstar_only_numbers() {
-        let (lemmas, vectors) = tokenize_jstar("42").unwrap();
+        let (_originals, lemmas, vectors) = tokenize_jstar("42").unwrap();
         assert_eq!(lemmas.len(), 1);
         assert_eq!(lemmas[0], "42");
         assert_eq!(vectors[0].pos, POS_LITERAL);
@@ -399,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_jstar_empty() {
-        let (lemmas, vectors) = tokenize_jstar("").unwrap();
+        let (_originals, lemmas, vectors) = tokenize_jstar("").unwrap();
         assert!(lemmas.is_empty());
         assert!(vectors.is_empty());
     }
@@ -662,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_jstar_string_literal() {
-        let (lemmas, vectors) = tokenize_jstar("print \"hello world\"").unwrap();
+        let (_originals, lemmas, vectors) = tokenize_jstar("print \"hello world\"").unwrap();
         assert_eq!(lemmas.len(), 2);
         assert_eq!(lemmas[1], "hello world");
         assert_eq!(vectors[1].pos, token_map::POS_STRING);
@@ -670,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_jstar_mixed_strings_and_numbers() {
-        let (lemmas, vectors) = tokenize_jstar("print \"hi\" print 42").unwrap();
+        let (_originals, lemmas, vectors) = tokenize_jstar("print \"hi\" print 42").unwrap();
         assert_eq!(lemmas.len(), 4);
         assert_eq!(lemmas[1], "hi");
         assert_eq!(vectors[1].pos, token_map::POS_STRING);
@@ -679,10 +699,52 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn test_debug_print_string_binary() {
+        let source = "print \"hello\"";
+        let (_originals, lemmas, vectors) = tokenize_jstar(source).unwrap();
+        let ast = parser::parse(&_originals, &lemmas, &vectors).unwrap();
+        let typed = typechecker::check(&ast).unwrap();
+        let ir_prog = ir::lower(&typed).unwrap();
+        let mc = codegen::generate(&ir_prog).unwrap();
+
+        eprintln!("string_data: {:?}", String::from_utf8_lossy(&ir_prog.string_data));
+        eprintln!("mc.data: {:?}", String::from_utf8_lossy(&mc.data));
+        eprintln!("mc.text len: {}", mc.text.len());
+
+        // Check for 0x48 0xBE pattern in text
+        for i in 0..mc.text.len().saturating_sub(10) {
+            if mc.text[i] == 0x48 && mc.text[i+1] == 0xBE {
+                let val = u64::from_le_bytes(mc.text[i+2..i+10].try_into().unwrap());
+                eprintln!("mov rsi, imm64 at offset {}: value={:#x}", i, val);
+            }
+        }
+
+        // Compile to binary and inspect
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        source.hash(&mut hasher);
+        std::thread::current().id().hash(&mut hasher);
+        let dir = std::env::temp_dir().join("jstar_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(format!("test_dbg_{:016x}", hasher.finish()));
+        let _ = std::fs::remove_file(&binary);
+        compile_source(source, &binary).unwrap();
+
+        let output = std::process::Command::new(&binary).output().unwrap();
+        eprintln!("exit: {:?}, stdout: {:?}, stderr: {:?}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr));
+        assert!(!output.stdout.is_empty(), "Should produce stdout output");
+    }
+
+    #[test]
     fn test_print_string_ir() {
-        let (lemmas, vectors) = tokenize_jstar("print \"hello\"").unwrap();
+        let (_originals, lemmas, vectors) = tokenize_jstar("print \"hello\"").unwrap();
         assert_eq!(lemmas.len(), 2);
-        let ast = parser::parse(&lemmas, &vectors).unwrap();
+        let ast = parser::parse(&_originals, &lemmas, &vectors).unwrap();
         let typed = typechecker::check(&ast).unwrap();
         let ir = ir::lower(&typed).unwrap();
         assert!(!ir.string_data.is_empty(), "string_data should contain hello + newline");
@@ -712,9 +774,11 @@ mod tests {
 
     #[test]
     fn test_parse_function_def() {
+        let words: Vec<String> = ["define", "greet", "print", "42", "end"]
+            .iter().map(|s| s.to_string()).collect();
         let prog = crate::jstar::parser::parse(
-            &["define", "greet", "print", "42", "end"]
-                .iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            &words,
+            &words,
             &["define", "greet", "print", "42", "end"]
                 .iter().map(|w| {
                     crate::types::TokenVector {
@@ -919,6 +983,63 @@ mod tests {
         assert_eq!(exit, 11, "0xAB & 0x0F = 0x0B = 11");
     }
 
+    // ── Array tests ─────────────────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_array_store_load() {
+        // array 10 buffer; store 42 into buffer at 3; load buffer at 3; return it
+        let exit = compile_and_run(
+            "array 10 buffer\nstore 42 into buffer at 3\nload buffer at 3\nreturn it"
+        );
+        assert_eq!(exit, 42, "array store/load at index 3 should return 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_array_multiple_indices_v2() {
+        // Store at two indices, load second, verify (array keyword syntax)
+        let exit = compile_and_run(
+            "array 10 buffer\nstore 10 into buffer at 0\nstore 42 into buffer at 1\nload buffer at 1\nreturn it"
+        );
+        assert_eq!(exit, 42, "array store at 0 and 1, load at 1 should return 42");
+    }
+
+    // ── For loop tests ──────────────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_for_loop() {
+        // for i from 0 to 5: accumulate sum = 0+1+2+3+4 = 10
+        let exit = compile_and_run(
+            "a result\nstore 0 into result\nfor counter from 0 to 5\nadd result counter\nstore it into result\nend\nreturn result"
+        );
+        assert_eq!(exit, 10, "for 0..5 sum = 0+1+2+3+4 = 10");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_for_loop_print() {
+        // Print 0,1,2 using a for loop
+        let stdout = compile_and_capture(
+            "for counter from 0 to 3\nprint counter\nend"
+        );
+        assert_eq!(stdout, "0\n1\n2\n", "for loop print 0,1,2");
+    }
+
+    // ── Hash tests ──────────────────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_hash_nonzero() {
+        // Hash some data and verify the result is nonzero
+        // Note: hash operates on raw bytes in memory (array elements are 8 bytes each)
+        let exit = compile_and_run(
+            "array 4 data\nstore 72 into data at 0\nhash data 8\na result\nstore it into result\ncompare result 0\nreturn it"
+        );
+        assert_eq!(exit, 1, "hash of data should be nonzero");
+    }
+
     #[test]
     #[cfg(target_os = "linux")]
     fn test_e2e_build_byte() {
@@ -1039,7 +1160,7 @@ mod tests {
             "print 99",
         ];
         for source in &programs {
-            let (nlp_lemmas, nlp_vecs) = tokenize_jstar(source).unwrap();
+            let (_nlp_originals, nlp_lemmas, nlp_vecs) = tokenize_jstar(source).unwrap();
             let (raw_lemmas, raw_vecs) = tokenize_jstar_raw(source).unwrap();
             assert_eq!(nlp_lemmas.len(), raw_lemmas.len(),
                 "Token count mismatch for '{}'", source);

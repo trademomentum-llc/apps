@@ -18,6 +18,7 @@ pub mod semantics;
 pub mod types;
 pub mod vectorizer;
 pub mod crawler;
+pub mod search;
 pub mod jstar;
 pub mod jsh;
 
@@ -79,6 +80,15 @@ pub fn compile_to_database(
     database::write_database(&vectors, &lemmas, db_path)?;
     database::compact(db_path)?;
     database::encrypt(db_path, encrypted_path)
+}
+
+/// Build a search index and query it in one call (for testing/scripts).
+pub fn quick_search(
+    documents: &[(String, String)],
+    query: &str,
+) -> MorphResult<Vec<types::SearchResult>> {
+    let index = search::build_index(documents)?;
+    search::search(&index, query, &search::default_config())
 }
 
 /// Compile a word list (one word per line) into the database.

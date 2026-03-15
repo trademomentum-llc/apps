@@ -57,6 +57,14 @@ pub enum JStarInstruction {
 
     // I/O
     Print,
+    Open,
+    Close,
+
+    // Arrays
+    Length,
+
+    // Hashing
+    Hash,
 
     // Address
     AddressOf,
@@ -146,6 +154,7 @@ pub enum FlowKind {
     Branch,      // "or"
     Conditional, // "if"
     Loop,        // "while"
+    ForLoop,     // "for"
     Default,
 }
 
@@ -239,6 +248,10 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("shift",    TokenCategory::Operation(JStarInstruction::Shift)),
         ("allocate", TokenCategory::Operation(JStarInstruction::Allocate)),
         ("addressof", TokenCategory::Operation(JStarInstruction::AddressOf)),
+        ("open",     TokenCategory::Operation(JStarInstruction::Open)),
+        ("close",    TokenCategory::Operation(JStarInstruction::Close)),
+        ("length",   TokenCategory::Operation(JStarInstruction::Length)),
+        ("hash",     TokenCategory::Operation(JStarInstruction::Hash)),
         // ── Scope (explicit keyword — not a determiner) ──
         ("global",   TokenCategory::Scope(ScopeKind::Global)),
         // ── Data (type primitives and common nouns) ──
@@ -260,6 +273,7 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("result",    TokenCategory::Data),
         ("value",     TokenCategory::Data),
         ("buffer",    TokenCategory::Data),
+        ("array",     TokenCategory::Data),
         // ── Determiners (scope) ──
         // Morphlex may misclassify short function words — the hash table
         // catches them by i32 identity, same pattern as "return"/"integer".
@@ -282,6 +296,7 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("if",    TokenCategory::ControlFlow(FlowKind::Conditional)),
         ("else",  TokenCategory::ControlFlow(FlowKind::Branch)),
         ("while", TokenCategory::ControlFlow(FlowKind::Loop)),
+        ("for",   TokenCategory::ControlFlow(FlowKind::ForLoop)),
         // ── Function definition ──
         ("define",   TokenCategory::FunctionDef),
         ("function", TokenCategory::FunctionDef),
@@ -366,6 +381,14 @@ fn resolve_verb(lemma: &str) -> JStarInstruction {
 
         // I/O
         "print" | "show" | "display" | "output" => JStarInstruction::Print,
+        "open" => JStarInstruction::Open,
+        "close" | "shut" => JStarInstruction::Close,
+
+        // Arrays
+        "length" | "size" | "count" => JStarInstruction::Length,
+
+        // Hashing
+        "hash" | "digest" => JStarInstruction::Hash,
 
         // System
         "halt" | "stop" | "exit" | "quit" | "end" | "terminate" => JStarInstruction::Halt,

@@ -49,3 +49,6 @@ crawl_data/
 *.bin
 *.out
 a.out
+
+# Deep agent config — not part of this project
+agent.py

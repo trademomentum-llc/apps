@@ -252,6 +252,67 @@ pub enum RecipeTransform {
     Chain(Vec<RecipeTransform>),
 }
 
+// ─── Search Engine Types ────────────────────────────────────────────────────
+
+/// Unique document identifier — BLAKE3 hash of content truncated to i32.
+pub type DocId = i32;
+
+/// Word position within a document (0-based index).
+pub type WordPos = u32;
+
+/// A single hit in the inverted index: where a token was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DocHit {
+    pub doc_id: DocId,
+    pub position: WordPos,
+    pub pos: i8,
+    pub role: i8,
+    pub morph: i16,
+    pub id: i32, // exact lexeme hash (for exact-match bonus)
+}
+
+/// How query terms combine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryMode {
+    /// All query terms must appear (intersection)
+    All,
+    /// Any query term may appear (union)
+    Any,
+}
+
+/// Filter constraints on search results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchFilter {
+    pub pos: Option<i8>,
+    pub role: Option<i8>,
+    pub morph_mask: Option<i16>,
+}
+
+/// Configuration for a search query.
+#[derive(Debug, Clone)]
+pub struct SearchConfig {
+    pub mode: QueryMode,
+    pub filter: SearchFilter,
+    pub max_results: usize,
+}
+
+/// A single document's search result with integer score.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResult {
+    pub doc_id: DocId,
+    pub score: i32,
+    pub matched_positions: Vec<WordPos>,
+    pub matched_lemmas: Vec<i32>,
+}
+
+/// Metadata stored for each indexed document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocMeta {
+    pub doc_id: DocId,
+    pub word_count: u32,
+    pub title: String,
+}
+
 // ─── Error Types ─────────────────────────────────────────────────────────────
 
 /// Monadic error type — all pipeline errors flow through this.
@@ -284,6 +345,12 @@ pub enum MorphlexError {
 
     #[error("Codegen error: {0}")]
     CodegenError(String),
+
+    #[error("Search error: {0}")]
+    SearchError(String),
+
+    #[error("Index error: {0}")]
+    IndexError(String),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),

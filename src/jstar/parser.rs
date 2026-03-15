@@ -20,6 +20,9 @@ use super::token_map::*;
 /// A positioned token in the parse stream.
 #[derive(Debug, Clone)]
 struct ParseToken {
+    /// Original lexeme form (for variable names).
+    original: String,
+    /// Morphological lemma (for keyword resolution).
     lemma: String,
     vector: TokenVector,
     category: TokenCategory,
@@ -38,13 +41,15 @@ struct Parser {
 /// original lexemes needed. BLAKE3("return") resolves to Return regardless
 /// of what morphology does to the lemma.
 pub fn parse(
+    originals: &[String],
     lemmas: &[String],
     vectors: &[TokenVector],
 ) -> MorphResult<JStarProgram> {
-    let tokens: Vec<ParseToken> = lemmas
+    let tokens: Vec<ParseToken> = originals
         .iter()
-        .zip(vectors.iter())
-        .map(|(lemma, tv)| ParseToken {
+        .zip(lemmas.iter().zip(vectors.iter()))
+        .map(|(orig, (lemma, tv))| ParseToken {
+            original: orig.clone(),
             lemma: lemma.clone(),
             vector: *tv,
             category: resolve(tv, lemma),
@@ -82,6 +87,9 @@ impl Parser {
             TokenCategory::Operation(instr) => {
                 let instr = *instr;
                 self.parse_execute(instr)
+            }
+            TokenCategory::ControlFlow(FlowKind::ForLoop) => {
+                self.parse_for_loop()
             }
             TokenCategory::ControlFlow(kind) => {
                 let kind = *kind;
@@ -125,7 +133,7 @@ impl Parser {
             let mut operands = Vec::new();
             if let Some(tok) = self.peek() {
                 // Take the next token's lemma as the function name
-                let name = tok.lemma.clone();
+                let name = tok.original.clone();
                 self.advance();
                 operands.push(JStarOperand::Variable {
                     name,
@@ -140,9 +148,21 @@ impl Parser {
             return Ok(JStarStatement::Execute { op, operands });
         }
 
-        // Collect operands until we hit another statement-starting token or end
+        // Collect operands. Stop when we hit a non-operand token.
+        // After an Addressed operand (into/from/at), only continue if the
+        // next token is also an addressing preposition (e.g. "store X into Y at Z").
+        // This prevents bare nouns from the next statement being consumed.
         let mut operands = Vec::new();
         while !self.is_at_end() && self.is_operand_start() {
+            let prev_was_addressed = operands.last().map_or(false, |op| {
+                matches!(op, JStarOperand::Addressed { .. })
+            });
+            // After an Addressed operand, only continue if next is also Addressing
+            if prev_was_addressed {
+                if !matches!(self.peek().map(|t| &t.category), Some(TokenCategory::Addressing(_))) {
+                    break;
+                }
+            }
             operands.push(self.parse_operand()?);
         }
 
@@ -246,8 +266,10 @@ impl Parser {
         // Expect a noun (data reference = name)
         match self.peek().map(|t| t.category.clone()) {
             Some(TokenCategory::Data) => {
-                let name = self.peek().unwrap().lemma.clone();
-                let mut ty = JStarType::from_noun(&name);
+                let tok = self.peek().unwrap();
+                let lemma = tok.lemma.clone();
+                let original = tok.original.clone();
+                let mut ty = JStarType::from_noun(&lemma);
                 for m in &modifiers {
                     ty = ty.apply_modifier(*m);
                 }
@@ -257,7 +279,7 @@ impl Parser {
                 // e.g., "the unsigned integer counter" → type=Int, name="counter"
                 if let Some(tok) = self.peek() {
                     if matches!(tok.category, TokenCategory::Data) {
-                        let actual_name = tok.lemma.clone();
+                        let actual_name = tok.original.clone();
                         self.advance();
                         let size = self.try_parse_array_size();
                         return Ok(JStarStatement::Declare {
@@ -272,7 +294,7 @@ impl Parser {
                 let size = self.try_parse_array_size();
                 Ok(JStarStatement::Declare {
                     scope,
-                    name,
+                    name: original,
                     ty,
                     size,
                 })
@@ -288,15 +310,52 @@ impl Parser {
 
     /// Parse a declaration starting directly with a noun.
     /// "integer counter" → Declare { Local, counter, Int }
+    /// "array 100 buffer" → Declare { Local, buffer, Array(100) }
     fn parse_declaration_from_noun(&mut self) -> MorphResult<JStarStatement> {
         let first_lemma = self.peek().unwrap().lemma.clone();
-        let ty = JStarType::from_noun(&first_lemma);
+        let first_original = self.peek().unwrap().original.clone();
         self.advance();
+
+        // Special case: "array <size> <name>"
+        if first_lemma == "array" {
+            // Next token should be a literal (array size)
+            let size = if let Some(tok) = self.peek() {
+                if matches!(tok.category, TokenCategory::Literal) {
+                    let s = tok.lemma.parse::<usize>().unwrap_or(0);
+                    self.advance();
+                    s
+                } else {
+                    256 // default size
+                }
+            } else {
+                256
+            };
+
+            // Next token is the array name — use original lexeme
+            let name = if let Some(tok) = self.peek() {
+                let n = tok.original.clone();
+                self.advance();
+                n
+            } else {
+                return Err(MorphlexError::AstError(
+                    "Expected array name after size".to_string(),
+                ));
+            };
+
+            return Ok(JStarStatement::Declare {
+                scope: ScopeKind::Local,
+                name,
+                ty: JStarType::Array(size),
+                size: Some(size),
+            });
+        }
+
+        let ty = JStarType::from_noun(&first_lemma);
 
         // Check for a second noun (the variable name)
         if let Some(tok) = self.peek() {
             if matches!(tok.category, TokenCategory::Data) {
-                let name = tok.lemma.clone();
+                let name = tok.original.clone();
                 self.advance();
                 let size = self.try_parse_array_size();
                 return Ok(JStarStatement::Declare {
@@ -312,7 +371,7 @@ impl Parser {
         let size = self.try_parse_array_size();
         Ok(JStarStatement::Declare {
             scope: ScopeKind::Local,
-            name: first_lemma,
+            name: first_original,
             ty,
             size,
         })
@@ -361,7 +420,7 @@ impl Parser {
                 }
                 if let Some(tok) = self.peek() {
                     if matches!(tok.category, TokenCategory::Data) {
-                        let name = tok.lemma.clone();
+                        let name = tok.original.clone();
                         self.advance();
                         return Ok(JStarOperand::Variable {
                             name,
@@ -377,7 +436,7 @@ impl Parser {
 
             // Bare noun
             TokenCategory::Data => {
-                let name = current.lemma.clone();
+                let name = current.original.clone();
                 self.advance();
                 Ok(JStarOperand::Variable {
                     name,
@@ -412,7 +471,7 @@ impl Parser {
 
             // Type modifier without a preceding scope — treat as part of operand
             TokenCategory::TypeModifier(m) => {
-                let first_lemma = current.lemma.clone();
+                let first_lemma = current.original.clone();
                 let mut modifiers = vec![*m];
                 self.advance();
                 while let Some(tok) = self.peek() {
@@ -426,7 +485,7 @@ impl Parser {
                 }
                 if let Some(tok) = self.peek() {
                     if matches!(tok.category, TokenCategory::Data) {
-                        let name = tok.lemma.clone();
+                        let name = tok.original.clone();
                         self.advance();
                         return Ok(JStarOperand::Variable {
                             name,
@@ -470,7 +529,7 @@ impl Parser {
         // Function name — next token must be a data/noun token
         let name = match self.peek() {
             Some(tok) => {
-                let n = tok.lemma.clone();
+                let n = tok.original.clone();
                 self.advance();
                 n
             }
@@ -501,7 +560,7 @@ impl Parser {
                                 | TokenCategory::ControlFlow(_)
                                 | TokenCategory::FunctionDef
                             ) {
-                                let param_name = name_tok.lemma.clone();
+                                let param_name = name_tok.original.clone();
                                 self.advance();
                                 params.push((param_name, ty));
                                 continue;
@@ -539,6 +598,178 @@ impl Parser {
         })
     }
 
+    /// Parse a for loop: "for <var> from <start> to <end> ... end"
+    /// Desugars to: declare var, store start, while (less var end) { body; add var 1; store it into var }
+    fn parse_for_loop(&mut self) -> MorphResult<JStarStatement> {
+        self.advance(); // consume "for"
+
+        // Variable name — next token (accept any category as a name)
+        let var_name = match self.peek() {
+            Some(tok) => {
+                let n = tok.original.clone();
+                self.advance();
+                n
+            }
+            None => {
+                return Err(MorphlexError::AstError(
+                    "Expected variable name after 'for'".to_string(),
+                ));
+            }
+        };
+
+        // "from" — skip the addressing token
+        if let Some(tok) = self.peek() {
+            if matches!(tok.category, TokenCategory::Addressing(_)) {
+                self.advance();
+            }
+        }
+
+        // Start value
+        let start_val = if let Some(tok) = self.peek() {
+            if matches!(tok.category, TokenCategory::Literal) {
+                let v = tok.lemma.parse::<i64>().unwrap_or(0);
+                self.advance();
+                v
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        // "to" — skip the addressing token
+        if let Some(tok) = self.peek() {
+            if matches!(tok.category, TokenCategory::Addressing(_)) {
+                self.advance();
+            }
+        }
+
+        // End value
+        let end_val = if let Some(tok) = self.peek() {
+            if matches!(tok.category, TokenCategory::Literal) {
+                let v = tok.lemma.parse::<i64>().unwrap_or(0);
+                self.advance();
+                v
+            } else if matches!(tok.category, TokenCategory::Data | TokenCategory::Register(_)) {
+                // Variable or register as end value — wrap as operand
+                let v = tok.original.clone();
+                self.advance();
+                // Return -1 as sentinel; we will handle variable end values
+                // by storing the name and using it below
+                // For now, only support literal end values
+                return Err(MorphlexError::AstError(format!(
+                    "For loop end value must be a literal, got '{}'", v
+                )));
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        // Parse body until "end"
+        let mut body = Vec::new();
+        while !self.is_at_end() {
+            if let Some(tok) = self.peek() {
+                if matches!(tok.category, TokenCategory::Operation(JStarInstruction::Halt)) {
+                    self.advance(); // consume "end"
+                    break;
+                }
+            }
+            match self.parse_statement() {
+                Ok(stmt) => body.push(stmt),
+                Err(_) => { self.advance(); }
+            }
+        }
+
+        // Desugar: for var from S to E { body }
+        // =>
+        //   declare var
+        //   store S into var
+        //   while (less var E)
+        //     body...
+        //     add var 1
+        //     store it into var
+        //   end
+        let declare = JStarStatement::Declare {
+            scope: ScopeKind::Local,
+            name: var_name.clone(),
+            ty: JStarType::Int,
+            size: None,
+        };
+
+        let store_init = JStarStatement::Execute {
+            op: JStarInstruction::Store,
+            operands: vec![
+                JStarOperand::Immediate(start_val),
+                JStarOperand::Addressed {
+                    mode: AddrMode::Into,
+                    target: Box::new(JStarOperand::Variable {
+                        name: var_name.clone(),
+                        scope: ScopeKind::Local,
+                        modifiers: vec![],
+                    }),
+                },
+            ],
+        };
+
+        // Build the while condition: less var end_val
+        let condition = JStarStatement::Execute {
+            op: JStarInstruction::Less,
+            operands: vec![
+                JStarOperand::Variable {
+                    name: var_name.clone(),
+                    scope: ScopeKind::Local,
+                    modifiers: vec![],
+                },
+                JStarOperand::Immediate(end_val),
+            ],
+        };
+
+        // Append increment to body: add var 1; store it into var
+        let mut while_body = body;
+        while_body.push(JStarStatement::Execute {
+            op: JStarInstruction::Add,
+            operands: vec![
+                JStarOperand::Variable {
+                    name: var_name.clone(),
+                    scope: ScopeKind::Local,
+                    modifiers: vec![],
+                },
+                JStarOperand::Immediate(1),
+            ],
+        });
+        while_body.push(JStarStatement::Execute {
+            op: JStarInstruction::Store,
+            operands: vec![
+                JStarOperand::Register(RegAlias::Accumulator),
+                JStarOperand::Addressed {
+                    mode: AddrMode::Into,
+                    target: Box::new(JStarOperand::Variable {
+                        name: var_name.clone(),
+                        scope: ScopeKind::Local,
+                        modifiers: vec![],
+                    }),
+                },
+            ],
+        });
+
+        let while_loop = JStarStatement::ControlFlow {
+            kind: FlowKind::Loop,
+            condition: Some(Box::new(condition)),
+            body: while_body,
+            else_body: vec![],
+        };
+
+        // Wrap everything in a Sequence control flow block
+        Ok(JStarStatement::ControlFlow {
+            kind: FlowKind::Sequence,
+            condition: None,
+            body: vec![declare, store_init, while_loop],
+            else_body: vec![],
+        })
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────
 
     /// Try to parse an array size literal after a declaration name.
@@ -573,6 +804,7 @@ impl Parser {
             Some(TokenCategory::Literal) => true,
             Some(TokenCategory::TypeModifier(_)) => true,
             Some(TokenCategory::ControlFlow(FlowKind::Sequence)) => true,
+            // Scope (determiners like "a", "the") start declarations, not operands
             _ => false,
         }
     }
@@ -603,8 +835,8 @@ mod tests {
 
     /// Helper: run the JStar tokenizer + parser.
     fn parse_jstar(input: &str) -> JStarProgram {
-        let (lemmas, vectors) = crate::jstar::tokenize_jstar(input).unwrap();
-        parse(&lemmas, &vectors).unwrap()
+        let (originals, lemmas, vectors) = crate::jstar::tokenize_jstar(input).unwrap();
+        parse(&originals, &lemmas, &vectors).unwrap()
     }
 
     #[test]

@@ -213,9 +213,20 @@ impl CodeGen {
                     IrInst::LoadIndexed { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
+                    IrInst::ArrayAlloc { dest, count } => {
+                        self.alloc_stack_slot(*dest, *count * 8);
+                    }
+                    IrInst::ArrayLoad { dest, .. }
+                    | IrInst::ArrayLength { dest, .. }
+                    | IrInst::HashOp { dest, .. }
+                    | IrInst::FileOpen { dest, .. }
+                    | IrInst::FileRead { dest, .. } => {
+                        self.alloc_stack_slot(*dest, 8);
+                    }
                     IrInst::Store { .. } | IrInst::StoreIndexed { .. }
                     | IrInst::Print { .. } | IrInst::PrintStr { .. }
-                    | IrInst::Nop => {}
+                    | IrInst::Nop | IrInst::ArrayStore { .. }
+                    | IrInst::FileClose { .. } => {}
                 }
             }
         }
@@ -553,6 +564,151 @@ impl CodeGen {
                 }
                 let dest_offset = self.vreg_offset(*dest);
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, dest_offset);
+            }
+
+            IrInst::ArrayAlloc { .. } => {
+                // Stack space already allocated in prologue
+            }
+
+            IrInst::ArrayLoad { dest, base, index } => {
+                // Load base address into rax (lea for stack slots)
+                match base {
+                    IrValue::Reg(vreg) => {
+                        let base_offset = self.vreg_offset(*vreg);
+                        self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
+                    }
+                    _ => {
+                        self.emit_load_value(X86Reg::Rax, base);
+                    }
+                }
+                // Load index into rcx
+                self.emit_load_value(X86Reg::Rcx, index);
+                // rax = *(rax + rcx * 8): mov rax, [rax + rcx*8]
+                // SIB: base=rax(0), index=rcx(1), scale=8(3)
+                // REX.W + mov rax, [rax + rcx*8]
+                self.text.extend_from_slice(&[0x48, 0x8B, 0x04, 0xC8]);
+                let dest_offset = self.vreg_offset(*dest);
+                self.emit_store_reg_to_rbp_offset(X86Reg::Rax, dest_offset);
+            }
+
+            IrInst::ArrayStore { base, index, value } => {
+                // Load value into rdx
+                self.emit_load_value(X86Reg::Rdx, value);
+                // Load base address into rax
+                match base {
+                    IrValue::Reg(vreg) => {
+                        let base_offset = self.vreg_offset(*vreg);
+                        self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
+                    }
+                    _ => {
+                        self.emit_load_value(X86Reg::Rax, base);
+                    }
+                }
+                // Load index into rcx
+                self.emit_load_value(X86Reg::Rcx, index);
+                // mov [rax + rcx*8], rdx
+                // REX.W + mov [rax + rcx*8], rdx
+                self.text.extend_from_slice(&[0x48, 0x89, 0x14, 0xC8]);
+                // ^ 0x89 = MOV r/m64, r64; ModRM=0x14 (SIB, no disp); SIB=0xC8 (rcx*8+rax)
+            }
+
+            IrInst::ArrayLength { dest, count } => {
+                self.emit_mov_reg_imm64(X86Reg::Rax, *count as i64);
+                let offset = self.vreg_offset(*dest);
+                self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
+            }
+
+            IrInst::HashOp { dest, addr, len } => {
+                // FNV-1a hash: compact inline loop
+                // rsi = base addr, rcx = len, result in eax
+                match addr {
+                    IrValue::Reg(vreg) => {
+                        let base_offset = self.vreg_offset(*vreg);
+                        self.emit_lea_rbp_offset(X86Reg::Rsi, base_offset);
+                    }
+                    _ => {
+                        self.emit_load_value(X86Reg::Rsi, addr);
+                    }
+                }
+                self.emit_load_value(X86Reg::Rcx, len);  // byte count
+
+                // Initialize hash = FNV offset basis (2166136261 = 0x811C9DC5)
+                self.emit_mov_reg_imm64(X86Reg::Rax, 0x811C9DC5_i64);
+                // r8 = FNV prime (16777619 = 0x01000193)
+                self.emit_mov_reg_imm64(X86Reg::R8, 0x01000193_i64);
+                // rdi = 0 (counter)
+                self.emit_mov_reg_imm64(X86Reg::Rdi, 0);
+
+                // Loop: while rdi < rcx
+                let loop_start = self.text.len();
+
+                // cmp rdi, rcx
+                self.emit_cmp_reg_reg(X86Reg::Rdi, X86Reg::Rcx);
+                // jge end (forward jump, 2 bytes + rel8)
+                self.text.push(0x7D); // jge rel8
+                let jge_patch = self.text.len();
+                self.text.push(0x00); // placeholder
+
+                // movzx rdx, byte [rsi + rdi]
+                // REX.W + movzx rdx, byte [rsi + rdi*1]
+                self.text.extend_from_slice(&[0x48, 0x0F, 0xB6, 0x14, 0x3E]);
+
+                // xor eax, edx
+                self.text.extend_from_slice(&[0x31, 0xD0]); // xor eax, edx
+
+                // imul eax, r8d (multiply by FNV prime)
+                self.text.extend_from_slice(&[0x41, 0x0F, 0xAF, 0xC0]); // imul eax, r8d
+
+                // inc rdi
+                self.text.extend_from_slice(&[0x48, 0xFF, 0xC7]); // inc rdi
+
+                // jmp loop_start
+                self.text.push(0xEB); // jmp rel8
+                let loop_end = self.text.len();
+                let offset_back = (loop_start as i64 - loop_end as i64 - 1) as i8;
+                self.text.push(offset_back as u8);
+
+                // Patch jge to jump here
+                let end_pos = self.text.len();
+                self.text[jge_patch] = (end_pos - jge_patch - 1) as u8;
+
+                // Result is in eax (32-bit hash). Store to dest.
+                let dest_offset = self.vreg_offset(*dest);
+                self.emit_store_reg_to_rbp_offset(X86Reg::Rax, dest_offset);
+            }
+
+            IrInst::FileOpen { dest, path_offset, path_len: _ } => {
+                // syscall open(path, O_RDONLY, 0)
+                // rax = 2 (sys_open), rdi = path addr, rsi = 0 (O_RDONLY), rdx = 0
+                // Path is in .data section at data_vaddr + path_offset
+                // We use a mov rdi, imm64 that gets patched by linker
+                self.emit_mov_reg_imm64(X86Reg::Rdi, *path_offset as i64); // placeholder, patched later
+                self.emit_mov_reg_imm64(X86Reg::Rsi, 0); // O_RDONLY
+                self.emit_mov_reg_imm64(X86Reg::Rdx, 0);
+                self.emit_mov_reg_imm64(X86Reg::Rax, 2); // sys_open
+                self.emit_syscall();
+                let offset = self.vreg_offset(*dest);
+                self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
+            }
+
+            IrInst::FileRead { dest, fd, buf, len } => {
+                // syscall read(fd, buf, len)
+                // rax = 0, rdi = fd, rsi = buf, rdx = len
+                self.emit_load_value(X86Reg::Rdi, fd);
+                self.emit_load_value(X86Reg::Rsi, buf);
+                self.emit_load_value(X86Reg::Rdx, len);
+                self.emit_mov_reg_imm64(X86Reg::Rax, 0); // sys_read
+                self.emit_syscall();
+                let offset = self.vreg_offset(*dest);
+                self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
+            }
+
+            IrInst::FileClose { fd } => {
+                // syscall close(fd)
+                // rax = 3, rdi = fd
+                self.emit_load_value(X86Reg::Rdi, fd);
+                self.emit_mov_reg_imm64(X86Reg::Rax, 3); // sys_close
+                self.emit_syscall();
             }
 
             IrInst::Nop => {
