@@ -13,7 +13,8 @@
 //! Register allocation: simple linear mapping from virtual registers.
 //! SSA form from IR makes this straightforward.
 
-use crate::types::MorphResult;
+use crate::types::{MorphResult, MorphlexError};
+use super::grammar::JStarType;
 use super::ir::*;
 
 // ─── x86-64 Register Encoding ───────────────────────────────────────────────
@@ -76,6 +77,10 @@ pub struct MachineCode {
     pub stack_size: usize,
     /// Virtual address of .data section (set by linker, stored for codegen)
     pub data_vaddr: u64,
+    /// Positions in .text where data-section offsets need patching by the linker.
+    /// Each entry is the byte offset in .text of an 8-byte value to which the
+    /// linker adds data_vaddr.
+    pub data_fixups: Vec<usize>,
 }
 
 /// Generate x86-64 machine code from IR.
@@ -85,18 +90,30 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
     // Copy string literal data to .data section
     emitter.data = program.string_data.clone();
 
+    // Append global data after string_data in .data section.
+    // Global offsets in global_vregs are relative to global_data start,
+    // so we adjust them by string_data.len() to get absolute .data offsets.
+    let global_base = emitter.data.len();
+    emitter.data.extend_from_slice(&program.global_data);
+
+    // Build the global_vregs map with adjusted offsets
+    for (&vreg, &offset) in &program.global_vregs {
+        emitter.global_vregs.insert(vreg, global_base + offset);
+    }
+
     for func in &program.functions {
         emitter.emit_function(func)?;
     }
 
     // Resolve call fixups now that all function offsets are known
-    emitter.apply_call_fixups();
+    emitter.apply_call_fixups()?;
 
     Ok(MachineCode {
         text: emitter.text,
         data: emitter.data,
         stack_size: emitter.stack_size,
         data_vaddr: 0, // set by linker
+        data_fixups: emitter.data_fixups,
     })
 }
 
@@ -117,6 +134,11 @@ struct CodeGen {
     call_fixups: Vec<(usize, String)>,
     /// Whether current function is _start (uses sys_exit) vs regular (uses ret)
     is_entry_point: bool,
+    /// Global vregs: vreg -> data_offset (absolute offset in .data section).
+    /// If a vreg is in this map, it lives in .data, not on the stack.
+    global_vregs: std::collections::HashMap<VReg, usize>,
+    /// Positions in .text where data-section offsets need linker patching.
+    data_fixups: Vec<usize>,
 }
 
 impl CodeGen {
@@ -132,6 +154,8 @@ impl CodeGen {
             function_offsets: std::collections::HashMap::new(),
             call_fixups: Vec::new(),
             is_entry_point: false,
+            global_vregs: std::collections::HashMap::new(),
+            data_fixups: Vec::new(),
         }
     }
 
@@ -145,8 +169,15 @@ impl CodeGen {
     }
 
     /// Get the stack offset for a virtual register.
+    /// Panics with a diagnostic if the vreg was never allocated a stack slot.
     fn vreg_offset(&self, vreg: VReg) -> i32 {
-        *self.vreg_offsets.get(&vreg).unwrap_or(&0)
+        *self.vreg_offsets.get(&vreg).unwrap_or_else(|| {
+            panic!(
+                "codegen: vreg {} has no stack slot (allocated vregs: {:?})",
+                vreg,
+                self.vreg_offsets.keys().collect::<Vec<_>>()
+            )
+        })
     }
 
     fn emit_function(&mut self, func: &IrFunction) -> MorphResult<()> {
@@ -179,6 +210,9 @@ impl CodeGen {
                     | IrInst::AddressOf { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
+                    IrInst::LoadIndexed { dest, .. } => {
+                        self.alloc_stack_slot(*dest, 8);
+                    }
                     IrInst::ArrayAlloc { dest, count } => {
                         self.alloc_stack_slot(*dest, *count * 8);
                     }
@@ -189,9 +223,10 @@ impl CodeGen {
                     | IrInst::FileRead { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
-                    IrInst::Store { .. } | IrInst::Print { .. }
-                    | IrInst::PrintStr { .. } | IrInst::Nop
-                    | IrInst::ArrayStore { .. } | IrInst::FileClose { .. } => {}
+                    IrInst::Store { .. } | IrInst::StoreIndexed { .. }
+                    | IrInst::Print { .. } | IrInst::PrintStr { .. }
+                    | IrInst::Nop | IrInst::ArrayStore { .. }
+                    | IrInst::FileClose { .. } => {}
                 }
             }
         }
@@ -200,10 +235,26 @@ impl CodeGen {
         self.stack_size = ((-self.next_stack_offset) as usize + 15) & !15;
 
         // Function prologue: push rbp; mov rbp, rsp; sub rsp, frame_size
+        // For large frames (>4096), probe each page to avoid skipping guard pages.
         self.emit_push_reg(X86Reg::Rbp);
         self.emit_mov_reg_reg(X86Reg::Rbp, X86Reg::Rsp);
         if self.stack_size > 0 {
-            self.emit_sub_reg_imm(X86Reg::Rsp, self.stack_size as i32);
+            if self.stack_size > 4096 {
+                // Probe each 4096-byte page by touching it
+                let mut remaining = self.stack_size;
+                while remaining > 4096 {
+                    self.emit_sub_reg_imm(X86Reg::Rsp, 4096);
+                    // test dword [rsp], 0 -- touch the page (read access)
+                    // Encoded as: mov rax, [rsp] = 0x48 0x8B 0x04 0x24
+                    self.text.extend_from_slice(&[0x48, 0x8B, 0x04, 0x24]);
+                    remaining -= 4096;
+                }
+                if remaining > 0 {
+                    self.emit_sub_reg_imm(X86Reg::Rsp, remaining as i32);
+                }
+            } else {
+                self.emit_sub_reg_imm(X86Reg::Rsp, self.stack_size as i32);
+            }
         }
 
         // For non-_start functions: store incoming arguments from registers to stack
@@ -235,7 +286,7 @@ impl CodeGen {
         }
 
         // Resolve all fixups (forward jumps patched with actual offsets)
-        self.apply_fixups();
+        self.apply_fixups()?;
 
         Ok(())
     }
@@ -317,12 +368,25 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
-            IrInst::Load { dest, addr, .. } => {
+            IrInst::Load { dest, addr, ty } => {
                 match addr {
+                    IrValue::Reg(vreg) if self.is_global_vreg(*vreg) => {
+                        // Global variable: load from .data section
+                        let data_offset = self.global_vregs[vreg];
+                        if Self::is_byte_type(ty) {
+                            self.emit_load_byte_global(data_offset);
+                        } else {
+                            self.emit_load_global(data_offset);
+                        }
+                    }
                     // Stack-slot variable: load directly from [rbp+offset]
                     IrValue::Reg(vreg) => {
                         let src_offset = self.vreg_offset(*vreg);
-                        self.emit_load_from_rbp_offset(X86Reg::Rax, src_offset);
+                        if Self::is_byte_type(ty) {
+                            self.emit_load_byte_from_rbp_offset(X86Reg::Rax, src_offset);
+                        } else {
+                            self.emit_load_from_rbp_offset(X86Reg::Rax, src_offset);
+                        }
                     }
                     // Pointer/address: dereference via [rax]
                     _ => {
@@ -334,13 +398,26 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
-            IrInst::Store { addr, value, .. } => {
+            IrInst::Store { addr, value, ty } => {
                 self.emit_load_value(X86Reg::Rcx, value);
                 match addr {
+                    IrValue::Reg(vreg) if self.is_global_vreg(*vreg) => {
+                        // Global variable: store to .data section
+                        let data_offset = self.global_vregs[vreg];
+                        if Self::is_byte_type(ty) {
+                            self.emit_store_byte_global(data_offset);
+                        } else {
+                            self.emit_store_global(data_offset);
+                        }
+                    }
                     // Stack-slot variable: store directly to [rbp+offset]
                     IrValue::Reg(vreg) => {
                         let offset = self.vreg_offset(*vreg);
-                        self.emit_store_reg_to_rbp_offset(X86Reg::Rcx, offset);
+                        if Self::is_byte_type(ty) {
+                            self.emit_store_byte_to_rbp_offset(X86Reg::Rcx, offset);
+                        } else {
+                            self.emit_store_reg_to_rbp_offset(X86Reg::Rcx, offset);
+                        }
                     }
                     // Pointer/address: store via [rax]
                     _ => {
@@ -404,14 +481,87 @@ impl CodeGen {
                 self.emit_print_string(*data_offset, *len);
             }
 
+            IrInst::StoreIndexed { base, index, value, ty } => {
+                if self.is_global_vreg(*base) {
+                    // Global array: load base address from .data section
+                    let data_offset = self.global_vregs[base];
+                    self.emit_load_global_addr(data_offset);
+                } else {
+                    // Local array: lea rax, [rbp + base_offset]
+                    let base_offset = self.vreg_offset(*base);
+                    self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
+                }
+                // Load index into rcx
+                self.emit_load_value(X86Reg::Rcx, index);
+                // Load value into rdx
+                self.emit_load_value(X86Reg::Rdx, value);
+                // Store: [rax + rcx] = rdx (byte or qword)
+                if Self::is_byte_type(ty) {
+                    // mov byte [rax+rcx], dl
+                    // REX prefix (0x40 for byte reg access)
+                    self.text.push(0x40);
+                    self.text.push(0x88); // MOV r/m8, r8
+                    // ModR/M: [rax+rcx] with SIB = mod 00, reg=rdx(2), rm=100(SIB)
+                    self.text.push(0x14); // 00 010 100
+                    // SIB: scale=00(1), index=rcx(001), base=rax(000)
+                    self.text.push(0x08); // 00 001 000
+                } else {
+                    // mov qword [rax+rcx*8], rdx
+                    self.text.push(0x48); // REX.W
+                    self.text.push(0x89); // MOV r/m64, r64
+                    self.text.push(0x14); // ModR/M: [SIB], reg=rdx(2)
+                    // SIB: scale=11(8), index=rcx(001), base=rax(000)
+                    self.text.push(0xC8); // 11 001 000
+                }
+            }
+
+            IrInst::LoadIndexed { dest, base, index, ty } => {
+                if self.is_global_vreg(*base) {
+                    // Global array: load base address from .data section
+                    let data_offset = self.global_vregs[base];
+                    self.emit_load_global_addr(data_offset);
+                } else {
+                    // Local array: lea rax, [rbp + base_offset]
+                    let base_offset = self.vreg_offset(*base);
+                    self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
+                }
+                // Load index into rcx
+                self.emit_load_value(X86Reg::Rcx, index);
+                if Self::is_byte_type(ty) {
+                    // movzx rax, byte [rax+rcx]
+                    self.text.push(0x48); // REX.W
+                    self.text.push(0x0F);
+                    self.text.push(0xB6); // MOVZX r64, r/m8
+                    // ModR/M: [SIB], reg=rax(0)
+                    self.text.push(0x04); // 00 000 100
+                    // SIB: scale=00(1), index=rcx(001), base=rax(000)
+                    self.text.push(0x08); // 00 001 000
+                } else {
+                    // mov rax, [rax+rcx*8]
+                    self.text.push(0x48); // REX.W
+                    self.text.push(0x8B); // MOV r64, r/m64
+                    self.text.push(0x04); // ModR/M: [SIB], reg=rax(0)
+                    // SIB: scale=11(8), index=rcx(001), base=rax(000)
+                    self.text.push(0xC8); // 11 001 000
+                }
+                let offset = self.vreg_offset(*dest);
+                self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
+            }
+
             IrInst::Alloca { .. } => {
                 // Stack space already allocated in prologue
             }
 
             IrInst::AddressOf { dest, src } => {
-                // lea rax, [rbp+src_offset]; store rax → [rbp+dest_offset]
-                let src_offset = self.vreg_offset(*src);
-                self.emit_lea_rbp_offset(X86Reg::Rax, src_offset);
+                if self.is_global_vreg(*src) {
+                    // Global: the address IS the .data section address
+                    let data_offset = self.global_vregs[src];
+                    self.emit_load_global_addr(data_offset);
+                } else {
+                    // Local: lea rax, [rbp+src_offset]
+                    let src_offset = self.vreg_offset(*src);
+                    self.emit_lea_rbp_offset(X86Reg::Rax, src_offset);
+                }
                 let dest_offset = self.vreg_offset(*dest);
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, dest_offset);
             }
@@ -727,14 +877,127 @@ impl CodeGen {
                 self.emit_mov_reg_imm64(dest, *imm);
             }
             IrValue::Reg(vreg) => {
-                let offset = self.vreg_offset(*vreg);
-                self.emit_load_from_rbp_offset(dest, offset);
+                if let Some(&data_offset) = self.global_vregs.get(vreg) {
+                    // Global variable: load from .data section via absolute address.
+                    // Use dest register itself as temp (movabs dest, addr; mov dest, [dest]).
+                    // This avoids clobbering rax when loading into rcx/rdx/etc.
+                    self.emit_load_global_into(dest, data_offset);
+                } else {
+                    let offset = self.vreg_offset(*vreg);
+                    self.emit_load_from_rbp_offset(dest, offset);
+                }
             }
             IrValue::Named(_name) => {
                 // Named variables: for now, load 0 (resolved later with symbol table)
                 self.emit_mov_reg_imm64(dest, 0);
             }
         }
+    }
+
+    // ─── Global Variable Helpers ────────────────────────────────────────────
+
+    /// Check if a vreg is a global variable (lives in .data, not on stack).
+    fn is_global_vreg(&self, vreg: VReg) -> bool {
+        self.global_vregs.contains_key(&vreg)
+    }
+
+    /// Emit: movabs rax, <data_offset>  (absolute address placeholder)
+    ///       mov rax, [rax]              (dereference to load the value)
+    /// The linker adds data_vaddr to the placeholder.
+    fn emit_load_global(&mut self, data_offset: usize) {
+        // movabs rax, imm64 (address placeholder)
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
+        // mov rax, [rax]
+        self.text.push(0x48); // REX.W
+        self.text.push(0x8B); // MOV r64, r/m64
+        self.text.push(0x00); // ModRM: mod=00, reg=rax(000), rm=rax(000) = [rax]
+    }
+
+    /// Emit: movabs dest, <data_offset>  (absolute address into dest register)
+    ///       mov dest, [dest]             (dereference to load the value)
+    /// Uses the dest register as temp to avoid clobbering other registers.
+    fn emit_load_global_into(&mut self, dest: X86Reg, data_offset: usize) {
+        // movabs dest, imm64
+        let mut rex: u8 = 0x48; // REX.W
+        if dest.needs_rex_ext() {
+            rex |= 0x01; // REX.B
+        }
+        self.text.push(rex);
+        self.text.push(0xB8 + dest.encoding()); // movabs dest
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
+        // mov dest, [dest] — dereference
+        let mut rex2: u8 = 0x48; // REX.W
+        if dest.needs_rex_ext() {
+            rex2 |= 0x04; // REX.R (reg field)
+            rex2 |= 0x01; // REX.B (rm field)
+        }
+        self.text.push(rex2);
+        self.text.push(0x8B); // MOV r64, r/m64
+        // ModRM: mod=00, reg=dest, rm=dest = [dest]
+        self.text.push((dest.encoding() << 3) | dest.encoding());
+    }
+
+    /// Emit: movabs rax, <data_offset>  (absolute address placeholder)
+    ///       mov [rax], rcx              (store rcx to global)
+    /// Value to store must be in rcx before calling this.
+    fn emit_store_global(&mut self, data_offset: usize) {
+        // movabs rax, imm64 (address placeholder)
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
+        // mov [rax], rcx
+        self.text.push(0x48); // REX.W
+        self.text.push(0x89); // MOV r/m64, r64
+        self.text.push(0x08); // ModRM: mod=00, reg=rcx(001), rm=rax(000) = [rax]
+    }
+
+    /// Emit: movabs rax, <data_offset>  (absolute address placeholder)
+    ///       mov byte [rax], cl          (store byte to global)
+    fn emit_store_byte_global(&mut self, data_offset: usize) {
+        // movabs rax, imm64 (address placeholder)
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
+        // mov byte [rax], cl
+        self.text.push(0x88); // MOV r/m8, r8
+        self.text.push(0x08); // ModRM: mod=00, reg=cl(001), rm=rax(000) = [rax]
+    }
+
+    /// Emit: movabs rax, <data_offset>  (absolute address placeholder)
+    ///       movzx rax, byte [rax]       (load byte from global, zero-extend)
+    fn emit_load_byte_global(&mut self, data_offset: usize) {
+        // movabs rax, imm64 (address placeholder)
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
+        // movzx rax, byte [rax]
+        self.text.push(0x48); // REX.W
+        self.text.push(0x0F);
+        self.text.push(0xB6); // MOVZX r64, r/m8
+        self.text.push(0x00); // ModRM: mod=00, reg=rax(000), rm=rax(000) = [rax]
+    }
+
+    /// Emit: movabs rax, <data_offset>  (absolute address, no dereference)
+    /// Used for addressof and as base address for indexed access.
+    fn emit_load_global_addr(&mut self, data_offset: usize) {
+        // movabs rax, imm64 (address placeholder)
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
     }
 
     // ─── x86-64 Instruction Encoding ────────────────────────────────────────
@@ -948,9 +1211,20 @@ impl CodeGen {
     /// Each fixup is (patch_offset, target_label). The displacement is
     /// target_address - (patch_offset + 4), because the CPU reads IP
     /// past the displacement field before adding it.
-    fn apply_fixups(&mut self) {
+    ///
+    /// Returns an error if any target label was never emitted as a block.
+    /// Previously this defaulted to offset 0, silently corrupting the
+    /// function prologue.
+    fn apply_fixups(&mut self) -> MorphResult<()> {
         for (patch_offset, target_label) in &self.fixups {
-            let target = *self.label_offsets.get(target_label).unwrap_or(&0);
+            let target = *self.label_offsets.get(target_label).ok_or_else(|| {
+                MorphlexError::CodegenError(format!(
+                    "missing label '{}' at fixup offset {} (known labels: {:?})",
+                    target_label,
+                    patch_offset,
+                    self.label_offsets.keys().collect::<Vec<_>>()
+                ))
+            })?;
             let disp = (target as i32) - (*patch_offset as i32 + 4);
             let bytes = disp.to_le_bytes();
             self.text[*patch_offset] = bytes[0];
@@ -959,12 +1233,23 @@ impl CodeGen {
             self.text[*patch_offset + 3] = bytes[3];
         }
         self.fixups.clear();
+        Ok(())
     }
 
     /// Resolve all call fixups after all functions have been emitted.
-    fn apply_call_fixups(&mut self) {
+    ///
+    /// Returns an error if any called function was never emitted.
+    fn apply_call_fixups(&mut self) -> MorphResult<()> {
         for (patch_offset, func_name) in &self.call_fixups {
-            let target = *self.function_offsets.get(func_name).unwrap_or(&0);
+            let target = *self.function_offsets.get(func_name).ok_or_else(|| {
+                MorphlexError::CodegenError(format!(
+                    "missing function '{}' at call fixup offset {} \
+                     (known functions: {:?})",
+                    func_name,
+                    patch_offset,
+                    self.function_offsets.keys().collect::<Vec<_>>()
+                ))
+            })?;
             let disp = (target as i32) - (*patch_offset as i32 + 4);
             let bytes = disp.to_le_bytes();
             self.text[*patch_offset] = bytes[0];
@@ -973,24 +1258,25 @@ impl CodeGen {
             self.text[*patch_offset + 3] = bytes[3];
         }
         self.call_fixups.clear();
+        Ok(())
     }
 
     /// Emit x86-64 code to print a string from the .data section.
     ///
     /// Uses sys_write(1, data_vaddr + offset, len).
     /// The absolute address is computed at link time — we emit a movabs
-    /// with a placeholder that the linker patches.
+    /// with a placeholder that the linker patches via data_fixups.
     fn emit_print_string(&mut self, data_offset: usize, len: usize) {
         // mov eax, 1 (sys_write)
         self.text.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
         // mov edi, 1 (fd = stdout)
         self.text.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]);
-        // mov rsi, <data_vaddr + offset> — placeholder, will be patched by linker
-        // For now, encode offset as 64-bit immediate; linker adds VADDR_BASE + headers
+        // mov rsi, <data_offset> — placeholder, linker adds data_vaddr
         self.text.push(0x48); // REX.W
         self.text.push(0xBE); // MOV rsi, imm64
-        // Store the data_offset as placeholder — linker will add base address
+        let fixup_pos = self.text.len();
         self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.data_fixups.push(fixup_pos);
         // mov edx, len
         self.text.push(0xBA); // MOV edx, imm32
         self.text.extend_from_slice(&(len as u32).to_le_bytes());
@@ -1041,6 +1327,35 @@ impl CodeGen {
         self.text.extend_from_slice(&[0x0F, 0x05]);
     }
 
+    /// mov byte [rbp+offset], src_low8 — store a single byte to stack slot
+    fn emit_store_byte_to_rbp_offset(&mut self, src: X86Reg, offset: i32) {
+        // For r8-r15 we need REX prefix even for byte access
+        let mut rex: u8 = 0x40; // REX (no W — byte operation)
+        if src.needs_rex_ext() {
+            rex |= 0x04; // REX.R
+        }
+        // REX prefix is needed for SPL/BPL/SIL/DIL access or extended regs
+        // Always emit it to be safe with any register
+        self.text.push(rex);
+        self.text.push(0x88); // MOV r/m8, r8
+        self.text.push(Self::modrm_rbp_disp32(src));
+        self.text.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    /// movzx reg64, byte [rbp+offset] — load a single byte, zero-extend to 64 bits
+    fn emit_load_byte_from_rbp_offset(&mut self, dest: X86Reg, offset: i32) {
+        self.text.push(Self::rex_w(dest, X86Reg::Rbp));
+        self.text.push(0x0F);
+        self.text.push(0xB6); // MOVZX r64, r/m8
+        self.text.push(Self::modrm_rbp_disp32(dest));
+        self.text.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    /// Check if a JStarType should use byte-width operations.
+    fn is_byte_type(ty: &JStarType) -> bool {
+        matches!(ty, JStarType::Byte | JStarType::Boolean | JStarType::Char)
+    }
+
     /// nop
     fn emit_nop(&mut self) {
         self.text.push(0x90);
@@ -1058,6 +1373,9 @@ mod tests {
     fn test_generate_empty_program() {
         let ir = IrProgram {
             string_data: vec![],
+            global_data: vec![],
+            global_vars: std::collections::HashMap::new(),
+            global_vregs: std::collections::HashMap::new(),
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
@@ -1077,6 +1395,9 @@ mod tests {
     fn test_generate_return_42() {
         let ir = IrProgram {
             string_data: vec![],
+            global_data: vec![],
+            global_vars: std::collections::HashMap::new(),
+            global_vregs: std::collections::HashMap::new(),
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
@@ -1106,6 +1427,9 @@ mod tests {
     fn test_codegen_determinism() {
         let ir = IrProgram {
             string_data: vec![],
+            global_data: vec![],
+            global_vars: std::collections::HashMap::new(),
+            global_vregs: std::collections::HashMap::new(),
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,

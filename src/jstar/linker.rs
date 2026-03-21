@@ -77,39 +77,30 @@ pub fn link(code: &MachineCode, output_path: &Path) -> MorphResult<()> {
 
 /// Patch data section addresses in the .text section.
 ///
-/// The codegen emits `mov rsi, <data_offset>` for string literals.
-/// We need to add the actual data vaddr (VADDR_BASE + headers + text_size)
-/// to each of these offsets.
+/// Uses the data_fixups list from codegen: each entry is the byte offset
+/// in .text of an 8-byte value (a .data section offset) to which we add
+/// the actual data vaddr (VADDR_BASE + headers + text_size).
 ///
-/// Pattern to find: 0x48 0xBE (mov rsi, imm64) followed by 8 bytes.
-/// We scan for this pattern and add the data vaddr to the value.
+/// This replaces the old byte-pattern scanning approach. Every movabs
+/// that references .data now records its fixup position explicitly.
 fn patch_data_addresses(code: &mut MachineCode) {
-    if code.data.is_empty() {
+    if code.data.is_empty() && code.data_fixups.is_empty() {
         return;
     }
 
-    // Single PT_LOAD segment — always 1 program header
     let headers_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE;
-    let text_offset = headers_size;
-    let data_offset = text_offset + code.text.len();
+    let data_offset = headers_size + code.text.len();
     let data_vaddr = VADDR_BASE + data_offset as u64;
 
-    // Scan .text for mov rsi, imm64 pattern (0x48 0xBE)
-    // This is emitted by emit_print_string and contains a data_offset placeholder
-    let mut i = 0;
-    while i + 10 <= code.text.len() {
-        if code.text[i] == 0x48 && code.text[i + 1] == 0xBE {
-            // Read the current 8-byte value
-            let offset_bytes: [u8; 8] = code.text[i+2..i+10].try_into().unwrap();
+    for &fixup_pos in &code.data_fixups {
+        if fixup_pos + 8 <= code.text.len() {
+            let offset_bytes: [u8; 8] = code.text[fixup_pos..fixup_pos + 8]
+                .try_into()
+                .unwrap();
             let current_val = u64::from_le_bytes(offset_bytes);
-            // Only patch if the value looks like a data offset (small number)
-            if current_val < code.data.len() as u64 {
-                let patched = current_val + data_vaddr;
-                code.text[i+2..i+10].copy_from_slice(&patched.to_le_bytes());
-            }
-            i += 10;
-        } else {
-            i += 1;
+            let patched = current_val + data_vaddr;
+            code.text[fixup_pos..fixup_pos + 8]
+                .copy_from_slice(&patched.to_le_bytes());
         }
     }
 }
@@ -199,6 +190,7 @@ mod tests {
             text: vec![0x90], // nop
             data: vec![],
             stack_size: 0,
+            data_fixups: vec![],
         };
         let elf = build_elf(&code).unwrap();
         assert_eq!(&elf[0..4], &ELF_MAGIC);
@@ -211,6 +203,7 @@ mod tests {
             text: vec![0x90],
             data: vec![],
             stack_size: 0,
+            data_fixups: vec![],
         };
         let elf = build_elf(&code).unwrap();
         assert_eq!(elf[4], ELFCLASS64);
@@ -223,6 +216,7 @@ mod tests {
             text: vec![0x90],
             data: vec![],
             stack_size: 0,
+            data_fixups: vec![],
         };
         let elf = build_elf(&code).unwrap();
         let machine = u16::from_le_bytes([elf[18], elf[19]]);
@@ -236,6 +230,7 @@ mod tests {
             text: vec![0x90],
             data: vec![],
             stack_size: 0,
+            data_fixups: vec![],
         };
         let elf = build_elf(&code).unwrap();
         // ELF header (64) + 1 phdr (56) + 1 byte text = 121
@@ -249,6 +244,7 @@ mod tests {
             text: vec![0x90],
             data: vec![],
             stack_size: 0,
+            data_fixups: vec![],
         };
         let elf = build_elf(&code).unwrap();
         let entry = u64::from_le_bytes(elf[24..32].try_into().unwrap());
@@ -263,6 +259,7 @@ mod tests {
             text: vec![0x90],
             data: vec![0x42, 0x43],
             stack_size: 0,
+            data_fixups: vec![],
         };
         let elf = build_elf(&code).unwrap();
         // Single PT_LOAD segment — always 1 program header
@@ -282,6 +279,7 @@ mod tests {
             text: vec![0xB8, 0x01, 0x00, 0x00, 0x00], // mov eax, 1
             data: vec![],
             stack_size: 0,
+            data_fixups: vec![],
         };
         let a = build_elf(&code).unwrap();
         let b = build_elf(&code).unwrap();

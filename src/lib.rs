@@ -10,12 +10,14 @@
 //! Identity is a single i32. Comparison is `==`.
 
 pub mod ast;
+pub mod braid;
 pub mod database;
 pub mod lexer;
 pub mod morphology;
 pub mod semantics;
 pub mod types;
 pub mod vectorizer;
+pub mod crawler;
 pub mod search;
 pub mod jstar;
 pub mod jsh;

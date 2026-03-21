@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use crate::types::MorphResult;
 use super::grammar::*;
-use super::token_map::{JStarInstruction, FlowKind, AddrMode};
+use super::token_map::{JStarInstruction, FlowKind, AddrMode, ScopeKind};
 
 // ─── IR Types ───────────────────────────────────────────────────────────────
 
@@ -24,6 +24,14 @@ pub struct IrProgram {
     pub functions: Vec<IrFunction>,
     /// Accumulated string literal data for the .data section.
     pub string_data: Vec<u8>,
+    /// Global variable data (zeroed on allocation, lives in .data section after string_data).
+    pub global_data: Vec<u8>,
+    /// Global variable registry: name -> (data_offset, size, type).
+    /// data_offset is relative to the start of global_data (not string_data).
+    pub global_vars: HashMap<String, (usize, usize, JStarType)>,
+    /// Map from vreg -> data_offset (relative to start of global_data).
+    /// Codegen uses this to distinguish global vregs from stack vregs.
+    pub global_vregs: HashMap<VReg, usize>,
 }
 
 /// An IR function — entry point with a body of basic blocks.
@@ -134,6 +142,22 @@ pub enum IrInst {
         len: usize,
     },
 
+    /// Store value to array at base + index: base[index] = value
+    StoreIndexed {
+        base: VReg,
+        index: IrValue,
+        value: IrValue,
+        ty: JStarType,
+    },
+
+    /// Load from array at base + index: dest = base[index]
+    LoadIndexed {
+        dest: VReg,
+        base: VReg,
+        index: IrValue,
+        ty: JStarType,
+    },
+
     /// Allocate a fixed-size array on the stack.
     /// dest = base pointer, count = number of 64-bit elements.
     ArrayAlloc {
@@ -155,7 +179,7 @@ pub enum IrInst {
         value: IrValue,
     },
 
-    /// FNV-1a hash: dest = hash(addr, len) → i32
+    /// FNV-1a hash: dest = hash(addr, len) -> i32
     HashOp {
         dest: VReg,
         addr: IrValue,
@@ -259,6 +283,64 @@ pub enum Terminator {
     Unreachable,
 }
 
+impl Terminator {
+    /// Every label this terminator depends on.
+    /// If any of these labels has no corresponding block, the CFG is broken.
+    pub fn referenced_labels(&self) -> Vec<&str> {
+        match self {
+            Terminator::Jump(label) => vec![label.as_str()],
+            Terminator::Branch { true_label, false_label, .. } => {
+                vec![true_label.as_str(), false_label.as_str()]
+            }
+            Terminator::Return(_)
+            | Terminator::Halt(_)
+            | Terminator::Unreachable => vec![],
+        }
+    }
+}
+
+impl IrFunction {
+    /// Validate that the CFG is structurally sound:
+    /// - No duplicate block labels
+    /// - Every label referenced in a terminator has a corresponding block
+    ///
+    /// This is the spine of the rope. Called immediately after lowering,
+    /// before the IR ever reaches codegen. If this passes, apply_fixups
+    /// can never encounter a missing label.
+    pub fn validate_cfg(&self) -> MorphResult<()> {
+        use std::collections::HashSet;
+        use crate::types::MorphlexError;
+
+        let mut seen = HashSet::new();
+        for block in &self.blocks {
+            if !seen.insert(&block.label) {
+                return Err(MorphlexError::CodegenError(format!(
+                    "function '{}': duplicate block label '{}'",
+                    self.name, block.label
+                )));
+            }
+        }
+
+        // Every referenced label must have a block
+        for block in &self.blocks {
+            for label in block.terminator.referenced_labels() {
+                if !seen.contains(&label.to_string()) {
+                    return Err(MorphlexError::CodegenError(format!(
+                        "function '{}': block '{}' references label '{}' \
+                         which has no block (known: {:?})",
+                        self.name,
+                        block.label,
+                        label,
+                        seen.iter().collect::<Vec<_>>()
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 // ─── Lowering: Typed AST → IR ───────────────────────────────────────────────
 
 /// Lower a typed program to IR.
@@ -275,6 +357,11 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
         current_insts: Vec::new(),
         block_counter: 0,
         string_data: Vec::new(),
+        globals: HashMap::new(),
+        global_data_offset: 0,
+        global_data: Vec::new(),
+        global_vregs: HashMap::new(),
+        next_global_vreg: Lowerer::GLOBAL_VREG_BASE,
     };
 
     // Separate function definitions from top-level statements
@@ -283,26 +370,54 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
 
     for stmt in &program.statements {
         match stmt {
-            TypedStatement::FunctionDef { name, params, body, return_type } => {
-                // Lower each function definition
-                lowerer.reset();
-                // Declare parameters as variables
-                for (pname, pty) in params {
-                    let dest = lowerer.alloc_vreg();
-                    lowerer.current_insts.push(IrInst::Alloca {
-                        dest,
-                        size: pty.size_bytes(),
-                        ty: *pty,
-                    });
-                    lowerer.variables.insert(pname.clone(), dest);
-                }
-                let func = lowerer.lower_to_function(name, body)?;
-                functions.push(IrFunction {
-                    return_type: *return_type,
-                    ..func
-                });
+            TypedStatement::FunctionDef { .. } => {
+                // Collected below
             }
             other => top_level.push(other.clone()),
+        }
+    }
+
+    // Pre-scan: register global declarations so they are available in all functions.
+    // This must happen before lowering any function body.
+    for stmt in &top_level {
+        if let TypedStatement::Declare { scope, name, ty, size, .. } = stmt {
+            if *scope == ScopeKind::Global {
+                let alloc_size = match size {
+                    Some(n) => *n * ty.size_bytes(),
+                    None => ty.size_bytes().max(8),
+                };
+                let offset = lowerer.global_data_offset;
+                lowerer.global_data.resize(lowerer.global_data_offset + alloc_size, 0);
+                lowerer.global_data_offset += alloc_size;
+                lowerer.globals.insert(name.clone(), (offset, alloc_size, *ty));
+                let dest = lowerer.next_global_vreg;
+                lowerer.next_global_vreg += 1;
+                lowerer.global_vregs.insert(dest, offset);
+                lowerer.variables.insert(name.clone(), dest);
+            }
+        }
+    }
+
+    // Lower function definitions (globals are already registered)
+    for stmt in &program.statements {
+        if let TypedStatement::FunctionDef { name, params, body, return_type } = stmt {
+            // Lower each function definition
+            lowerer.reset();
+            // Declare parameters as variables
+            for (pname, pty) in params {
+                let dest = lowerer.alloc_vreg();
+                lowerer.current_insts.push(IrInst::Alloca {
+                    dest,
+                    size: pty.size_bytes(),
+                    ty: *pty,
+                });
+                lowerer.variables.insert(pname.clone(), dest);
+            }
+            let func = lowerer.lower_to_function(name, body)?;
+            functions.push(IrFunction {
+                return_type: *return_type,
+                ..func
+            });
         }
     }
 
@@ -314,6 +429,9 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
     Ok(IrProgram {
         functions,
         string_data: lowerer.string_data,
+        global_data: lowerer.global_data,
+        global_vars: lowerer.globals,
+        global_vregs: lowerer.global_vregs,
     })
 }
 
@@ -340,6 +458,18 @@ struct Lowerer {
     /// Accumulated string literal data for the .data section.
     /// Each entry is the raw bytes. Strings are appended with a newline.
     string_data: Vec<u8>,
+
+    // ─── Global variable state ──────────────────────────────────────────
+    /// Global variables: name -> (data_offset, size, type)
+    globals: HashMap<String, (usize, usize, JStarType)>,
+    /// Current offset within the global data section
+    global_data_offset: usize,
+    /// Global data bytes (zeroed on allocation)
+    global_data: Vec<u8>,
+    /// Map from vreg -> data_offset in global_data
+    global_vregs: HashMap<VReg, usize>,
+    /// Next global vreg ID (starts at GLOBAL_VREG_BASE)
+    next_global_vreg: VReg,
 }
 
 impl Lowerer {
@@ -358,8 +488,25 @@ impl Lowerer {
         self.current_label.clear();
         self.current_insts.clear();
         self.block_counter = 0;
-        // Note: string_data is NOT cleared — it accumulates across functions
+        // Note: string_data is NOT cleared — it accumulates across functions.
+        // Note: globals/global_data/global_data_offset/global_vregs are NOT cleared —
+        // they persist across functions so globals are accessible from any function.
+        // Re-register global variables into the new function's variable map.
+        // Global vregs use the high range (GLOBAL_VREG_BASE+) so they never
+        // conflict with locally-allocated vregs that start at 0.
+        for (name, &(offset, _, _)) in &self.globals {
+            for (&vreg, &off) in &self.global_vregs {
+                if off == offset {
+                    self.variables.insert(name.clone(), vreg);
+                    break;
+                }
+            }
+        }
     }
+
+    /// Base vreg ID for global variables. Local vregs start at 0 and grow up;
+    /// global vregs start here and grow up, so they never collide.
+    const GLOBAL_VREG_BASE: VReg = 0x4000_0000;
 
     /// Generate a unique block label with a prefix.
     fn make_label(&mut self, prefix: &str) -> String {
@@ -405,12 +552,19 @@ impl Lowerer {
 
         let blocks = std::mem::take(&mut self.blocks);
 
-        Ok(IrFunction {
+        let func = IrFunction {
             name: name.to_string(),
             return_type: JStarType::Int,
             blocks,
             next_vreg: self.next_vreg,
-        })
+        };
+
+        // Self-validate: the CFG must be structurally sound before it
+        // ever reaches codegen. Every label referenced in a terminator
+        // must have a corresponding block. No exceptions.
+        func.validate_cfg()?;
+
+        Ok(func)
     }
 
     /// Lower a single statement, appending instructions to current_insts.
@@ -431,25 +585,50 @@ impl Lowerer {
                 }
             }
 
-            TypedStatement::Declare { name, ty, .. } => {
-                let dest = self.alloc_vreg();
-                match ty {
-                    JStarType::Array(count) => {
-                        // Arrays get ArrayAlloc (reserves count * 8 bytes)
-                        self.current_insts.push(IrInst::ArrayAlloc {
-                            dest,
-                            count: *count,
-                        });
+            TypedStatement::Declare { scope, name, ty, size, .. } => {
+                if *scope == ScopeKind::Global {
+                    // Global: already pre-registered in the lower() pre-scan.
+                    // Just ensure the variable mapping is current.
+                    if !self.globals.contains_key(name) {
+                        let alloc_size = match size {
+                            Some(n) => *n * ty.size_bytes(),
+                            None => ty.size_bytes().max(8),
+                        };
+                        let offset = self.global_data_offset;
+                        self.global_data.resize(self.global_data_offset + alloc_size, 0);
+                        self.global_data_offset += alloc_size;
+                        self.globals.insert(name.clone(), (offset, alloc_size, *ty));
+                        let dest = self.next_global_vreg;
+                        self.next_global_vreg += 1;
+                        self.global_vregs.insert(dest, offset);
+                        self.variables.insert(name.clone(), dest);
                     }
-                    _ => {
-                        self.current_insts.push(IrInst::Alloca {
-                            dest,
-                            size: ty.size_bytes(),
-                            ty: *ty,
-                        });
+                    // No Alloca emitted — data is pre-allocated in .data
+                } else {
+                    let dest = self.alloc_vreg();
+                    match ty {
+                        JStarType::Array(count) => {
+                            // Arrays get ArrayAlloc (reserves count * 8 bytes)
+                            self.current_insts.push(IrInst::ArrayAlloc {
+                                dest,
+                                count: *count,
+                            });
+                        }
+                        _ => {
+                            // size is element count; multiply by element size for byte allocation
+                            let alloc_size = match size {
+                                Some(n) => *n * ty.size_bytes(),
+                                None => ty.size_bytes(),
+                            };
+                            self.current_insts.push(IrInst::Alloca {
+                                dest,
+                                size: alloc_size,
+                                ty: *ty,
+                            });
+                        }
                     }
+                    self.variables.insert(name.clone(), dest);
                 }
-                self.variables.insert(name.clone(), dest);
             }
 
             TypedStatement::Return { value, .. } => {
@@ -614,16 +793,26 @@ impl Lowerer {
             &body_label,
         );
 
+        // Save final_terminator — a return inside the while body should
+        // terminate the body block, not leak upward to enclosing scopes.
+        // Same pattern as lower_if (symmetric isolation).
+        let saved_term = final_terminator.take();
+
         // Emit body statements
         for s in body {
             self.lower_statement(s, final_terminator)?;
         }
 
-        // Finish body block with Jump back to cond (back-edge)
-        self.finish_block(
-            Terminator::Jump(cond_label.clone()),
-            &end_label,
-        );
+        // If the body contained a return, use it as the block terminator
+        // (the back-edge is unreachable after a return). Otherwise, jump
+        // back to the condition check (normal loop back-edge).
+        let body_term = final_terminator
+            .take()
+            .unwrap_or_else(|| Terminator::Jump(cond_label.clone()));
+        self.finish_block(body_term, &end_label);
+
+        // Restore the outer scope's terminator
+        *final_terminator = saved_term;
 
         // Now current block is while_end
         Ok(())
@@ -695,14 +884,37 @@ impl Lowerer {
                 Ok(insts)
             }
 
-            TypedStatement::Declare { name, ty, .. } => {
-                let dest = self.alloc_vreg();
-                self.variables.insert(name.clone(), dest);
-                Ok(vec![IrInst::Alloca {
-                    dest,
-                    size: ty.size_bytes(),
-                    ty: *ty,
-                }])
+            TypedStatement::Declare { scope, name, ty, size, .. } => {
+                if *scope == ScopeKind::Global {
+                    // Global: already pre-registered in the lower() pre-scan.
+                    if !self.globals.contains_key(name) {
+                        let alloc_size = match size {
+                            Some(n) => *n * ty.size_bytes(),
+                            None => ty.size_bytes().max(8),
+                        };
+                        let offset = self.global_data_offset;
+                        self.global_data.resize(self.global_data_offset + alloc_size, 0);
+                        self.global_data_offset += alloc_size;
+                        self.globals.insert(name.clone(), (offset, alloc_size, *ty));
+                        let dest = self.next_global_vreg;
+                        self.next_global_vreg += 1;
+                        self.global_vregs.insert(dest, offset);
+                        self.variables.insert(name.clone(), dest);
+                    }
+                    Ok(vec![]) // No Alloca emitted
+                } else {
+                    let dest = self.alloc_vreg();
+                    let alloc_size = match size {
+                        Some(n) => *n * ty.size_bytes(),
+                        None => ty.size_bytes(),
+                    };
+                    self.variables.insert(name.clone(), dest);
+                    Ok(vec![IrInst::Alloca {
+                        dest,
+                        size: alloc_size,
+                        ty: *ty,
+                    }])
+                }
             }
 
             TypedStatement::Nop => Ok(vec![IrInst::Nop]),
@@ -840,50 +1052,71 @@ impl Lowerer {
 
             // Memory
             JStarInstruction::Load => {
-                // Check for array-indexed load: load ARRAY at INDEX
-                if operands.len() >= 2 {
-                    if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = &operands[1] {
-                        let base = self.lower_operand(&operands[0])?;
-                        let index = self.lower_operand(target)?;
-                        insts.push(IrInst::ArrayLoad {
+                let addr = self.get_one_operand(operands)?;
+
+                // Get the array element type from the source variable's declared type.
+                let array_ty = match &operands[0] {
+                    TypedOperand::Addressed { target, .. } => target.ty(),
+                    other => other.ty(),
+                };
+
+                // Check for indexed addressing: "load from buffer at INDEX"
+                let index_operand = operands.get(1).and_then(|op| {
+                    if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = op {
+                        Some(target.as_ref())
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(idx_op) = index_operand {
+                    let idx = self.lower_operand(idx_op)?;
+                    if let IrValue::Reg(base_vreg) = addr {
+                        insts.push(IrInst::LoadIndexed {
                             dest,
-                            base,
-                            index,
+                            base: base_vreg,
+                            index: idx,
+                            ty: array_ty,
                         });
                     } else {
-                        let addr = self.get_one_operand(operands)?;
                         insts.push(IrInst::Load { dest, addr, ty: result_type });
                     }
                 } else {
-                    let addr = self.get_one_operand(operands)?;
-                    insts.push(IrInst::Load {
-                        dest,
-                        addr,
-                        ty: result_type,
-                    });
+                    insts.push(IrInst::Load { dest, addr, ty: result_type });
                 }
             }
             JStarInstruction::Store => {
                 produces_result = false;
                 if operands.len() >= 2 {
                     let value = self.lower_operand(&operands[0])?;
-                    // Check for array-indexed store: store VALUE into ARRAY at INDEX
-                    // operands[1] = Addressed(Into, Variable(array)) and operands[2] = Addressed(At, index)
-                    if operands.len() >= 3 {
-                        if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = &operands[2] {
-                            let addr = self.lower_operand(&operands[1])?;
-                            let index = self.lower_operand(target)?;
-                            insts.push(IrInst::ArrayStore {
-                                base: addr,
-                                index,
-                                value,
-                            });
+                    let addr = self.lower_operand(&operands[1])?;
+
+                    // Get the array element type from the destination variable's declared type.
+                    let array_ty = match &operands[1] {
+                        TypedOperand::Addressed { target, .. } => target.ty(),
+                        other => other.ty(),
+                    };
+
+                    // Check for indexed addressing: "store X into buffer at INDEX"
+                    let index_operand = operands.get(2).and_then(|op| {
+                        if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = op {
+                            Some(target.as_ref())
                         } else {
-                            let addr = self.lower_operand(&operands[1])?;
-                            insts.push(IrInst::Store { addr, value, ty: result_type });
+                            None
+                        }
+                    });
+
+                    if let Some(idx_op) = index_operand {
+                        let idx = self.lower_operand(idx_op)?;
+                        if let IrValue::Reg(base_vreg) = addr {
+                            insts.push(IrInst::StoreIndexed {
+                                base: base_vreg,
+                                index: idx,
+                                value,
+                                ty: array_ty,
+                            });
                         }
                     } else {
-                        let addr = self.lower_operand(&operands[1])?;
                         insts.push(IrInst::Store {
                             addr,
                             value,
@@ -935,6 +1168,27 @@ impl Lowerer {
                     number,
                     args,
                 });
+            }
+
+            JStarInstruction::AddressOf => {
+                // addressof X — get the stack address of variable X
+                let src = self.get_one_operand(operands)?;
+                match src {
+                    IrValue::Reg(src_vreg) => {
+                        insts.push(IrInst::AddressOf {
+                            dest,
+                            src: src_vreg,
+                        });
+                    }
+                    _ => {
+                        // For non-register operands, treat as no-op
+                        insts.push(IrInst::Copy {
+                            dest,
+                            src,
+                            ty: result_type,
+                        });
+                    }
+                }
             }
 
             JStarInstruction::Allocate => {
@@ -1228,6 +1482,7 @@ mod tests {
                 scope: ScopeKind::Local,
                 name: "counter".to_string(),
                 ty: JStarType::Int,
+                size: None,
             }],
         };
         let ir = lower(&prog).unwrap();
@@ -1261,6 +1516,7 @@ mod tests {
                     scope: ScopeKind::Local,
                     name: "counter".to_string(),
                     ty: JStarType::Int,
+                    size: None,
                 },
                 TypedStatement::Execute {
                     op: JStarInstruction::Store,

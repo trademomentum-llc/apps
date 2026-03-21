@@ -1,5 +1,6 @@
 //! morphlex CLI -- compile English into a deterministic vector database.
-//! PQC encrypted: ML-KEM-1024 (FIPS 203) + ML-DSA-65 (FIPS 204) + AES-256-GCM.
+//! PQC encrypted: ML-KEM-1024 (FIPS 203) + ML-DSA-87 (FIPS 204) + SLH-DSA (FIPS 205) + AES-256-GCM.
+//! Key derivation: HKDF-SHA3-512.
 
 use clap::{Parser, Subcommand};
 use morphlex::vectorizer;
@@ -103,6 +104,32 @@ enum Commands {
         /// Optional .jsh script file to execute (omit for REPL mode)
         script: Option<PathBuf>,
     },
+
+    /// Crawl a website recursively, extract text as markdown
+    Crawl {
+        /// Starting URL to crawl
+        url: String,
+
+        /// Maximum link depth from the seed URL
+        #[arg(short, long, default_value = "3")]
+        depth: u32,
+
+        /// Delay between requests in milliseconds
+        #[arg(long, default_value = "1000")]
+        delay: u64,
+
+        /// Output directory for markdown files
+        #[arg(short, long, default_value = "./crawl_data/")]
+        output: PathBuf,
+
+        /// Maximum number of pages to crawl (0 = unlimited)
+        #[arg(long, default_value = "0")]
+        max_pages: u32,
+
+        /// User-agent string for HTTP requests
+        #[arg(long, default_value = "morphlex-crawler/0.1")]
+        user_agent: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -113,9 +140,17 @@ enum JStarAction {
         #[arg(short, long)]
         input: PathBuf,
 
+        /// Additional source files to include (concatenated before main input)
+        #[arg(long)]
+        include: Vec<PathBuf>,
+
         /// Output path for the binary
         #[arg(short, long, default_value = "a.out")]
         output: PathBuf,
+
+        /// Use raw tokenization (bypass NLP pipeline, for self-hosting verification)
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Parse a .jstr source file and display the AST (for debugging)
@@ -131,15 +166,26 @@ enum JStarAction {
 }
 
 /// Write a PQC key bundle to a directory.
+///
+/// Writes all keys needed for decryption and signature verification:
+///   dk.bin      -- ML-KEM-1024 decapsulation key seed (64 bytes)
+///   sk.bin      -- ML-DSA-87 signing key seed (32 bytes)
+///   vk.bin      -- ML-DSA-87 verifying key (2,592 bytes)
+///   slh_sk.bin  -- SLH-DSA-SHAKE-256s signing key (128 bytes)
+///   slh_vk.bin  -- SLH-DSA-SHAKE-256s verifying key (64 bytes)
 fn write_key_bundle(bundle: &morphlex::database::PqcKeyBundle, dir: &std::path::Path) {
     std::fs::create_dir_all(dir).expect("Failed to create key directory");
 
     std::fs::write(dir.join("dk.bin"), &bundle.decapsulation_key)
         .expect("Failed to write decapsulation key");
     std::fs::write(dir.join("sk.bin"), &bundle.signing_key)
-        .expect("Failed to write signing key");
+        .expect("Failed to write ML-DSA-87 signing key");
     std::fs::write(dir.join("vk.bin"), &bundle.verifying_key)
-        .expect("Failed to write verifying key");
+        .expect("Failed to write ML-DSA-87 verifying key");
+    std::fs::write(dir.join("slh_sk.bin"), &bundle.slh_signing_key)
+        .expect("Failed to write SLH-DSA signing key");
+    std::fs::write(dir.join("slh_vk.bin"), &bundle.slh_verifying_key)
+        .expect("Failed to write SLH-DSA verifying key");
 }
 
 fn main() {
@@ -302,10 +348,25 @@ fn main() {
         }
 
         Commands::Jstar { action } => match action {
-            JStarAction::Compile { input, output } => {
-                println!("Compiling {} -> {}", input.display(), output.display());
-                morphlex::jstar::compile_file(&input, &output)
-                    .expect("JStar compilation failed");
+            JStarAction::Compile { input, include, output, raw } => {
+                let mode = if raw { "raw" } else { "nlp" };
+                if include.is_empty() {
+                    println!("Compiling {} -> {} ({})", input.display(), output.display(), mode);
+                    if raw {
+                        morphlex::jstar::compile_file_raw(&input, &output)
+                            .expect("JStar compilation failed");
+                    } else {
+                        morphlex::jstar::compile_file(&input, &output)
+                            .expect("JStar compilation failed");
+                    }
+                } else {
+                    let mut sources: Vec<PathBuf> = include;
+                    sources.push(input.clone());
+                    let paths: Vec<&std::path::Path> = sources.iter().map(|p| p.as_path()).collect();
+                    println!("Compiling {} files -> {} ({})", paths.len(), output.display(), mode);
+                    morphlex::jstar::compile_multi(&paths, &output)
+                        .expect("JStar compilation failed");
+                }
                 println!("Binary written to {}", output.display());
             }
             JStarAction::Parse { input, text } => {
@@ -339,6 +400,36 @@ fn main() {
             }
         },
 
+        Commands::Crawl { url, depth, delay, output, max_pages, user_agent } => {
+            let seed_url = url::Url::parse(&url).unwrap_or_else(|e| {
+                eprintln!("Invalid URL '{}': {}", url, e);
+                std::process::exit(1);
+            });
+
+            let max_pages_opt = if max_pages == 0 {
+                None
+            } else {
+                Some(max_pages as usize)
+            };
+
+            let config = morphlex::crawler::CrawlConfig {
+                seed_url,
+                max_depth: depth,
+                delay_ms: delay,
+                output_dir: output,
+                user_agent,
+                max_pages: max_pages_opt,
+            };
+
+            let summary = morphlex::crawler::crawl(&config).expect("Crawl failed");
+            println!(
+                "Crawl complete: {} pages crawled, {} skipped -> {}",
+                summary.pages_crawled,
+                summary.pages_skipped,
+                summary.output_dir.display(),
+            );
+        }
+
         Commands::Inspect { database, keys } => {
             let dk_bytes = std::fs::read(keys.join("dk.bin"))
                 .expect("Failed to read dk.bin from key directory");
@@ -350,10 +441,18 @@ fn main() {
                 None
             };
 
+            let slh_vk_path = keys.join("slh_vk.bin");
+            let slh_vk_bytes = if slh_vk_path.exists() {
+                Some(std::fs::read(&slh_vk_path).expect("Failed to read slh_vk.bin"))
+            } else {
+                None
+            };
+
             let decrypted = morphlex::database::decrypt(
                 &database,
                 &dk_bytes,
                 vk_bytes.as_deref(),
+                slh_vk_bytes.as_deref(),
             )
             .expect("Decryption failed");
 

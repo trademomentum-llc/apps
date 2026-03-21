@@ -66,6 +66,9 @@ pub enum JStarInstruction {
     // Hashing
     Hash,
 
+    // Address
+    AddressOf,
+
     // System
     Syscall,
     Halt,
@@ -95,6 +98,8 @@ pub enum TokenCategory {
     Literal,
     /// Function definition keyword
     FunctionDef,
+    /// Block-closing keyword ("end") — NOT a halt instruction
+    BlockEnd,
     /// Interjection/Particle → ignored or comment marker
     Ignored,
 }
@@ -223,7 +228,9 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("invoke",   TokenCategory::Operation(JStarInstruction::Call)),
         ("halt",     TokenCategory::Operation(JStarInstruction::Halt)),
         ("exit",     TokenCategory::Operation(JStarInstruction::Halt)),
-        ("end",      TokenCategory::Operation(JStarInstruction::Halt)),
+        ("end",      TokenCategory::BlockEnd),
+        ("true",     TokenCategory::Literal),
+        ("false",    TokenCategory::Literal),
         ("compare",  TokenCategory::Operation(JStarInstruction::Compare)),
         ("equal",    TokenCategory::Operation(JStarInstruction::Equal)),
         ("equals",   TokenCategory::Operation(JStarInstruction::Equal)),
@@ -240,10 +247,13 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("bitnot",   TokenCategory::Operation(JStarInstruction::Not)),
         ("shift",    TokenCategory::Operation(JStarInstruction::Shift)),
         ("allocate", TokenCategory::Operation(JStarInstruction::Allocate)),
+        ("addressof", TokenCategory::Operation(JStarInstruction::AddressOf)),
         ("open",     TokenCategory::Operation(JStarInstruction::Open)),
         ("close",    TokenCategory::Operation(JStarInstruction::Close)),
         ("length",   TokenCategory::Operation(JStarInstruction::Length)),
         ("hash",     TokenCategory::Operation(JStarInstruction::Hash)),
+        // ── Scope (explicit keyword — not a determiner) ──
+        ("global",   TokenCategory::Scope(ScopeKind::Global)),
         // ── Data (type primitives and common nouns) ──
         ("integer",   TokenCategory::Data),
         ("int",       TokenCategory::Data),

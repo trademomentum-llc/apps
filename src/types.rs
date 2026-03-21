@@ -340,6 +340,12 @@ pub enum MorphlexError {
     #[error("Encryption error: {0}")]
     EncryptionError(String),
 
+    #[error("Crawler error: {0}")]
+    CrawlError(String),
+
+    #[error("Codegen error: {0}")]
+    CodegenError(String),
+
     #[error("Search error: {0}")]
     SearchError(String),
 

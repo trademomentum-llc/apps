@@ -184,7 +184,7 @@ impl Parser {
             FlowKind::Conditional | FlowKind::Loop => {
                 if !self.is_at_end() {
                     if let Some(tok) = self.peek() {
-                        if !matches!(tok.category, TokenCategory::Operation(JStarInstruction::Halt)) {
+                        if !matches!(tok.category, TokenCategory::BlockEnd) {
                             match self.parse_statement() {
                                 Ok(stmt) => Some(Box::new(stmt)),
                                 Err(_) => None,
@@ -209,7 +209,7 @@ impl Parser {
         while !self.is_at_end() {
             if let Some(tok) = self.peek() {
                 match &tok.category {
-                    TokenCategory::Operation(JStarInstruction::Halt) => {
+                    TokenCategory::BlockEnd => {
                         self.advance(); // consume "end"
                         break;
                     }
@@ -281,18 +281,22 @@ impl Parser {
                     if matches!(tok.category, TokenCategory::Data) {
                         let actual_name = tok.original.clone();
                         self.advance();
+                        let size = self.try_parse_array_size();
                         return Ok(JStarStatement::Declare {
                             scope,
                             name: actual_name,
                             ty,
+                            size,
                         });
                     }
                 }
 
+                let size = self.try_parse_array_size();
                 Ok(JStarStatement::Declare {
                     scope,
                     name: original,
                     ty,
+                    size,
                 })
             }
             _ => {
@@ -342,6 +346,7 @@ impl Parser {
                 scope: ScopeKind::Local,
                 name,
                 ty: JStarType::Array(size),
+                size: Some(size),
             });
         }
 
@@ -352,19 +357,23 @@ impl Parser {
             if matches!(tok.category, TokenCategory::Data) {
                 let name = tok.original.clone();
                 self.advance();
+                let size = self.try_parse_array_size();
                 return Ok(JStarStatement::Declare {
                     scope: ScopeKind::Local,
                     name,
                     ty,
+                    size,
                 });
             }
         }
 
-        // Single noun — declare it with its own name (use original form)
+        // Single noun — declare it with its own name
+        let size = self.try_parse_array_size();
         Ok(JStarStatement::Declare {
             scope: ScopeKind::Local,
             name: first_original,
             ty,
+            size,
         })
     }
 
@@ -443,13 +452,17 @@ impl Parser {
                 Ok(JStarOperand::Register(reg))
             }
 
-            // Number or string literal
+            // Number, string, or boolean literal
             TokenCategory::Literal => {
                 let lemma = current.lemma.clone();
                 let pos = current.vector.pos;
                 self.advance();
                 if pos == POS_STRING {
                     Ok(JStarOperand::StringLiteral(lemma))
+                } else if lemma == "true" {
+                    Ok(JStarOperand::Immediate(1))
+                } else if lemma == "false" {
+                    Ok(JStarOperand::Immediate(0))
                 } else {
                     let value = lemma.parse::<i64>().unwrap_or(0);
                     Ok(JStarOperand::Immediate(value))
@@ -543,7 +556,7 @@ impl Parser {
                         // Next token is the parameter name — accept regardless of POS
                         if let Some(name_tok) = self.peek() {
                             if !matches!(name_tok.category,
-                                TokenCategory::Operation(JStarInstruction::Halt)
+                                TokenCategory::BlockEnd
                                 | TokenCategory::ControlFlow(_)
                                 | TokenCategory::FunctionDef
                             ) {
@@ -566,7 +579,7 @@ impl Parser {
         let mut body = Vec::new();
         while !self.is_at_end() {
             if let Some(tok) = self.peek() {
-                if matches!(tok.category, TokenCategory::Operation(JStarInstruction::Halt)) {
+                if matches!(tok.category, TokenCategory::BlockEnd) {
                     self.advance(); // consume "end"
                     break;
                 }
@@ -682,6 +695,7 @@ impl Parser {
             scope: ScopeKind::Local,
             name: var_name.clone(),
             ty: JStarType::Int,
+            size: None,
         };
 
         let store_init = JStarStatement::Execute {
@@ -758,7 +772,30 @@ impl Parser {
 
     // ─── Helpers ────────────────────────────────────────────────────────────
 
+    /// Try to parse an array size literal after a declaration name.
+    /// "a buffer 256" → size = Some(256)
+    /// "a counter"    → size = None
+    fn try_parse_array_size(&mut self) -> Option<usize> {
+        if let Some(tok) = self.peek() {
+            if matches!(tok.category, TokenCategory::Literal) && tok.vector.pos == POS_LITERAL {
+                if let Ok(n) = tok.lemma.parse::<usize>() {
+                    if n > 0 {
+                        self.advance();
+                        return Some(n);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Check if the current token can start an operand.
+    ///
+    /// Note: Scope (a/the) is NOT included — articles start declarations,
+    /// not operands. Without this, `store 42 into result` followed by
+    /// `a val` on the next line would consume `a val` as a third operand.
+    /// Scope tokens are still handled by parse_operand when reached via
+    /// recursive calls (e.g., from Addressing: `into the counter`).
     fn is_operand_start(&self) -> bool {
         match self.peek().map(|t| &t.category) {
             Some(TokenCategory::Data) => true,
