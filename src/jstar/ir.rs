@@ -39,6 +39,8 @@ pub struct IrProgram {
 pub struct IrFunction {
     pub name: String,
     pub return_type: JStarType,
+    /// Parameter stack slots in source order (maps to SysV arg registers).
+    pub param_vregs: Vec<VReg>,
     pub blocks: Vec<BasicBlock>,
     pub next_vreg: VReg,
 }
@@ -277,6 +279,15 @@ pub enum Terminator {
         true_label: String,
         false_label: String,
     },
+    /// Fused compare+branch: cmp lhs, rhs then jcc true_label else jmp false_label
+    /// Emits compact cmp+jcc instead of setcc+test+jnz+jmp
+    CmpBranch {
+        lhs: IrValue,
+        rhs: IrValue,
+        kind: CmpKind,
+        true_label: String,
+        false_label: String,
+    },
     /// Process exit (halt)
     Halt(IrValue),
     /// Unreachable (for dead code after return)
@@ -289,7 +300,8 @@ impl Terminator {
     pub fn referenced_labels(&self) -> Vec<&str> {
         match self {
             Terminator::Jump(label) => vec![label.as_str()],
-            Terminator::Branch { true_label, false_label, .. } => {
+            Terminator::Branch { true_label, false_label, .. }
+            | Terminator::CmpBranch { true_label, false_label, .. } => {
                 vec![true_label.as_str(), false_label.as_str()]
             }
             Terminator::Return(_)
@@ -404,6 +416,7 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
             // Lower each function definition
             lowerer.reset();
             // Declare parameters as variables
+            let mut param_vregs = Vec::with_capacity(params.len());
             for (pname, pty) in params {
                 let dest = lowerer.alloc_vreg();
                 lowerer.current_insts.push(IrInst::Alloca {
@@ -412,10 +425,12 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
                     ty: *pty,
                 });
                 lowerer.variables.insert(pname.clone(), dest);
+                param_vregs.push(dest);
             }
             let func = lowerer.lower_to_function(name, body)?;
             functions.push(IrFunction {
                 return_type: *return_type,
+                param_vregs,
                 ..func
             });
         }
@@ -555,6 +570,7 @@ impl Lowerer {
         let func = IrFunction {
             name: name.to_string(),
             return_type: JStarType::Int,
+            param_vregs: Vec::new(),
             blocks,
             next_vreg: self.next_vreg,
         };
@@ -701,19 +717,30 @@ impl Lowerer {
         };
         let end_label = self.make_label("if_end");
 
-        // Lower the condition into the current block
-        let cond_vreg = self.lower_condition(condition)?;
-
-        // Finish current block with Branch
+        // Lower the condition — try fused compare+branch first
         let false_target = else_label.as_deref().unwrap_or(&end_label).to_string();
-        self.finish_block(
-            Terminator::Branch {
-                cond: cond_vreg,
-                true_label: body_label.clone(),
-                false_label: false_target,
-            },
-            &body_label,
-        );
+        if let Some((lhs, rhs, kind)) = self.try_lower_condition_fused(condition)? {
+            self.finish_block(
+                Terminator::CmpBranch {
+                    lhs,
+                    rhs,
+                    kind,
+                    true_label: body_label.clone(),
+                    false_label: false_target,
+                },
+                &body_label,
+            );
+        } else {
+            let cond_vreg = self.lower_condition(condition)?;
+            self.finish_block(
+                Terminator::Branch {
+                    cond: cond_vreg,
+                    true_label: body_label.clone(),
+                    false_label: false_target,
+                },
+                &body_label,
+            );
+        }
 
         // Emit true-branch body
         // Save final_terminator — if the branch has a return, it should be
@@ -780,18 +807,29 @@ impl Lowerer {
             &cond_label,
         );
 
-        // Emit condition into the cond block
-        let cond_vreg = self.lower_condition(condition)?;
-
-        // Finish cond block with Branch
-        self.finish_block(
-            Terminator::Branch {
-                cond: cond_vreg,
-                true_label: body_label.clone(),
-                false_label: end_label.clone(),
-            },
-            &body_label,
-        );
+        // Emit condition — try fused compare+branch first
+        if let Some((lhs, rhs, kind)) = self.try_lower_condition_fused(condition)? {
+            self.finish_block(
+                Terminator::CmpBranch {
+                    lhs,
+                    rhs,
+                    kind,
+                    true_label: body_label.clone(),
+                    false_label: end_label.clone(),
+                },
+                &body_label,
+            );
+        } else {
+            let cond_vreg = self.lower_condition(condition)?;
+            self.finish_block(
+                Terminator::Branch {
+                    cond: cond_vreg,
+                    true_label: body_label.clone(),
+                    false_label: end_label.clone(),
+                },
+                &body_label,
+            );
+        }
 
         // Save final_terminator — a return inside the while body should
         // terminate the body block, not leak upward to enclosing scopes.
@@ -820,6 +858,38 @@ impl Lowerer {
 
     /// Lower a condition statement and return the vreg holding the result.
     /// If no condition is provided, defaults to Imm(1) (always true).
+    /// Try to lower a condition as a fused compare+branch.
+    /// Returns Some((lhs, rhs, kind)) if the condition is a simple comparison.
+    /// Returns None if it's not fuseable (caller should use lower_condition + Branch).
+    fn try_lower_condition_fused(
+        &mut self,
+        condition: &Option<Box<TypedStatement>>,
+    ) -> MorphResult<Option<(IrValue, IrValue, CmpKind)>> {
+        if let Some(cond_stmt) = condition {
+            if let TypedStatement::Execute { op, operands, .. } = cond_stmt.as_ref() {
+                let cmp_kind = match op {
+                    JStarInstruction::Compare => Some(CmpKind::Ne),
+                    JStarInstruction::Equal => Some(CmpKind::Eq),
+                    JStarInstruction::Less => Some(CmpKind::Lt),
+                    JStarInstruction::Greater => Some(CmpKind::Gt),
+                    _ => None,
+                };
+                if let Some(kind) = cmp_kind {
+                    if operands.len() >= 2 {
+                        let lhs = self.lower_operand(&operands[0])?;
+                        let rhs = self.lower_operand(&operands[1])?;
+                        // Still need to allocate a dest vreg for the result (used by last_result)
+                        let dest = self.alloc_vreg();
+                        self.last_result = Some(dest);
+                        // Don't emit Compare IR — the CmpBranch terminator handles it
+                        return Ok(Some((lhs, rhs, kind)));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn lower_condition(
         &mut self,
         condition: &Option<Box<TypedStatement>>,
@@ -1109,6 +1179,10 @@ impl Lowerer {
                     if let Some(idx_op) = index_operand {
                         let idx = self.lower_operand(idx_op)?;
                         if let IrValue::Reg(base_vreg) = addr {
+                            // TRACE: dump all StoreIndexed IR for syscall section analysis
+                            if std::env::var("JSTAR_TRACE_IR").is_ok() {
+                                eprintln!("[IR] StoreIndexed base=v{} idx={:?} val={:?} ty={:?}", base_vreg, idx, value, array_ty);
+                            }
                             insts.push(IrInst::StoreIndexed {
                                 base: base_vreg,
                                 index: idx,
@@ -1594,13 +1668,14 @@ mod tests {
         let func = &ir.functions[0];
         assert_eq!(func.blocks.len(), 3, "if should produce 3 basic blocks");
 
-        // Block 0 (entry): terminates with Branch
+        // Block 0 (entry): terminates with CmpBranch or Branch
         match &func.blocks[0].terminator {
-            Terminator::Branch { true_label, false_label, .. } => {
+            Terminator::CmpBranch { true_label, false_label, .. }
+            | Terminator::Branch { true_label, false_label, .. } => {
                 assert!(true_label.starts_with("if_body"));
                 assert!(false_label.starts_with("if_end"));
             }
-            other => panic!("Expected Branch, got {:?}", other),
+            other => panic!("Expected CmpBranch/Branch, got {:?}", other),
         }
 
         // Block 1 (if_body): terminates with Jump to if_end
@@ -1648,13 +1723,14 @@ mod tests {
             other => panic!("Expected Jump, got {:?}", other),
         }
 
-        // Block 1 (while_cond): Branch to while_body or while_end
+        // Block 1 (while_cond): CmpBranch or Branch to while_body or while_end
         match &func.blocks[1].terminator {
-            Terminator::Branch { true_label, false_label, .. } => {
+            Terminator::CmpBranch { true_label, false_label, .. }
+            | Terminator::Branch { true_label, false_label, .. } => {
                 assert!(true_label.starts_with("while_body"));
                 assert!(false_label.starts_with("while_end"));
             }
-            other => panic!("Expected Branch, got {:?}", other),
+            other => panic!("Expected CmpBranch/Branch, got {:?}", other),
         }
 
         // Block 2 (while_body): Jump back to while_cond (back-edge)

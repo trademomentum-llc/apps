@@ -1,0 +1,5127 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# compiler.jstr — JStar self-hosted compiler
+#
+# Reads JStar source from stdin, writes ELF x86-64 binary to stdout.
+# Usage: ./compiler < input.jstr > output.elf
+#
+# Architecture: single-pass tokenize, single-pass codegen.
+# Large buffers use global declarations (.data section); temporaries are stack-local.
+#
+# Self-hosting verification:
+#   cargo run -- jstar compile --raw --input compiler.jstr -o jstar1
+#   ./jstar1 < compiler.jstr > jstar2
+#   chmod +x jstar2
+#   ./jstar2 < compiler.jstr > jstar3
+#   cmp jstar2 jstar3   # byte-identical = self-hosting verified
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Data declarations ────────────────────────────────────────────────────────
+
+# Input buffer: source code read from stdin (256KB for self-compilation)
+global byte input 262144
+global input_len
+
+# Output buffer: ELF binary written to stdout (256KB for self-compilation)
+global byte output 262144
+global output_len
+
+# .text section (machine code)
+global byte text 65536
+global text_len
+
+# .data section (string literals)
+global byte datasec 8192
+global data_len
+
+# ─── Token arrays ────────────────────────────────────────────────────────────
+# Each token is described by its start offset in input and its length.
+# Token type codes:
+#   0 = unknown/variable    1 = return     2 = add        3 = subtract
+#   4 = multiply            5 = divide     6 = store      7 = load
+#   8 = compare             9 = equal     10 = less      11 = greater
+#  12 = print              13 = if        14 = else      15 = while
+#  16 = end                17 = a/an      18 = the       19 = into
+#  20 = from               21 = at        22 = it/that   23 = define
+#  24 = with               25 = call      26 = syscall   27 = bitand
+#  28 = bitor              29 = bitxor    30 = shift     31 = halt/exit
+#  32 = addressof          33 = allocate  34 = modulo    35 = negate
+#  36 = push               37 = pop       38 = bitnot
+#  50 = literal (number)
+#  51 = string literal
+#  52 = variable name (non-keyword identifier)
+#  53 = byte (type noun)   54 = long (type noun)  55 = integer (type noun)
+#  56 = short (type noun)  57 = boolean (type noun) 58 = char (type noun)
+#  59 = global (scope keyword)
+
+global long tok_start 16384
+global long tok_len 16384
+global long tok_type 16384
+global tok_count
+
+# ─── Compiler state ──────────────────────────────────────────────────────────
+
+# Virtual register tracking
+global vreg_next
+global long vreg_size 2048
+global vreg_total_size
+global frame_size
+
+# Variable name-to-vreg mapping (parallel arrays)
+# var_name_start[i], var_name_len[i] = token boundaries in input
+# var_vreg[i] = the vreg assigned to variable i
+# var_type[i] = element type (0=qword/int, 1=byte)
+global long var_name_start 512
+global long var_name_len 512
+global long var_vreg 512
+global long var_type 512
+global long var_offset 512
+global var_count
+
+# Label/fixup tracking for jumps
+global long label_offset 512
+global label_count
+global long fixup_patch 512
+global long fixup_label 512
+global fixup_count
+
+# Control flow stack (for nested if/while)
+# Each entry: [kind, label_cond, label_body, label_else, label_end]
+# kind: 0=if, 1=while
+global long cf_kind 256
+global long cf_label_cond 256
+global long cf_label_end 256
+global cf_depth
+
+# Function tracking
+global long func_name_start 256
+global long func_name_len 256
+global long func_offset 256
+global long func_param_count 256
+global func_count
+global is_in_function
+global current_func_idx
+
+# Call fixup tracking (separate from jump fixups)
+global long call_patch 256
+global long call_func 256
+global call_fixup_count
+
+# Debug: track 0xB5 write position for post-patch verification
+global rsi_check_pos
+
+# Misc temporaries
+a i
+a j
+a k
+a ch
+a temp
+a temp2
+a temp3
+a temp4
+a matched
+a tok_idx
+a byte_val
+
+# Variable lookup temporaries
+a lookup_src
+a lookup_len
+a lookup_i
+a lookup_j
+a lookup_k
+a lookup_a
+a lookup_b
+a lookup_match
+a lookup_result
+a lookup_cmp_start
+a lookup_cmp_len
+
+# Operand loading temporaries
+a op_type
+a op_val
+a op_off
+
+# Saved first-operand for two-operand instructions
+a a_type
+a a_val
+a a_off
+
+# Indexed store/load: X's offset and type
+a x_off
+a x_type
+a x_idx
+
+# Syscall arg count
+a sc_argc
+
+# Stdin read loop flag
+global read_done
+
+# Comparison and control flow
+a cmp_op
+a cf_patch
+
+# ─── Phase 1: Read input from stdin ──────────────────────────────────────────
+
+store 0 into input_len
+store 0 into output_len
+store 0 into text_len
+store 0 into data_len
+store 0 into tok_count
+store 0 into vreg_next
+store 0 into vreg_total_size
+store 0 into var_count
+store 0 into label_count
+store 0 into fixup_count
+store 0 into cf_depth
+store 0 into func_count
+store 0 into is_in_function
+store 0 into call_fixup_count
+
+# Read from stdin (fd=0) into input buffer, looping until EOF
+store 0 into input_len
+store 0 into read_done
+while equal read_done 0
+    addressof input
+    add it input_len
+    store it into temp
+    subtract 262144 input_len
+    store it into temp2
+    syscall 0 0 temp temp2
+    store it into temp3
+    if equal temp3 0
+        store 1 into read_done
+    else
+        add input_len temp3
+        store it into input_len
+    end
+end
+
+# ─── Phase 2: Tokenize ───────────────────────────────────────────────────────
+# Split input into tokens by whitespace. Classify each token.
+
+store 0 into i
+store 0 into tok_count
+
+while compare i input_len
+    # Skip whitespace (space=32, tab=9, newline=10, carriage return=13)
+    load from input at i
+    store it into ch
+
+    # Check if whitespace
+    store 0 into matched
+    if equal ch 32
+        store 1 into matched
+    end
+    if equal ch 10
+        store 1 into matched
+    end
+    if equal ch 9
+        store 1 into matched
+    end
+    if equal ch 13
+        store 1 into matched
+    end
+
+    if equal matched 0
+        # Not whitespace — start of a token
+
+        # Check for comment line (# at start of line or after whitespace)
+        if equal ch 35
+            # Skip until end of line or end of input
+            store 0 into temp3
+            while equal temp3 0
+                if equal i input_len
+                    store 1 into temp3
+                else
+                    load from input at i
+                    store it into temp4
+                    add i 1
+                    store it into i
+                    if equal temp4 10
+                        store 1 into temp3
+                    end
+                end
+            end
+            store 1 into matched
+        end
+
+        if equal matched 0
+            # Check for string literal (starts with double quote = 34)
+            if equal ch 34
+                # String literal: scan until closing quote
+                add i 1
+                store it into i
+                store i into temp2
+
+                store 0 into matched
+                while equal matched 0
+                    if equal i input_len
+                        store 1 into matched
+                    else
+                        load from input at i
+                        if equal it 34
+                            store 1 into matched
+                        else
+                            add i 1
+                            store it into i
+                        end
+                    end
+                end
+
+                # Record string token: start=temp2, len=i-temp2
+                subtract i temp2
+                store it into temp3
+
+                store temp2 into tok_start at tok_count
+                store temp3 into tok_len at tok_count
+                store 51 into tok_type at tok_count
+
+                add tok_count 1
+                store it into tok_count
+
+                # Skip closing quote
+                add i 1
+                store it into i
+            else
+                # Regular token: scan until whitespace
+                store i into temp2
+
+                store 0 into matched
+                while equal matched 0
+                    if equal i input_len
+                        store 1 into matched
+                    else
+                        load from input at i
+                        store it into temp4
+                        # Check whitespace
+                        store 0 into temp3
+                        if equal temp4 32
+                            store 1 into temp3
+                        end
+                        if equal temp4 10
+                            store 1 into temp3
+                        end
+                        if equal temp4 9
+                            store 1 into temp3
+                        end
+                        if equal temp4 13
+                            store 1 into temp3
+                        end
+                        if equal temp3 0
+                            add i 1
+                            store it into i
+                        else
+                            store 1 into matched
+                        end
+                    end
+                end
+
+                # Token boundaries: start=temp2, len=i-temp2
+                subtract i temp2
+                store it into temp3
+
+                store temp2 into tok_start at tok_count
+                store temp3 into tok_len at tok_count
+
+                # ── Classify token ─────────────────────────────────
+                # First check if it is a number (first char is digit 0-9)
+                load from input at temp2
+                store it into ch
+
+                store 0 into temp4
+                if greater ch 47
+                    if less ch 58
+                        store 1 into temp4
+                    end
+                end
+
+                if compare temp4 0
+                    # It is a number literal
+                    store 50 into tok_type at tok_count
+                else
+                    # Not a number — classify by keyword matching
+                    # We pack the first 8 bytes into a qword for fast comparison.
+                    # Also check length to disambiguate.
+
+                    store 52 into tok_type at tok_count
+
+                    # ── Length-based keyword dispatch ──────────────
+                    # Length 1: a
+                    if equal temp3 1
+                        load from input at temp2
+                        if equal it 97
+                            store 17 into tok_type at tok_count
+                        end
+                    end
+
+                    # Length 2: an, at, if, it, or, to
+                    if equal temp3 2
+                        load from input at temp2
+                        store it into ch
+                        add temp2 1
+                        store it into temp4
+                        load from input at temp4
+                        store it into byte_val
+
+                        # "an" = 97,110
+                        if equal ch 97
+                            if equal byte_val 110
+                                store 17 into tok_type at tok_count
+                            end
+                        end
+                        # "at" = 97,116
+                        if equal ch 97
+                            if equal byte_val 116
+                                store 21 into tok_type at tok_count
+                            end
+                        end
+                        # "if" = 105,102
+                        if equal ch 105
+                            if equal byte_val 102
+                                store 13 into tok_type at tok_count
+                            end
+                        end
+                        # "it" = 105,116
+                        if equal ch 105
+                            if equal byte_val 116
+                                store 22 into tok_type at tok_count
+                            end
+                        end
+                        # "or" -- skip (not used as keyword in codegen)
+                        # "to" = 116,111
+                        if equal ch 116
+                            if equal byte_val 111
+                                store 19 into tok_type at tok_count
+                            end
+                        end
+                    end
+
+                    # Length 3: add, end, the, pop
+                    if equal temp3 3
+                        load from input at temp2
+                        store it into ch
+                        add temp2 1
+                        store it into temp4
+                        load from input at temp4
+                        store it into byte_val
+                        add temp2 2
+                        store it into temp4
+                        load from input at temp4
+                        store it into k
+
+                        # "add" = 97,100,100
+                        if equal ch 97
+                            if equal byte_val 100
+                                if equal k 100
+                                    store 2 into tok_type at tok_count
+                                end
+                            end
+                        end
+                        # "end" = 101,110,100
+                        if equal ch 101
+                            if equal byte_val 110
+                                if equal k 100
+                                    store 16 into tok_type at tok_count
+                                end
+                            end
+                        end
+                        # "the" = 116,104,101
+                        if equal ch 116
+                            if equal byte_val 104
+                                if equal k 101
+                                    store 18 into tok_type at tok_count
+                                end
+                            end
+                        end
+                        # "pop" = 112,111,112
+                        if equal ch 112
+                            if equal byte_val 111
+                                if equal k 112
+                                    store 37 into tok_type at tok_count
+                                end
+                            end
+                        end
+                        # "int" = 105,110,116
+                        if equal ch 105
+                            if equal byte_val 110
+                                if equal k 116
+                                    store 55 into tok_type at tok_count
+                                end
+                            end
+                        end
+                    end
+
+                    # Length 4: call, else, from, halt, into, load, less, long, byte, that, void, with, push, exit, char, bool
+                    if equal temp3 4
+                        load from input at temp2
+                        store it into ch
+                        add temp2 1
+                        store it into temp4
+                        load from input at temp4
+                        store it into byte_val
+
+                        # "call" = 99,97,108,108
+                        if equal ch 99
+                            if equal byte_val 97
+                                store 25 into tok_type at tok_count
+                            end
+                        end
+                        # "else" = 101,108,115,101
+                        if equal ch 101
+                            if equal byte_val 108
+                                store 14 into tok_type at tok_count
+                            end
+                        end
+                        # "from" = 102,114,111,109
+                        if equal ch 102
+                            if equal byte_val 114
+                                store 20 into tok_type at tok_count
+                            end
+                        end
+                        # "halt" = 104,97,108,116
+                        if equal ch 104
+                            if equal byte_val 97
+                                store 31 into tok_type at tok_count
+                            end
+                        end
+                        # "into" = 105,110,116,111
+                        if equal ch 105
+                            if equal byte_val 110
+                                store 19 into tok_type at tok_count
+                            end
+                        end
+                        # "load" = 108,111,97,100
+                        if equal ch 108
+                            if equal byte_val 111
+                                store 7 into tok_type at tok_count
+                            end
+                        end
+                        # "less" = 108,101,115,115
+                        if equal ch 108
+                            if equal byte_val 101
+                                store 10 into tok_type at tok_count
+                            end
+                        end
+                        # "long" = 108,111,110,103
+                        # conflicts with "load" above at ch=108,byte_val=111
+                        # need to check 3rd char: 'a' for load, 'n' for long
+                        # Fix: be more precise
+                        # Actually "load" second char is 'o'=111 and "long" second char is 'o'=111
+                        # Third char: load='a'=97, long='n'=110
+                        if equal ch 108
+                            if equal byte_val 111
+                                add temp2 2
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 110
+                                    # "long"
+                                    store 54 into tok_type at tok_count
+                                end
+                            end
+                        end
+                        # "byte" = 98,121,116,101
+                        if equal ch 98
+                            if equal byte_val 121
+                                store 53 into tok_type at tok_count
+                            end
+                        end
+                        # "that" = 116,104,97,116
+                        if equal ch 116
+                            if equal byte_val 104
+                                add temp2 2
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 97
+                                    store 22 into tok_type at tok_count
+                                end
+                            end
+                        end
+                        # "with" = 119,105,116,104
+                        if equal ch 119
+                            if equal byte_val 105
+                                store 24 into tok_type at tok_count
+                            end
+                        end
+                        # "push" = 112,117,115,104
+                        if equal ch 112
+                            if equal byte_val 117
+                                store 36 into tok_type at tok_count
+                            end
+                        end
+                        # "exit" = 101,120,105,116
+                        if equal ch 101
+                            if equal byte_val 120
+                                store 31 into tok_type at tok_count
+                            end
+                        end
+                        # "char" = 99,104,97,114
+                        if equal ch 99
+                            if equal byte_val 104
+                                store 58 into tok_type at tok_count
+                            end
+                        end
+                        # "bool" = 98,111,111,108
+                        if equal ch 98
+                            if equal byte_val 111
+                                store 57 into tok_type at tok_count
+                            end
+                        end
+                        # "void" -- skip (not needed for codegen)
+                    end
+
+                    # Length 5: equal, print, shift, store, while, short
+                    if equal temp3 5
+                        load from input at temp2
+                        store it into ch
+                        add temp2 1
+                        store it into temp4
+                        load from input at temp4
+                        store it into byte_val
+
+                        # "equal" = 101,113
+                        if equal ch 101
+                            if equal byte_val 113
+                                store 9 into tok_type at tok_count
+                            end
+                        end
+                        # "print" = 112,114
+                        if equal ch 112
+                            if equal byte_val 114
+                                store 12 into tok_type at tok_count
+                            end
+                        end
+                        # "shift" = 115,104
+                        if equal ch 115
+                            if equal byte_val 104
+                                store 30 into tok_type at tok_count
+                            end
+                        end
+                        # "store" = 115,116
+                        if equal ch 115
+                            if equal byte_val 116
+                                store 6 into tok_type at tok_count
+                            end
+                        end
+                        # "while" = 119,104
+                        if equal ch 119
+                            if equal byte_val 104
+                                store 15 into tok_type at tok_count
+                            end
+                        end
+                        # "short" = 115,104 -- conflicts with "shift"!
+                        # Need 3rd char: shift='i'=105, short='o'=111
+                        if equal ch 115
+                            if equal byte_val 104
+                                add temp2 2
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 111
+                                    store 56 into tok_type at tok_count
+                                end
+                            end
+                        end
+                        # "bitor" = 98,105
+                        if equal ch 98
+                            if equal byte_val 105
+                                add temp2 2
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 116
+                                    store 28 into tok_type at tok_count
+                                end
+                            end
+                        end
+                    end
+
+                    # Length 6: define, divide, global, modulo, negate, return, bitand, bitxor, bitnot
+                    if equal temp3 6
+                        load from input at temp2
+                        store it into ch
+                        add temp2 1
+                        store it into temp4
+                        load from input at temp4
+                        store it into byte_val
+
+                        # "define" = 100,101
+                        if equal ch 100
+                            if equal byte_val 101
+                                store 23 into tok_type at tok_count
+                            end
+                        end
+                        # "divide" = 100,105
+                        if equal ch 100
+                            if equal byte_val 105
+                                store 5 into tok_type at tok_count
+                            end
+                        end
+                        # "global" = 103,108
+                        if equal ch 103
+                            if equal byte_val 108
+                                store 59 into tok_type at tok_count
+                            end
+                        end
+                        # "modulo" = 109,111
+                        if equal ch 109
+                            store 34 into tok_type at tok_count
+                        end
+                        # "negate" = 110,101
+                        if equal ch 110
+                            store 35 into tok_type at tok_count
+                        end
+                        # "return" = 114,101
+                        if equal ch 114
+                            if equal byte_val 101
+                                store 1 into tok_type at tok_count
+                            end
+                        end
+                        # "bitand" = 98,105,116,97
+                        if equal ch 98
+                            if equal byte_val 105
+                                add temp2 4
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 110
+                                    store 27 into tok_type at tok_count
+                                end
+                            end
+                        end
+                        # "bitxor" = 98,105,116,120
+                        if equal ch 98
+                            if equal byte_val 105
+                                add temp2 4
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 111
+                                    store 29 into tok_type at tok_count
+                                end
+                            end
+                        end
+                        # "bitnot" = 98,105,116,110,111,116
+                        if equal ch 98
+                            if equal byte_val 105
+                                add temp2 4
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 116
+                                    store 38 into tok_type at tok_count
+                                end
+                            end
+                        end
+                    end
+
+                    # Length 7: compare, greater, integer, syscall, boolean
+                    if equal temp3 7
+                        load from input at temp2
+                        store it into ch
+
+                        # "compare" = 99
+                        if equal ch 99
+                            store 8 into tok_type at tok_count
+                        end
+                        # "greater" = 103
+                        if equal ch 103
+                            store 11 into tok_type at tok_count
+                        end
+                        # "integer" = 105
+                        if equal ch 105
+                            store 55 into tok_type at tok_count
+                        end
+                        # "syscall" = 115
+                        if equal ch 115
+                            store 26 into tok_type at tok_count
+                        end
+                        # "boolean" = 98
+                        if equal ch 98
+                            store 57 into tok_type at tok_count
+                        end
+                    end
+
+                    # Length 8: subtract, multiply, allocate, addressof
+                    if equal temp3 8
+                        load from input at temp2
+                        store it into ch
+
+                        # "subtract" = 115
+                        if equal ch 115
+                            store 3 into tok_type at tok_count
+                        end
+                        # "multiply" = 109
+                        if equal ch 109
+                            store 4 into tok_type at tok_count
+                        end
+                        # "allocate" = 97
+                        if equal ch 97
+                            add temp2 1
+                            store it into temp4
+                            load from input at temp4
+                            if equal it 108
+                                store 33 into tok_type at tok_count
+                            else
+                                # "addressof" would be length 9
+                                store 52 into tok_type at tok_count
+                            end
+                        end
+                    end
+
+                    # Length 9: addressof
+                    if equal temp3 9
+                        load from input at temp2
+                        store it into ch
+                        if equal ch 97
+                            add temp2 1
+                            store it into temp4
+                            load from input at temp4
+                            if equal it 100
+                                store 32 into tok_type at tok_count
+                            end
+                        end
+                    end
+                end
+
+                add tok_count 1
+                store it into tok_count
+            end
+        end
+    else
+        # Whitespace: skip
+        add i 1
+        store it into i
+    end
+end
+
+# ─── Phase 3: Parse number literals ──────────────────────────────────────────
+# Convert ASCII digit sequences in input to integer values.
+# Store parsed values in a parallel array.
+
+global long tok_value 16384
+
+store 0 into i
+while compare i tok_count
+    load from tok_type at i
+    if equal it 50
+        # Parse number from input bytes (decimal or hex with 0x prefix)
+        load from tok_start at i
+        store it into temp
+        load from tok_len at i
+        store it into temp2
+
+        # Check for hex prefix: 0x (bytes 48, 120)
+        store 0 into temp3
+        store 0 into matched
+        if greater temp2 2
+            load from input at temp
+            if equal it 48
+                add temp 1
+                load from input at it
+                if equal it 120
+                    # Hex literal: parse digits after "0x"
+                    store 1 into matched
+                    store 0 into temp3
+                    store 2 into j
+                    while compare j temp2
+                        add temp j
+                        store it into temp4
+                        load from input at temp4
+                        store it into k
+
+                        # Convert hex digit to value (0-15)
+                        # '0'-'9' = 48-57 → 0-9
+                        # 'a'-'f' = 97-102 → 10-15
+                        # 'A'-'F' = 65-70 → 10-15
+                        if greater k 96
+                            subtract k 87
+                            store it into k
+                        else
+                            if greater k 64
+                                subtract k 55
+                                store it into k
+                            else
+                                subtract k 48
+                                store it into k
+                            end
+                        end
+
+                        multiply temp3 16
+                        add it k
+                        store it into temp3
+
+                        add j 1
+                        store it into j
+                    end
+                end
+            end
+        end
+
+        if equal matched 0
+            # Decimal literal
+            store 0 into temp3
+            store 0 into j
+            while compare j temp2
+                add temp j
+                store it into temp4
+                load from input at temp4
+                subtract it 48
+                store it into k
+
+                multiply temp3 10
+                add it k
+                store it into temp3
+
+                add j 1
+                store it into j
+            end
+        end
+
+        store temp3 into tok_value at i
+    else
+        store 0 into tok_value at i
+    end
+
+    add i 1
+    store it into i
+end
+
+# ─── Phase 4: Pre-scan for function definitions ─────────────────────────────
+# Find all "define" keywords, record function name and token range.
+
+store 0 into i
+store 0 into func_count
+while compare i tok_count
+    load from tok_type at i
+    if equal it 23
+        # "define" — next token is function name
+        add i 1
+        store it into temp
+
+        if compare temp tok_count
+            load from tok_start at temp
+            store it into temp2
+            load from tok_len at temp
+            store it into temp3
+
+            store temp2 into func_name_start at func_count
+            store temp3 into func_name_len at func_count
+            store 0 into func_param_count at func_count
+
+            add func_count 1
+            store it into func_count
+        end
+    end
+
+    add i 1
+    store it into i
+end
+
+# ─── Helper: emit a byte to the text buffer ──────────────────────────────────
+# Since we can not use functions, we use inline patterns:
+#   store BYTE into text at text_len
+#   add text_len 1
+#   store it into text_len
+
+# ─── Phase 5: Code generation ────────────────────────────────────────────────
+# Walk tokens left to right. Emit x86-64 machine code.
+
+# Step 1: Emit function bodies first (non-_start code)
+# Step 2: Emit _start (top-level code)
+# Step 3: Apply fixups
+
+# For now, emit only _start (no function support in initial bootstrap)
+
+# ── Emit prologue for _start ──
+# push rbp = 0x55
+store 0x55 into text at text_len
+add text_len 1
+store it into text_len
+
+# mov rbp, rsp = 0x48 0x89 0xE5
+store 0x48 into text at text_len
+add text_len 1
+store it into text_len
+store 0x89 into text at text_len
+add text_len 1
+store it into text_len
+store 0xE5 into text at text_len
+add text_len 1
+store it into text_len
+
+# ── Stack probing prologue ──
+# Runtime probing loop: loads frame_size into ecx, subtracts 4096 per
+# iteration while touching each page, then subtracts the remainder.
+# This prevents segfault from skipping the stack guard page on large frames.
+#
+# mov ecx, FRAME_SIZE    → B9 xx xx xx xx  (patch later)
+# probe_loop:
+# cmp ecx, 4096          → 81 F9 00 10 00 00
+# jle probe_done (+22)   → 0F 8E 16 00 00 00
+# sub rsp, 4096          → 48 81 EC 00 10 00 00
+# mov rax, [rsp]         → 48 8B 04 24
+# sub ecx, 4096          → 81 E9 00 10 00 00
+# jmp probe_loop (-34)   → E9 DE FF FF FF
+# probe_done:
+# sub rsp, rcx           → 48 29 CC
+
+# mov ecx, FRAME_SIZE (placeholder)
+store 0xB9 into text at text_len
+add text_len 1
+store it into text_len
+# Record patch position
+global frame_patch_offset
+store text_len into frame_patch_offset
+# Emit 4 placeholder bytes for frame_size
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+
+# cmp ecx, 4096 → 81 F9 00 10 00 00
+store 0x81 into text at text_len
+add text_len 1
+store it into text_len
+store 0xF9 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0x10 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+
+# jle probe_done (+22) → 0F 8E 16 00 00 00
+store 0x0F into text at text_len
+add text_len 1
+store it into text_len
+store 0x8E into text at text_len
+add text_len 1
+store it into text_len
+store 0x16 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+
+# sub rsp, 4096 → 48 81 EC 00 10 00 00
+store 0x48 into text at text_len
+add text_len 1
+store it into text_len
+store 0x81 into text at text_len
+add text_len 1
+store it into text_len
+store 0xEC into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0x10 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+
+# mov rax, [rsp] → 48 8B 04 24
+store 0x48 into text at text_len
+add text_len 1
+store it into text_len
+store 0x8B into text at text_len
+add text_len 1
+store it into text_len
+store 0x04 into text at text_len
+add text_len 1
+store it into text_len
+store 0x24 into text at text_len
+add text_len 1
+store it into text_len
+
+# sub ecx, 4096 → 81 E9 00 10 00 00
+store 0x81 into text at text_len
+add text_len 1
+store it into text_len
+store 0xE9 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0x10 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+store 0 into text at text_len
+add text_len 1
+store it into text_len
+
+# jmp probe_loop (-34) → E9 DE FF FF FF
+store 0xE9 into text at text_len
+add text_len 1
+store it into text_len
+store 0xDE into text at text_len
+add text_len 1
+store it into text_len
+store 0xFF into text at text_len
+add text_len 1
+store it into text_len
+store 0xFF into text at text_len
+add text_len 1
+store it into text_len
+store 0xFF into text at text_len
+add text_len 1
+store it into text_len
+
+# sub rsp, rcx → 48 29 CC
+store 0x48 into text at text_len
+add text_len 1
+store it into text_len
+store 0x29 into text at text_len
+add text_len 1
+store it into text_len
+store 0xCC into text at text_len
+add text_len 1
+store it into text_len
+
+# ── Walk tokens and emit code ──
+store 0 into tok_idx
+
+while compare tok_idx tok_count
+    load from tok_type at tok_idx
+    store it into temp
+
+    # Self-hosted bootstrap subset guard:
+    # Function definitions/calls are not lowered yet in compiler.jstr.
+    # Fail fast with deterministic exit codes instead of emitting
+    # a broken binary that can segfault at runtime.
+    if equal temp 23
+        # unsupported: define
+        return 198
+    end
+    if equal temp 25
+        # unsupported: call
+        return 197
+    end
+
+    # ── return N ──────────────────────────────────────────────
+    if equal temp 1
+        # Next token is the value to return
+        add tok_idx 1
+        store it into tok_idx
+
+        # Check if next token is a literal, "it", or variable
+        load from tok_type at tok_idx
+        store it into temp2
+
+        if equal temp2 50
+            # Literal: mov edi, N (0xBF + imm32)
+            load from tok_value at tok_idx
+            store it into temp3
+
+            store 0xBF into text at text_len
+            add text_len 1
+            store it into text_len
+
+            # Emit imm32 (little-endian)
+            bitand temp3 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+
+            bitand temp3 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+
+            bitand temp3 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+
+            bitand temp3 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        else
+            if equal temp2 22
+                # "it"/"that" — load from last result vreg
+                # mov rdi, rax (result already in rax from last operation)
+                # 0x48 0x89 0xC7 = mov rdi, rax
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x89 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC7 into text at text_len
+                add text_len 1
+                store it into text_len
+            else
+                # Variable: look up and emit mov rdi, [rbp+offset]
+                load from tok_start at tok_idx
+                store it into lookup_src
+                load from tok_len at tok_idx
+                store it into lookup_len
+                store 0 into lookup_i
+                subtract 0 1
+                store it into lookup_result
+                while compare lookup_i var_count
+                    load from var_name_len at lookup_i
+                    store it into lookup_cmp_len
+                    if equal lookup_len lookup_cmp_len
+                        load from var_name_start at lookup_i
+                        store it into lookup_cmp_start
+                        store 1 into lookup_match
+                        store 0 into lookup_j
+                        while compare lookup_j lookup_len
+                            add lookup_src lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_a
+                            add lookup_cmp_start lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_b
+                            if compare lookup_a lookup_b
+                                store 0 into lookup_match
+                            end
+                            add lookup_j 1
+                            store it into lookup_j
+                        end
+                        if compare lookup_match 0
+                            store lookup_i into lookup_result
+                        end
+                    end
+                    add lookup_i 1
+                    store it into lookup_i
+                end
+                load from var_offset at lookup_result
+                store it into op_off
+                # mov rdi, [rbp+offset] = 0x48 0x8B 0xBD + disp32 LE
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8B into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xBD into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+        end
+
+        # mov eax, 60 (sys_exit) = 0xB8 0x3C 0x00 0x00 0x00
+        store 0xB8 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x3C into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # syscall = 0x0F 0x05
+        store 0x0F into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x05 into text at text_len
+        add text_len 1
+        store it into text_len
+    end
+
+    # ── Arithmetic: add(2) subtract(3) multiply(4) divide(5) ────
+    store 0 into matched
+    if equal temp 2
+        store 1 into matched
+    end
+    if equal temp 3
+        store 1 into matched
+    end
+    if equal temp 4
+        store 1 into matched
+    end
+    if equal temp 5
+        store 1 into matched
+    end
+    if compare matched 0
+        # Save the operation type
+        store temp into cf_patch
+
+        # Advance to first operand (A)
+        add tok_idx 1
+        store it into tok_idx
+
+        # ── Resolve operand A ──
+        load from tok_type at tok_idx
+        store it into op_type
+        store 0 into op_val
+        store 0 into op_off
+        if equal op_type 50
+            load from tok_value at tok_idx
+            store it into op_val
+            store 0 into op_type
+        end
+        if equal op_type 22
+            store 1 into op_type
+        end
+        if equal op_type 52
+            store 2 into op_type
+            load from tok_start at tok_idx
+            store it into lookup_src
+            load from tok_len at tok_idx
+            store it into lookup_len
+            store 0 into lookup_i
+            subtract 0 1
+            store it into lookup_result
+            while compare lookup_i var_count
+                load from var_name_len at lookup_i
+                store it into lookup_cmp_len
+                if equal lookup_len lookup_cmp_len
+                    load from var_name_start at lookup_i
+                    store it into lookup_cmp_start
+                    store 1 into lookup_match
+                    store 0 into lookup_j
+                    while compare lookup_j lookup_len
+                        add lookup_src lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_a
+                        add lookup_cmp_start lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_b
+                        if compare lookup_a lookup_b
+                            store 0 into lookup_match
+                        end
+                        add lookup_j 1
+                        store it into lookup_j
+                    end
+                    if compare lookup_match 0
+                        store lookup_i into lookup_result
+                    end
+                end
+                add lookup_i 1
+                store it into lookup_i
+            end
+            load from var_offset at lookup_result
+            store it into op_off
+        end
+        # Save A
+        store op_type into a_type
+        store op_val into a_val
+        store op_off into a_off
+
+        # Advance to second operand (B)
+        add tok_idx 1
+        store it into tok_idx
+
+        # ── Resolve operand B ──
+        load from tok_type at tok_idx
+        store it into op_type
+        store 0 into op_val
+        store 0 into op_off
+        if equal op_type 50
+            load from tok_value at tok_idx
+            store it into op_val
+            store 0 into op_type
+        end
+        if equal op_type 22
+            store 1 into op_type
+        end
+        if equal op_type 52
+            store 2 into op_type
+            load from tok_start at tok_idx
+            store it into lookup_src
+            load from tok_len at tok_idx
+            store it into lookup_len
+            store 0 into lookup_i
+            subtract 0 1
+            store it into lookup_result
+            while compare lookup_i var_count
+                load from var_name_len at lookup_i
+                store it into lookup_cmp_len
+                if equal lookup_len lookup_cmp_len
+                    load from var_name_start at lookup_i
+                    store it into lookup_cmp_start
+                    store 1 into lookup_match
+                    store 0 into lookup_j
+                    while compare lookup_j lookup_len
+                        add lookup_src lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_a
+                        add lookup_cmp_start lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_b
+                        if compare lookup_a lookup_b
+                            store 0 into lookup_match
+                        end
+                        add lookup_j 1
+                        store it into lookup_j
+                    end
+                    if compare lookup_match 0
+                        store lookup_i into lookup_result
+                    end
+                end
+                add lookup_i 1
+                store it into lookup_i
+            end
+            load from var_offset at lookup_result
+            store it into op_off
+        end
+
+        # ── Emit: load B into rcx ──
+        if equal op_type 0
+            # mov ecx, imm32 (0xB9 + imm32 LE)
+            store 0xB9 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 1
+            # "it": mov rcx, rax (0x48 0x89 0xC1)
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x89 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xC1 into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 2
+            # mov rcx, [rbp+offset] = 0x48 0x8B 0x8D + disp32 LE
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8B into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8D into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+
+        # ── Restore A, emit: load A into rax ──
+        store a_type into op_type
+        store a_val into op_val
+        store a_off into op_off
+
+        if equal op_type 0
+            # mov eax, imm32 (0xB8 + imm32 LE)
+            store 0xB8 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 1
+            # "it" — rax already has the value, nop
+        end
+        if equal op_type 2
+            # mov rax, [rbp+offset] = 0x48 0x8B 0x85 + disp32 LE
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8B into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x85 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+
+        # ── Emit the operation ──
+        store cf_patch into temp
+        if equal temp 2
+            # add rax, rcx: 0x48 0x01 0xC8
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x01 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xC8 into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal temp 3
+            # sub rax, rcx: 0x48 0x29 0xC8
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x29 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xC8 into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal temp 4
+            # imul rax, rcx: 0x48 0x0F 0xAF 0xC1
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x0F into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xAF into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xC1 into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal temp 5
+            # cqo; idiv rcx: 0x48 0x99 0x48 0xF7 0xF9
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x99 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xF7 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xF9 into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+    end
+
+    # ── Variable declaration: a(17) or global(59) ───────────
+    store 0 into matched
+    if equal temp 17
+        store 1 into matched
+    end
+    if equal temp 59
+        store 1 into matched
+    end
+    if compare matched 0
+        add tok_idx 1
+        store it into tok_idx
+        load from tok_type at tok_idx
+        store it into temp2
+
+        # Check if next token is a type noun (53-58)
+        store 0 into temp3
+        if equal temp2 53
+            store 1 into temp3
+        end
+        if equal temp2 54
+            store 1 into temp3
+        end
+        if equal temp2 55
+            store 1 into temp3
+        end
+        if equal temp2 56
+            store 1 into temp3
+        end
+        if equal temp2 57
+            store 1 into temp3
+        end
+        if equal temp2 58
+            store 1 into temp3
+        end
+
+        if compare temp3 0
+            # Type noun present: a/global TYPE NAME [SIZE]
+            store temp2 into temp4
+            add tok_idx 1
+            store it into tok_idx
+            # tok_idx now points at NAME
+            load from tok_start at tok_idx
+            store it into var_name_start at var_count
+            load from tok_len at tok_idx
+            store it into var_name_len at var_count
+
+            # Check if next token is a size literal
+            add tok_idx 1
+            store it into temp2
+            store 8 into temp3
+            if compare temp2 tok_count
+                load from tok_type at temp2
+                if equal it 50
+                    load from tok_value at temp2
+                    store it into temp3
+                    store temp2 into tok_idx
+                    # For long type, size is count * 8
+                    if equal temp4 54
+                        multiply temp3 8
+                        store it into temp3
+                    end
+                else
+                    subtract tok_idx 1
+                    store it into tok_idx
+                end
+            else
+                subtract tok_idx 1
+                store it into tok_idx
+            end
+
+            # Allocate stack space
+            if equal temp4 53
+                store 1 into var_type at var_count
+            else
+                store 0 into var_type at var_count
+            end
+            add vreg_total_size temp3
+            store it into vreg_total_size
+            subtract 0 vreg_total_size
+            store it into var_offset at var_count
+            add var_count 1
+            store it into var_count
+        else
+            # Simple variable: a/global NAME (8 bytes)
+            load from tok_start at tok_idx
+            store it into var_name_start at var_count
+            load from tok_len at tok_idx
+            store it into var_name_len at var_count
+            store 0 into var_type at var_count
+            add vreg_total_size 8
+            store it into vreg_total_size
+            subtract 0 vreg_total_size
+            store it into var_offset at var_count
+            add var_count 1
+            store it into var_count
+        end
+    end
+
+    # ── Store: store(6) V into X [at I] ──────────────────────
+    if equal temp 6
+        # Advance to V
+        add tok_idx 1
+        store it into tok_idx
+
+        # ── Resolve operand V (save into a_type/a_val/a_off) ──
+        load from tok_type at tok_idx
+        store it into op_type
+        store 0 into op_val
+        store 0 into op_off
+        if equal op_type 50
+            load from tok_value at tok_idx
+            store it into op_val
+            store 0 into op_type
+        end
+        if equal op_type 22
+            store 1 into op_type
+        end
+        if equal op_type 52
+            store 2 into op_type
+            load from tok_start at tok_idx
+            store it into lookup_src
+            load from tok_len at tok_idx
+            store it into lookup_len
+            store 0 into lookup_i
+            subtract 0 1
+            store it into lookup_result
+            while compare lookup_i var_count
+                load from var_name_len at lookup_i
+                store it into lookup_cmp_len
+                if equal lookup_len lookup_cmp_len
+                    load from var_name_start at lookup_i
+                    store it into lookup_cmp_start
+                    store 1 into lookup_match
+                    store 0 into lookup_j
+                    while compare lookup_j lookup_len
+                        add lookup_src lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_a
+                        add lookup_cmp_start lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_b
+                        if compare lookup_a lookup_b
+                            store 0 into lookup_match
+                        end
+                        add lookup_j 1
+                        store it into lookup_j
+                    end
+                    if compare lookup_match 0
+                        store lookup_i into lookup_result
+                    end
+                end
+                add lookup_i 1
+                store it into lookup_i
+            end
+            load from var_offset at lookup_result
+            store it into op_off
+        end
+        # Save V resolved info
+        store op_type into a_type
+        store op_val into a_val
+        store op_off into a_off
+
+        # Skip "into" keyword
+        add tok_idx 1
+        store it into tok_idx
+
+        # Advance to X (destination variable)
+        add tok_idx 1
+        store it into tok_idx
+
+        # ── Look up variable X ──
+        load from tok_start at tok_idx
+        store it into lookup_src
+        load from tok_len at tok_idx
+        store it into lookup_len
+        store 0 into lookup_i
+        subtract 0 1
+        store it into lookup_result
+        while compare lookup_i var_count
+            load from var_name_len at lookup_i
+            store it into lookup_cmp_len
+            if equal lookup_len lookup_cmp_len
+                load from var_name_start at lookup_i
+                store it into lookup_cmp_start
+                store 1 into lookup_match
+                store 0 into lookup_j
+                while compare lookup_j lookup_len
+                    add lookup_src lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_a
+                    add lookup_cmp_start lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_b
+                    if compare lookup_a lookup_b
+                        store 0 into lookup_match
+                    end
+                    add lookup_j 1
+                    store it into lookup_j
+                end
+                if compare lookup_match 0
+                    store lookup_i into lookup_result
+                end
+            end
+            add lookup_i 1
+            store it into lookup_i
+        end
+        load from var_offset at lookup_result
+        store it into x_off
+        store lookup_result into x_idx
+
+        # ── Check for "at" (indexed store) ──
+        add tok_idx 1
+        store it into temp2
+        store 0 into temp4
+        if compare temp2 tok_count
+            load from tok_type at temp2
+            if equal it 21
+                store 1 into temp4
+            end
+        end
+
+        if equal temp4 0
+            # ── Simple store: store V into X ──
+            # tok_idx still points at X (the peek didn't change it)
+
+            # Restore V info
+            store a_type into op_type
+            store a_val into op_val
+            store a_off into op_off
+
+            # Emit: load V into rcx
+            if equal op_type 0
+                store 0xB9 into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 1
+                # "it": mov rcx, rax
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x89 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC1 into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 2
+                # mov rcx, [rbp+offset]
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8B into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8D into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+
+            # Emit: mov [rbp+X_offset], rcx = 0x48 0x89 0x8D + disp32 LE
+            store x_off into op_off
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x89 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8D into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        else
+            # ── Indexed store: store V into X at I ──
+            # temp2 points at "at" token, tok_idx at X
+            # op_off = X's stack offset, temp3 = X's var index
+            store temp2 into tok_idx
+
+            # Advance past "at" to I (index operand)
+            add tok_idx 1
+            store it into tok_idx
+
+            # Step 1: Emit load V into rdx (a_off has V's offset, x_off has X's offset)
+            store a_type into op_type
+            store a_val into op_val
+            store a_off into op_off
+
+            if equal op_type 0
+                # mov edx, imm32: 0xBA + imm32 LE
+                store 0xBA into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 1
+                # "it": mov rdx, rax = 0x48 0x89 0xC2
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x89 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC2 into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 2
+                # mov rdx, [rbp+V_offset]: 0x48 0x8B 0x95 + disp32 LE
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8B into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x95 into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+
+            # Step 2: Resolve I into rcx
+            load from tok_type at tok_idx
+            store it into op_type
+            store 0 into op_val
+            store 0 into op_off
+
+            if equal op_type 50
+                load from tok_value at tok_idx
+                store it into op_val
+                store 0 into op_type
+            end
+            if equal op_type 22
+                store 1 into op_type
+            end
+            if equal op_type 52
+                store 2 into op_type
+                load from tok_start at tok_idx
+                store it into lookup_src
+                load from tok_len at tok_idx
+                store it into lookup_len
+                store 0 into lookup_i
+                subtract 0 1
+                store it into lookup_result
+                while compare lookup_i var_count
+                    load from var_name_len at lookup_i
+                    store it into lookup_cmp_len
+                    if equal lookup_len lookup_cmp_len
+                        load from var_name_start at lookup_i
+                        store it into lookup_cmp_start
+                        store 1 into lookup_match
+                        store 0 into lookup_j
+                        while compare lookup_j lookup_len
+                            add lookup_src lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_a
+                            add lookup_cmp_start lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_b
+                            if compare lookup_a lookup_b
+                                store 0 into lookup_match
+                            end
+                            add lookup_j 1
+                            store it into lookup_j
+                        end
+                        if compare lookup_match 0
+                            store lookup_i into lookup_result
+                        end
+                    end
+                    add lookup_i 1
+                    store it into lookup_i
+                end
+                load from var_offset at lookup_result
+                store it into op_off
+            end
+
+            # Emit: load I into rcx
+            if equal op_type 0
+                store 0xB9 into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 1
+                # "it": mov rcx, rax
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x89 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC1 into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 2
+                # mov rcx, [rbp+offset]
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8B into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8D into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+
+            # Step 3: Emit lea rax, [rbp+X_offset]: 0x48 0x8D 0x85 + disp32 LE
+            store x_off into op_off
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8D into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x85 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+
+            # Step 4: Emit indexed store based on var_type
+            load from var_type at x_idx
+            if equal it 1
+                # byte: mov [rax+rcx], dl = 0x88 0x14 0x08
+                store 0x88 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x14 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x08 into text at text_len
+                add text_len 1
+                store it into text_len
+            else
+                # qword: mov [rax+rcx*8], rdx = 0x48 0x89 0x14 0xC8
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x89 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x14 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC8 into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+        end
+    end
+
+    # ── If: if(13) COND A B ... end ──────────────────────────
+    if equal temp 13
+        # Advance to comparison operator
+        add tok_idx 1
+        store it into tok_idx
+        load from tok_type at tok_idx
+        store it into cmp_op
+
+        # Advance to first operand A
+        add tok_idx 1
+        store it into tok_idx
+
+        # ── Resolve operand A ──
+        load from tok_type at tok_idx
+        store it into op_type
+        store 0 into op_val
+        store 0 into op_off
+        if equal op_type 50
+            load from tok_value at tok_idx
+            store it into op_val
+            store 0 into op_type
+        end
+        if equal op_type 22
+            store 1 into op_type
+        end
+        if equal op_type 52
+            store 2 into op_type
+            load from tok_start at tok_idx
+            store it into lookup_src
+            load from tok_len at tok_idx
+            store it into lookup_len
+            store 0 into lookup_i
+            subtract 0 1
+            store it into lookup_result
+            while compare lookup_i var_count
+                load from var_name_len at lookup_i
+                store it into lookup_cmp_len
+                if equal lookup_len lookup_cmp_len
+                    load from var_name_start at lookup_i
+                    store it into lookup_cmp_start
+                    store 1 into lookup_match
+                    store 0 into lookup_j
+                    while compare lookup_j lookup_len
+                        add lookup_src lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_a
+                        add lookup_cmp_start lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_b
+                        if compare lookup_a lookup_b
+                            store 0 into lookup_match
+                        end
+                        add lookup_j 1
+                        store it into lookup_j
+                    end
+                    if compare lookup_match 0
+                        store lookup_i into lookup_result
+                    end
+                end
+                add lookup_i 1
+                store it into lookup_i
+            end
+            load from var_offset at lookup_result
+            store it into op_off
+        end
+        store op_type into a_type
+        store op_val into a_val
+        store op_off into a_off
+
+        # Advance to second operand B
+        add tok_idx 1
+        store it into tok_idx
+
+        # ── Resolve operand B ──
+        load from tok_type at tok_idx
+        store it into op_type
+        store 0 into op_val
+        store 0 into op_off
+        if equal op_type 50
+            load from tok_value at tok_idx
+            store it into op_val
+            store 0 into op_type
+        end
+        if equal op_type 22
+            store 1 into op_type
+        end
+        if equal op_type 52
+            store 2 into op_type
+            load from tok_start at tok_idx
+            store it into lookup_src
+            load from tok_len at tok_idx
+            store it into lookup_len
+            store 0 into lookup_i
+            subtract 0 1
+            store it into lookup_result
+            while compare lookup_i var_count
+                load from var_name_len at lookup_i
+                store it into lookup_cmp_len
+                if equal lookup_len lookup_cmp_len
+                    load from var_name_start at lookup_i
+                    store it into lookup_cmp_start
+                    store 1 into lookup_match
+                    store 0 into lookup_j
+                    while compare lookup_j lookup_len
+                        add lookup_src lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_a
+                        add lookup_cmp_start lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_b
+                        if compare lookup_a lookup_b
+                            store 0 into lookup_match
+                        end
+                        add lookup_j 1
+                        store it into lookup_j
+                    end
+                    if compare lookup_match 0
+                        store lookup_i into lookup_result
+                    end
+                end
+                add lookup_i 1
+                store it into lookup_i
+            end
+            load from var_offset at lookup_result
+            store it into op_off
+        end
+
+        # ── Emit: load B into rcx ──
+        if equal op_type 0
+            store 0xB9 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 1
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x89 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xC1 into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 2
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8B into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8D into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+
+        # ── Restore A, emit: load A into rax ──
+        store a_type into op_type
+        store a_val into op_val
+        store a_off into op_off
+        if equal op_type 0
+            store 0xB8 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 1
+            # "it" — nop
+        end
+        if equal op_type 2
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8B into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x85 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+
+        # ── Emit: cmp rax, rcx (0x48 0x39 0xC8) ──
+        store 0x48 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x39 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0xC8 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # ── Emit conditional jump (skip body when condition is FALSE) ──
+        # equal(9):  jne (0x0F 0x85) — skip when !=
+        # compare(8): je (0x0F 0x84) — skip when ==
+        # less(10):  jge (0x0F 0x8D) — skip when >=
+        # greater(11): jle (0x0F 0x8E) — skip when <=
+        store 0x0F into text at text_len
+        add text_len 1
+        store it into text_len
+
+        if equal cmp_op 9
+            store 0x85 into text at text_len
+        end
+        if equal cmp_op 8
+            store 0x84 into text at text_len
+        end
+        if equal cmp_op 10
+            store 0x8D into text at text_len
+        end
+        if equal cmp_op 11
+            store 0x8E into text at text_len
+        end
+        add text_len 1
+        store it into text_len
+
+        # Record fixup position (where the rel32 starts)
+        store text_len into cf_label_end at cf_depth
+
+        # Emit placeholder rel32 (4 zero bytes)
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # Push control flow stack
+        store 0 into cf_kind at cf_depth
+        add cf_depth 1
+        store it into cf_depth
+    end
+
+    # ── Else: else(14) ─────────────────────────────────────
+    if equal temp 14
+        # 1. Emit jmp rel32 (0xE9 + 4 placeholder bytes) to skip else from if-body
+        store 0xE9 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # Save the new fixup position (where the jmp's rel32 starts)
+        store text_len into temp2
+
+        # Emit placeholder rel32
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # 2. Patch the if's forward jump to point HERE (right after the jmp)
+        subtract cf_depth 1
+        store it into temp3
+        load from cf_label_end at temp3
+        store it into cf_patch
+        subtract text_len cf_patch
+        subtract it 4
+        store it into temp4
+
+        bitand temp4 0xFF
+        store it into text at cf_patch
+        add cf_patch 1
+        store it into cf_patch
+        bitand temp4 0xFF00
+        divide it 256
+        store it into text at cf_patch
+        add cf_patch 1
+        store it into cf_patch
+        bitand temp4 0xFF0000
+        divide it 65536
+        store it into text at cf_patch
+        add cf_patch 1
+        store it into cf_patch
+        bitand temp4 0xFF000000
+        divide it 16777216
+        store it into text at cf_patch
+
+        # 3. Replace cf_label_end with the new jmp's fixup position
+        store temp2 into cf_label_end at temp3
+    end
+
+    # ── While: while(15) COND A B ... end ──────────────────
+    if equal temp 15
+        # Record condition position BEFORE emitting comparison
+        store text_len into cf_label_cond at cf_depth
+
+        # Advance to comparison operator
+        add tok_idx 1
+        store it into tok_idx
+        load from tok_type at tok_idx
+        store it into cmp_op
+
+        # Advance to first operand A
+        add tok_idx 1
+        store it into tok_idx
+
+        # ── Resolve operand A ──
+        load from tok_type at tok_idx
+        store it into op_type
+        store 0 into op_val
+        store 0 into op_off
+        if equal op_type 50
+            load from tok_value at tok_idx
+            store it into op_val
+            store 0 into op_type
+        end
+        if equal op_type 22
+            store 1 into op_type
+        end
+        if equal op_type 52
+            store 2 into op_type
+            load from tok_start at tok_idx
+            store it into lookup_src
+            load from tok_len at tok_idx
+            store it into lookup_len
+            store 0 into lookup_i
+            subtract 0 1
+            store it into lookup_result
+            while compare lookup_i var_count
+                load from var_name_len at lookup_i
+                store it into lookup_cmp_len
+                if equal lookup_len lookup_cmp_len
+                    load from var_name_start at lookup_i
+                    store it into lookup_cmp_start
+                    store 1 into lookup_match
+                    store 0 into lookup_j
+                    while compare lookup_j lookup_len
+                        add lookup_src lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_a
+                        add lookup_cmp_start lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_b
+                        if compare lookup_a lookup_b
+                            store 0 into lookup_match
+                        end
+                        add lookup_j 1
+                        store it into lookup_j
+                    end
+                    if compare lookup_match 0
+                        store lookup_i into lookup_result
+                    end
+                end
+                add lookup_i 1
+                store it into lookup_i
+            end
+            load from var_offset at lookup_result
+            store it into op_off
+        end
+        store op_type into a_type
+        store op_val into a_val
+        store op_off into a_off
+
+        # Advance to second operand B
+        add tok_idx 1
+        store it into tok_idx
+
+        # ── Resolve operand B ──
+        load from tok_type at tok_idx
+        store it into op_type
+        store 0 into op_val
+        store 0 into op_off
+        if equal op_type 50
+            load from tok_value at tok_idx
+            store it into op_val
+            store 0 into op_type
+        end
+        if equal op_type 22
+            store 1 into op_type
+        end
+        if equal op_type 52
+            store 2 into op_type
+            load from tok_start at tok_idx
+            store it into lookup_src
+            load from tok_len at tok_idx
+            store it into lookup_len
+            store 0 into lookup_i
+            subtract 0 1
+            store it into lookup_result
+            while compare lookup_i var_count
+                load from var_name_len at lookup_i
+                store it into lookup_cmp_len
+                if equal lookup_len lookup_cmp_len
+                    load from var_name_start at lookup_i
+                    store it into lookup_cmp_start
+                    store 1 into lookup_match
+                    store 0 into lookup_j
+                    while compare lookup_j lookup_len
+                        add lookup_src lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_a
+                        add lookup_cmp_start lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_b
+                        if compare lookup_a lookup_b
+                            store 0 into lookup_match
+                        end
+                        add lookup_j 1
+                        store it into lookup_j
+                    end
+                    if compare lookup_match 0
+                        store lookup_i into lookup_result
+                    end
+                end
+                add lookup_i 1
+                store it into lookup_i
+            end
+            load from var_offset at lookup_result
+            store it into op_off
+        end
+
+        # ── Emit: load B into rcx ──
+        if equal op_type 0
+            store 0xB9 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 1
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x89 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xC1 into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 2
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8B into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8D into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+
+        # ── Restore A, emit: load A into rax ──
+        store a_type into op_type
+        store a_val into op_val
+        store a_off into op_off
+        if equal op_type 0
+            store 0xB8 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 1
+            # "it" -- nop
+        end
+        if equal op_type 2
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8B into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x85 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+
+        # ── Emit: cmp rax, rcx ──
+        store 0x48 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x39 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0xC8 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # ── Emit conditional jump (skip body when FALSE) ──
+        store 0x0F into text at text_len
+        add text_len 1
+        store it into text_len
+
+        if equal cmp_op 9
+            store 0x85 into text at text_len
+        end
+        if equal cmp_op 8
+            store 0x84 into text at text_len
+        end
+        if equal cmp_op 10
+            store 0x8D into text at text_len
+        end
+        if equal cmp_op 11
+            store 0x8E into text at text_len
+        end
+        add text_len 1
+        store it into text_len
+
+        # Record fixup position
+        store text_len into cf_label_end at cf_depth
+
+        # Emit placeholder rel32
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # Push control flow stack with kind=1 (while)
+        store 1 into cf_kind at cf_depth
+        add cf_depth 1
+        store it into cf_depth
+    end
+
+    # ── End: end(16) ─────────────────────────────────────────
+    if equal temp 16
+        # Pop control flow stack
+        subtract cf_depth 1
+        store it into cf_depth
+
+        # Check cf_kind to decide if vs while
+        load from cf_kind at cf_depth
+        store it into temp2
+
+        if equal temp2 1
+            # ── While end: emit back-edge jmp, then patch forward ──
+            # Emit jmp rel32 back to condition: 0xE9 + rel32
+            store 0xE9 into text at text_len
+            add text_len 1
+            store it into text_len
+
+            # rel32 = cond_label - (text_len + 4)
+            load from cf_label_cond at cf_depth
+            store it into temp3
+            add text_len 4
+            subtract temp3 it
+            store it into temp4
+
+            # Emit rel32 (back-edge, negative value -- two's complement)
+            bitand temp4 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand temp4 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand temp4 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand temp4 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+
+        # Patch the forward jump: rel32 = text_len - (patch_pos + 4)
+        load from cf_label_end at cf_depth
+        store it into cf_patch
+        subtract text_len cf_patch
+        subtract it 4
+        store it into temp2
+
+        # Write rel32 at the patch position
+        bitand temp2 0xFF
+        store it into text at cf_patch
+        add cf_patch 1
+        store it into cf_patch
+        bitand temp2 0xFF00
+        divide it 256
+        store it into text at cf_patch
+        add cf_patch 1
+        store it into cf_patch
+        bitand temp2 0xFF0000
+        divide it 65536
+        store it into text at cf_patch
+        add cf_patch 1
+        store it into cf_patch
+        bitand temp2 0xFF000000
+        divide it 16777216
+        store it into text at cf_patch
+    end
+
+    # ── Load: load(7) from X [at I] ───────────────────────
+    if equal temp 7
+        # Skip "from" keyword
+        add tok_idx 1
+        store it into tok_idx
+
+        # Advance to X
+        add tok_idx 1
+        store it into tok_idx
+
+        # Look up variable X
+        load from tok_start at tok_idx
+        store it into lookup_src
+        load from tok_len at tok_idx
+        store it into lookup_len
+        store 0 into lookup_i
+        subtract 0 1
+        store it into lookup_result
+        while compare lookup_i var_count
+            load from var_name_len at lookup_i
+            store it into lookup_cmp_len
+            if equal lookup_len lookup_cmp_len
+                load from var_name_start at lookup_i
+                store it into lookup_cmp_start
+                store 1 into lookup_match
+                store 0 into lookup_j
+                while compare lookup_j lookup_len
+                    add lookup_src lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_a
+                    add lookup_cmp_start lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_b
+                    if compare lookup_a lookup_b
+                        store 0 into lookup_match
+                    end
+                    add lookup_j 1
+                    store it into lookup_j
+                end
+                if compare lookup_match 0
+                    store lookup_i into lookup_result
+                end
+            end
+            add lookup_i 1
+            store it into lookup_i
+        end
+        load from var_offset at lookup_result
+        store it into x_off
+        store lookup_result into x_idx
+
+        # Check for "at" (indexed load)
+        add tok_idx 1
+        store it into temp2
+        store 0 into temp4
+        if compare temp2 tok_count
+            load from tok_type at temp2
+            if equal it 21
+                store 1 into temp4
+            end
+        end
+
+        if equal temp4 0
+            # ── Simple load: load from X ──
+            # tok_idx still points at X (the peek didn't change it)
+
+            # Emit: mov rax, [rbp+offset] = 0x48 0x8B 0x85 + disp32 LE
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8B into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x85 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand x_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand x_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand x_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand x_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        else
+            # ── Indexed load: load from X at I ──
+            store temp2 into tok_idx
+
+            # Advance past "at" to I
+            add tok_idx 1
+            store it into tok_idx
+
+            # Resolve I into rcx
+            load from tok_type at tok_idx
+            store it into op_type
+            store 0 into op_val
+            store 0 into op_off
+            if equal op_type 50
+                load from tok_value at tok_idx
+                store it into op_val
+                store 0 into op_type
+            end
+            if equal op_type 22
+                store 1 into op_type
+            end
+            if equal op_type 52
+                store 2 into op_type
+                load from tok_start at tok_idx
+                store it into lookup_src
+                load from tok_len at tok_idx
+                store it into lookup_len
+                store 0 into lookup_i
+                subtract 0 1
+                store it into lookup_result
+                while compare lookup_i var_count
+                    load from var_name_len at lookup_i
+                    store it into lookup_cmp_len
+                    if equal lookup_len lookup_cmp_len
+                        load from var_name_start at lookup_i
+                        store it into lookup_cmp_start
+                        store 1 into lookup_match
+                        store 0 into lookup_j
+                        while compare lookup_j lookup_len
+                            add lookup_src lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_a
+                            add lookup_cmp_start lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_b
+                            if compare lookup_a lookup_b
+                                store 0 into lookup_match
+                            end
+                            add lookup_j 1
+                            store it into lookup_j
+                        end
+                        if compare lookup_match 0
+                            store lookup_i into lookup_result
+                        end
+                    end
+                    add lookup_i 1
+                    store it into lookup_i
+                end
+                load from var_offset at lookup_result
+                store it into op_off
+            end
+
+            # Emit: load I into rcx
+            if equal op_type 0
+                store 0xB9 into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 1
+                # "it": mov rcx, rax
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x89 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC1 into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 2
+                # mov rcx, [rbp+offset]
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8B into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8D into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+
+            # Emit lea rax, [rbp+X_offset]: 0x48 0x8D 0x85 + disp32 LE
+            store x_off into op_off
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8D into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x85 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+
+            # Emit indexed load based on var_type
+            load from var_type at x_idx
+            if equal it 1
+                # byte: movzx rax, byte [rax+rcx] = 0x48 0x0F 0xB6 0x04 0x08
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x0F into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xB6 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x04 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x08 into text at text_len
+                add text_len 1
+                store it into text_len
+            else
+                # qword: mov rax, [rax+rcx*8] = 0x48 0x8B 0x04 0xC8
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8B into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x04 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC8 into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+        end
+    end
+
+    # ── Bitand: bitand(27) A B ────────────────────────────
+    if equal temp 27
+        # Advance to first operand A
+        add tok_idx 1
+        store it into tok_idx
+
+        # Resolve operand A
+        load from tok_type at tok_idx
+        store it into op_type
+        store 0 into op_val
+        store 0 into op_off
+        if equal op_type 50
+            load from tok_value at tok_idx
+            store it into op_val
+            store 0 into op_type
+        end
+        if equal op_type 22
+            store 1 into op_type
+        end
+        if equal op_type 52
+            store 2 into op_type
+            load from tok_start at tok_idx
+            store it into lookup_src
+            load from tok_len at tok_idx
+            store it into lookup_len
+            store 0 into lookup_i
+            subtract 0 1
+            store it into lookup_result
+            while compare lookup_i var_count
+                load from var_name_len at lookup_i
+                store it into lookup_cmp_len
+                if equal lookup_len lookup_cmp_len
+                    load from var_name_start at lookup_i
+                    store it into lookup_cmp_start
+                    store 1 into lookup_match
+                    store 0 into lookup_j
+                    while compare lookup_j lookup_len
+                        add lookup_src lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_a
+                        add lookup_cmp_start lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_b
+                        if compare lookup_a lookup_b
+                            store 0 into lookup_match
+                        end
+                        add lookup_j 1
+                        store it into lookup_j
+                    end
+                    if compare lookup_match 0
+                        store lookup_i into lookup_result
+                    end
+                end
+                add lookup_i 1
+                store it into lookup_i
+            end
+            load from var_offset at lookup_result
+            store it into op_off
+        end
+        store op_type into a_type
+        store op_val into a_val
+        store op_off into a_off
+
+        # Advance to second operand B
+        add tok_idx 1
+        store it into tok_idx
+
+        # Resolve operand B
+        load from tok_type at tok_idx
+        store it into op_type
+        store 0 into op_val
+        store 0 into op_off
+        if equal op_type 50
+            load from tok_value at tok_idx
+            store it into op_val
+            store 0 into op_type
+        end
+        if equal op_type 22
+            store 1 into op_type
+        end
+        if equal op_type 52
+            store 2 into op_type
+            load from tok_start at tok_idx
+            store it into lookup_src
+            load from tok_len at tok_idx
+            store it into lookup_len
+            store 0 into lookup_i
+            subtract 0 1
+            store it into lookup_result
+            while compare lookup_i var_count
+                load from var_name_len at lookup_i
+                store it into lookup_cmp_len
+                if equal lookup_len lookup_cmp_len
+                    load from var_name_start at lookup_i
+                    store it into lookup_cmp_start
+                    store 1 into lookup_match
+                    store 0 into lookup_j
+                    while compare lookup_j lookup_len
+                        add lookup_src lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_a
+                        add lookup_cmp_start lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_b
+                        if compare lookup_a lookup_b
+                            store 0 into lookup_match
+                        end
+                        add lookup_j 1
+                        store it into lookup_j
+                    end
+                    if compare lookup_match 0
+                        store lookup_i into lookup_result
+                    end
+                end
+                add lookup_i 1
+                store it into lookup_i
+            end
+            load from var_offset at lookup_result
+            store it into op_off
+        end
+
+        # Emit: load B into rcx
+        if equal op_type 0
+            store 0xB9 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 1
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x89 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xC1 into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 2
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8B into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8D into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+
+        # Restore A, emit: load A into rax
+        store a_type into op_type
+        store a_val into op_val
+        store a_off into op_off
+        if equal op_type 0
+            store 0xB8 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 1
+            # "it" -- nop
+        end
+        if equal op_type 2
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8B into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x85 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+
+        # Emit: and rax, rcx = 0x48 0x21 0xC8
+        store 0x48 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x21 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0xC8 into text at text_len
+        add text_len 1
+        store it into text_len
+    end
+
+    # ── Addressof: addressof(32) X ────────────────────────
+    if equal temp 32
+        # Advance to X
+        add tok_idx 1
+        store it into tok_idx
+
+        # Look up variable X
+        load from tok_start at tok_idx
+        store it into lookup_src
+        load from tok_len at tok_idx
+        store it into lookup_len
+        store 0 into lookup_i
+        subtract 0 1
+        store it into lookup_result
+        while compare lookup_i var_count
+            load from var_name_len at lookup_i
+            store it into lookup_cmp_len
+            if equal lookup_len lookup_cmp_len
+                load from var_name_start at lookup_i
+                store it into lookup_cmp_start
+                store 1 into lookup_match
+                store 0 into lookup_j
+                while compare lookup_j lookup_len
+                    add lookup_src lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_a
+                    add lookup_cmp_start lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_b
+                    if compare lookup_a lookup_b
+                        store 0 into lookup_match
+                    end
+                    add lookup_j 1
+                    store it into lookup_j
+                end
+                if compare lookup_match 0
+                    store lookup_i into lookup_result
+                end
+            end
+            add lookup_i 1
+            store it into lookup_i
+        end
+        load from var_offset at lookup_result
+        store it into op_off
+
+        # Emit: lea rax, [rbp+offset] = 0x48 0x8D 0x85 + disp32 LE
+        store 0x48 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x8D into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x85 into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_off 0xFF
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_off 0xFF00
+        divide it 256
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_off 0xFF0000
+        divide it 65536
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_off 0xFF000000
+        divide it 16777216
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+    end
+
+    # ── Syscall: syscall(26) N arg1 arg2 ... ──────────────
+    if equal temp 26
+        # Deterministic bootstrap subset:
+        # Accept only: syscall <num:literal> <arg1:literal> <arg2:variable> <arg3:variable>
+        # This is sufficient for compiler.jstr's read/write syscalls and avoids
+        # drift-prone dynamic arg counting across self-hosted stages.
+
+        # Ensure we have at least 4 operands after "syscall".
+        add tok_idx 4
+        store it into temp2
+        if equal temp2 tok_count
+            return 196
+        end
+        if greater temp2 tok_count
+            return 196
+        end
+
+        # num at tok_idx+1 (literal)
+        add tok_idx 1
+        store it into temp2
+        load from tok_type at temp2
+        if compare it 50
+            return 196
+        end
+        load from tok_value at temp2
+        store it into op_val
+
+        # arg1 at tok_idx+2 (literal)
+        add tok_idx 2
+        store it into temp2
+        load from tok_type at temp2
+        if compare it 50
+            return 196
+        end
+        load from tok_value at temp2
+        store it into op_type
+
+        # arg2 at tok_idx+3 (variable -> a_off)
+        add tok_idx 3
+        store it into temp2
+        load from tok_type at temp2
+        if compare it 52
+            return 196
+        end
+        load from tok_start at temp2
+        store it into lookup_src
+        load from tok_len at temp2
+        store it into lookup_len
+        store 0 into lookup_i
+        subtract 0 1
+        store it into lookup_result
+        while compare lookup_i var_count
+            load from var_name_len at lookup_i
+            store it into lookup_cmp_len
+            if equal lookup_len lookup_cmp_len
+                load from var_name_start at lookup_i
+                store it into lookup_cmp_start
+                store 1 into lookup_match
+                store 0 into lookup_j
+                while compare lookup_j lookup_len
+                    add lookup_src lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_a
+                    add lookup_cmp_start lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_b
+                    if compare lookup_a lookup_b
+                        store 0 into lookup_match
+                    end
+                    add lookup_j 1
+                    store it into lookup_j
+                end
+                if compare lookup_match 0
+                    store lookup_i into lookup_result
+                end
+            end
+            add lookup_i 1
+            store it into lookup_i
+        end
+        subtract 0 1
+        store it into temp3
+        if equal lookup_result temp3
+            return 196
+        end
+        load from var_offset at lookup_result
+        store it into a_off
+
+        # arg3 at tok_idx+4 (variable -> x_off)
+        add tok_idx 4
+        store it into temp2
+        load from tok_type at temp2
+        if compare it 52
+            return 196
+        end
+        load from tok_start at temp2
+        store it into lookup_src
+        load from tok_len at temp2
+        store it into lookup_len
+        store 0 into lookup_i
+        subtract 0 1
+        store it into lookup_result
+        while compare lookup_i var_count
+            load from var_name_len at lookup_i
+            store it into lookup_cmp_len
+            if equal lookup_len lookup_cmp_len
+                load from var_name_start at lookup_i
+                store it into lookup_cmp_start
+                store 1 into lookup_match
+                store 0 into lookup_j
+                while compare lookup_j lookup_len
+                    add lookup_src lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_a
+                    add lookup_cmp_start lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_b
+                    if compare lookup_a lookup_b
+                        store 0 into lookup_match
+                    end
+                    add lookup_j 1
+                    store it into lookup_j
+                end
+                if compare lookup_match 0
+                    store lookup_i into lookup_result
+                end
+            end
+            add lookup_i 1
+            store it into lookup_i
+        end
+        subtract 0 1
+        store it into temp3
+        if equal lookup_result temp3
+            return 196
+        end
+        load from var_offset at lookup_result
+        store it into x_off
+
+        # mov edi, imm32 (arg1)
+        store 0xBF into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_type 0xFF
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_type 0xFF00
+        divide it 256
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_type 0xFF0000
+        divide it 65536
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_type 0xFF000000
+        divide it 16777216
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # mov rsi, [rbp+a_off]: 0x48 0x8B 0xB5 + disp32
+        store 0x48 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x8B into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0xB5 into text at text_len
+        store text_len into rsi_check_pos
+        add text_len 1
+        store it into text_len
+        bitand a_off 0xFF
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand a_off 0xFF00
+        divide it 256
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand a_off 0xFF0000
+        divide it 65536
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand a_off 0xFF000000
+        divide it 16777216
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # mov rdx, [rbp+x_off]: 0x48 0x8B 0x95 + disp32
+        store 0x48 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x8B into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x95 into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand x_off 0xFF
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand x_off 0xFF00
+        divide it 256
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand x_off 0xFF0000
+        divide it 65536
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand x_off 0xFF000000
+        divide it 16777216
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # mov eax, imm32 (syscall number)
+        store 0xB8 into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_val 0xFF
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_val 0xFF00
+        divide it 256
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_val 0xFF0000
+        divide it 65536
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+        bitand op_val 0xFF000000
+        divide it 16777216
+        store it into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # syscall
+        store 0x0F into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x05 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # Consume num + 3 args. Loop epilogue adds one more.
+        add tok_idx 4
+        store it into tok_idx
+
+        # Keep old generic handler disabled for deterministic bootstrap.
+        if equal 1 0
+        # Strategy: load all args into target registers first, then syscall number last.
+        # This avoids "it" clobbering since rax is loaded last.
+        # Count args by peeking ahead.
+
+        # Count operands: unrolled, no loops, no else.
+        # sc_argc counts consecutive operand tokens after syscall keyword.
+        # An operand is type 50 (literal), 52 (variable), or 22 (it/that).
+        # "active" flag (temp3): 1 = still counting, 0 = stopped.
+        store 0 into sc_argc
+        store 1 into temp3
+        add tok_idx 1
+        store it into temp2
+        # Position 1
+        if compare temp3 0
+            if compare temp2 tok_count
+                load from tok_type at temp2
+                store it into temp4
+                store 0 into k
+                if equal temp4 50
+                    store 1 into k
+                end
+                if equal temp4 52
+                    store 1 into k
+                end
+                if equal temp4 22
+                    store 1 into k
+                end
+                if compare k 0
+                    add sc_argc 1
+                    store it into sc_argc
+                    add temp2 1
+                    store it into temp2
+                end
+                if equal k 0
+                    store 0 into temp3
+                end
+            end
+        end
+        # Position 2
+        if compare temp3 0
+            if compare temp2 tok_count
+                load from tok_type at temp2
+                store it into temp4
+                store 0 into k
+                if equal temp4 50
+                    store 1 into k
+                end
+                if equal temp4 52
+                    store 1 into k
+                end
+                if equal temp4 22
+                    store 1 into k
+                end
+                if compare k 0
+                    add sc_argc 1
+                    store it into sc_argc
+                    add temp2 1
+                    store it into temp2
+                end
+                if equal k 0
+                    store 0 into temp3
+                end
+            end
+        end
+        # Position 3
+        if compare temp3 0
+            if compare temp2 tok_count
+                load from tok_type at temp2
+                store it into temp4
+                store 0 into k
+                if equal temp4 50
+                    store 1 into k
+                end
+                if equal temp4 52
+                    store 1 into k
+                end
+                if equal temp4 22
+                    store 1 into k
+                end
+                if compare k 0
+                    add sc_argc 1
+                    store it into sc_argc
+                    add temp2 1
+                    store it into temp2
+                end
+                if equal k 0
+                    store 0 into temp3
+                end
+            end
+        end
+        # Position 4
+        if compare temp3 0
+            if compare temp2 tok_count
+                load from tok_type at temp2
+                store it into temp4
+                store 0 into k
+                if equal temp4 50
+                    store 1 into k
+                end
+                if equal temp4 52
+                    store 1 into k
+                end
+                if equal temp4 22
+                    store 1 into k
+                end
+                if compare k 0
+                    add sc_argc 1
+                    store it into sc_argc
+                    add temp2 1
+                    store it into temp2
+                end
+                if equal k 0
+                    store 0 into temp3
+                end
+            end
+        end
+        # Position 5
+        if compare temp3 0
+            if compare temp2 tok_count
+                load from tok_type at temp2
+                store it into temp4
+                store 0 into k
+                if equal temp4 50
+                    store 1 into k
+                end
+                if equal temp4 52
+                    store 1 into k
+                end
+                if equal temp4 22
+                    store 1 into k
+                end
+                if compare k 0
+                    add sc_argc 1
+                    store it into sc_argc
+                    add temp2 1
+                    store it into temp2
+                end
+                if equal k 0
+                    store 0 into temp3
+                end
+            end
+        end
+
+        # Advance to syscall number operand
+        add tok_idx 1
+        store it into tok_idx
+
+        # If sc_argc >= 2, load arg1 into rdi
+        if greater sc_argc 1
+            add tok_idx 1
+            store it into temp2
+            load from tok_type at temp2
+            store it into op_type
+            store 0 into op_val
+            store 0 into op_off
+            if equal op_type 50
+                load from tok_value at temp2
+                store it into op_val
+                store 0 into op_type
+            end
+            if equal op_type 22
+                store 1 into op_type
+            end
+            if equal op_type 52
+                store 2 into op_type
+                load from tok_start at temp2
+                store it into lookup_src
+                load from tok_len at temp2
+                store it into lookup_len
+                store 0 into lookup_i
+                subtract 0 1
+                store it into lookup_result
+                while compare lookup_i var_count
+                    load from var_name_len at lookup_i
+                    store it into lookup_cmp_len
+                    if equal lookup_len lookup_cmp_len
+                        load from var_name_start at lookup_i
+                        store it into lookup_cmp_start
+                        store 1 into lookup_match
+                        store 0 into lookup_j
+                        while compare lookup_j lookup_len
+                            add lookup_src lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_a
+                            add lookup_cmp_start lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_b
+                            if compare lookup_a lookup_b
+                                store 0 into lookup_match
+                            end
+                            add lookup_j 1
+                            store it into lookup_j
+                        end
+                        if compare lookup_match 0
+                            store lookup_i into lookup_result
+                        end
+                    end
+                    add lookup_i 1
+                    store it into lookup_i
+                end
+                load from var_offset at lookup_result
+                store it into op_off
+            end
+            # Emit: load into rdi
+            if equal op_type 0
+                # mov edi, imm32: 0xBF + imm32
+                store 0xBF into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 1
+                # mov rdi, rax: 0x48 0x89 0xC7
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x89 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC7 into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 2
+                # mov rdi, [rbp+off]: 0x48 0x8B 0xBD + disp32
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8B into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xBD into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            store temp2 into tok_idx
+        end
+
+        # If sc_argc >= 3, load arg2 into rsi
+        if greater sc_argc 2
+            add tok_idx 1
+            store it into temp2
+            load from tok_type at temp2
+            store it into op_type
+            store 0 into op_val
+            store 0 into op_off
+            if equal op_type 50
+                load from tok_value at temp2
+                store it into op_val
+                store 0 into op_type
+            end
+            if equal op_type 22
+                store 1 into op_type
+            end
+            if equal op_type 52
+                store 2 into op_type
+                load from tok_start at temp2
+                store it into lookup_src
+                load from tok_len at temp2
+                store it into lookup_len
+                store 0 into lookup_i
+                subtract 0 1
+                store it into lookup_result
+                while compare lookup_i var_count
+                    load from var_name_len at lookup_i
+                    store it into lookup_cmp_len
+                    if equal lookup_len lookup_cmp_len
+                        load from var_name_start at lookup_i
+                        store it into lookup_cmp_start
+                        store 1 into lookup_match
+                        store 0 into lookup_j
+                        while compare lookup_j lookup_len
+                            add lookup_src lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_a
+                            add lookup_cmp_start lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_b
+                            if compare lookup_a lookup_b
+                                store 0 into lookup_match
+                            end
+                            add lookup_j 1
+                            store it into lookup_j
+                        end
+                        if compare lookup_match 0
+                            store lookup_i into lookup_result
+                        end
+                    end
+                    add lookup_i 1
+                    store it into lookup_i
+                end
+                load from var_offset at lookup_result
+                store it into op_off
+            end
+            # Emit: load into rsi
+            if equal op_type 0
+                # mov esi, imm32: 0xBE + imm32
+                store 0xBE into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 1
+                # mov rsi, rax: 0x48 0x89 0xC6
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x89 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC6 into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 2
+                # mov rsi, [rbp+off]: 0x48 0x8B 0xB5 + disp32
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8B into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xB5 into text at text_len
+                # Save position for post-patching verification
+                store text_len into rsi_check_pos
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            store temp2 into tok_idx
+        end
+
+        # If sc_argc >= 4, load arg3 into rdx
+        if greater sc_argc 3
+            add tok_idx 1
+            store it into temp2
+            load from tok_type at temp2
+            store it into op_type
+            store 0 into op_val
+            store 0 into op_off
+            if equal op_type 50
+                load from tok_value at temp2
+                store it into op_val
+                store 0 into op_type
+            end
+            if equal op_type 22
+                store 1 into op_type
+            end
+            if equal op_type 52
+                store 2 into op_type
+                load from tok_start at temp2
+                store it into lookup_src
+                load from tok_len at temp2
+                store it into lookup_len
+                store 0 into lookup_i
+                subtract 0 1
+                store it into lookup_result
+                while compare lookup_i var_count
+                    load from var_name_len at lookup_i
+                    store it into lookup_cmp_len
+                    if equal lookup_len lookup_cmp_len
+                        load from var_name_start at lookup_i
+                        store it into lookup_cmp_start
+                        store 1 into lookup_match
+                        store 0 into lookup_j
+                        while compare lookup_j lookup_len
+                            add lookup_src lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_a
+                            add lookup_cmp_start lookup_j
+                            store it into lookup_k
+                            load from input at lookup_k
+                            store it into lookup_b
+                            if compare lookup_a lookup_b
+                                store 0 into lookup_match
+                            end
+                            add lookup_j 1
+                            store it into lookup_j
+                        end
+                        if compare lookup_match 0
+                            store lookup_i into lookup_result
+                        end
+                    end
+                    add lookup_i 1
+                    store it into lookup_i
+                end
+                load from var_offset at lookup_result
+                store it into op_off
+            end
+            # Emit: load into rdx
+            if equal op_type 0
+                # mov edx, imm32: 0xBA + imm32
+                store 0xBA into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_val 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 1
+                # mov rdx, rax: 0x48 0x89 0xC2
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x89 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC2 into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            if equal op_type 2
+                # mov rdx, [rbp+off]: 0x48 0x8B 0x95 + disp32
+                store 0x48 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x8B into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0x95 into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand op_off 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            end
+            store temp2 into tok_idx
+        end
+
+        # Now load syscall number into rax (loaded LAST to avoid "it" clobbering)
+        # tok_idx still points at the syscall number token (we saved it before args)
+        # Actually, tok_idx was moved when loading args. We need to go back.
+        # Wait - we advanced tok_idx past the syscall number to load args.
+        # The syscall number is at the original tok_idx+1 position.
+        # But we moved tok_idx already. Let me re-think.
+        # After "add tok_idx 1" for the syscall number, tok_idx points at N.
+        # Then for arg1, we did "add tok_idx 1" and "store temp2 into tok_idx"
+        # so tok_idx is now at arg1's position. For arg2 similar.
+        # So we need to reload the syscall number from its saved position.
+        # Actually, simpler: just go back to the saved position.
+        # But wait, we didn't save the syscall number's position.
+        # Let me re-think: tok_idx starts at "syscall" keyword.
+        # We did "add tok_idx 1" to point to N.
+        # Then if sc_argc >= 2, we advanced tok_idx further.
+        # After all arg loading, tok_idx points at the last arg.
+        # The syscall number N is at original_tok_idx + 1.
+        # We can compute it: last_tok_idx - (sc_argc - 1)
+        # since args start at original+2 and there are (sc_argc-1) args
+        # So N is at tok_idx - (sc_argc - 1)
+
+        subtract sc_argc 1
+        store it into temp3
+        subtract tok_idx temp3
+        store it into temp2
+        # temp2 now points at the syscall number token
+
+        load from tok_type at temp2
+        store it into op_type
+        store 0 into op_val
+        store 0 into op_off
+        if equal op_type 50
+            load from tok_value at temp2
+            store it into op_val
+            store 0 into op_type
+        end
+        if equal op_type 22
+            store 1 into op_type
+        end
+        if equal op_type 52
+            store 2 into op_type
+            load from tok_start at temp2
+            store it into lookup_src
+            load from tok_len at temp2
+            store it into lookup_len
+            store 0 into lookup_i
+            subtract 0 1
+            store it into lookup_result
+            while compare lookup_i var_count
+                load from var_name_len at lookup_i
+                store it into lookup_cmp_len
+                if equal lookup_len lookup_cmp_len
+                    load from var_name_start at lookup_i
+                    store it into lookup_cmp_start
+                    store 1 into lookup_match
+                    store 0 into lookup_j
+                    while compare lookup_j lookup_len
+                        add lookup_src lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_a
+                        add lookup_cmp_start lookup_j
+                        store it into lookup_k
+                        load from input at lookup_k
+                        store it into lookup_b
+                        if compare lookup_a lookup_b
+                            store 0 into lookup_match
+                        end
+                        add lookup_j 1
+                        store it into lookup_j
+                    end
+                    if compare lookup_match 0
+                        store lookup_i into lookup_result
+                    end
+                end
+                add lookup_i 1
+                store it into lookup_i
+            end
+            load from var_offset at lookup_result
+            store it into op_off
+        end
+
+        # Emit: load syscall number into rax
+        if equal op_type 0
+            # mov eax, imm32: 0xB8 + imm32
+            store 0xB8 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_val 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+        if equal op_type 1
+            # "it" -- rax already has the value, nop
+        end
+        if equal op_type 2
+            # mov rax, [rbp+off]: 0x48 0x8B 0x85 + disp32
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x8B into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x85 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand op_off 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+        end
+
+        # Emit: syscall = 0x0F 0x05
+        store 0x0F into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x05 into text at text_len
+        add text_len 1
+        store it into text_len
+        end
+    end
+
+    # ── Halt/exit: halt(31) ───────────────────────────────
+    if equal temp 31
+        # mov edi, 0: 0xBF 0x00 0x00 0x00 0x00
+        store 0xBF into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # mov eax, 60: 0xB8 0x3C 0x00 0x00 0x00
+        store 0xB8 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x3C into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # syscall: 0x0F 0x05
+        store 0x0F into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0x05 into text at text_len
+        add text_len 1
+        store it into text_len
+    end
+
+    # Advance to next token
+    add tok_idx 1
+    store it into tok_idx
+end
+
+# ── DEBUG: Verify 0xB5 byte survived patching ──
+if compare rsi_check_pos 0
+    load from text at rsi_check_pos
+    if compare it 181
+        return 199
+    end
+end
+
+# ── Patch frame size ──
+# Frame size = vreg_total_size rounded up to 16
+# For "return 42" with no variables, frame_size = 0
+add vreg_total_size 15
+store it into temp
+bitand temp 0xFFFFFFF0
+store it into frame_size
+
+# Patch the 4 bytes at frame_patch_offset
+bitand frame_size 0xFF
+store it into text at frame_patch_offset
+add frame_patch_offset 1
+store it into frame_patch_offset
+
+bitand frame_size 0xFF00
+divide it 256
+store it into text at frame_patch_offset
+add frame_patch_offset 1
+store it into frame_patch_offset
+
+bitand frame_size 0xFF0000
+divide it 65536
+store it into text at frame_patch_offset
+add frame_patch_offset 1
+store it into frame_patch_offset
+
+bitand frame_size 0xFF000000
+divide it 16777216
+store it into text at frame_patch_offset
+
+# ─── Phase 6: Write ELF binary to stdout ─────────────────────────────────────
+
+# ELF header (64 bytes) + Program header (56 bytes) = 120 bytes header
+# Then .text, then .data
+
+a total_size
+add text_len data_len
+add it 120
+store it into total_size
+
+# Virtual addresses
+a vaddr_base
+store 0x400000 into vaddr_base
+a entry_point
+add vaddr_base 120
+store it into entry_point
+
+# data_vaddr = vaddr_base + 120 + text_len
+a data_vaddr
+add vaddr_base 120
+add it text_len
+store it into data_vaddr
+
+# ── Build ELF header in output buffer ──
+store 0 into output_len
+
+# Magic: 0x7F 'E' 'L' 'F'
+store 0x7F into output at output_len
+add output_len 1
+store it into output_len
+store 69 into output at output_len
+add output_len 1
+store it into output_len
+store 76 into output at output_len
+add output_len 1
+store it into output_len
+store 70 into output at output_len
+add output_len 1
+store it into output_len
+
+# Class=2 (64-bit), Data=1 (LE), Version=1, OS/ABI=0
+store 2 into output at output_len
+add output_len 1
+store it into output_len
+store 1 into output at output_len
+add output_len 1
+store it into output_len
+store 1 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# Padding (8 bytes of zeros, offsets 8-15)
+store 0 into j
+while compare j 8
+    store 0 into output at output_len
+    add output_len 1
+    store it into output_len
+    add j 1
+    store it into j
+end
+
+# Type=2 (ET_EXEC) as u16 LE
+store 2 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# Machine=62 (EM_X86_64) as u16 LE
+store 62 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# Version=1 as u32 LE
+store 1 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# Entry point (u64 LE) = entry_point
+bitand entry_point 0xFF
+store it into output at output_len
+add output_len 1
+store it into output_len
+bitand entry_point 0xFF00
+divide it 256
+store it into output at output_len
+add output_len 1
+store it into output_len
+bitand entry_point 0xFF0000
+divide it 65536
+store it into output at output_len
+add output_len 1
+store it into output_len
+bitand entry_point 0xFF000000
+divide it 16777216
+store it into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# phoff = 64 (u64 LE)
+store 64 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# shoff = 0 (u64 LE)
+store 0 into j
+while compare j 8
+    store 0 into output at output_len
+    add output_len 1
+    store it into output_len
+    add j 1
+    store it into j
+end
+
+# Flags = 0 (u32 LE)
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# ehsize = 64 (u16 LE)
+store 64 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# phentsize = 56 (u16 LE)
+store 56 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# phnum = 1 (u16 LE)
+store 1 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# shentsize = 0 (u16 LE)
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# shnum = 0 (u16 LE)
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# shstrndx = 0 (u16 LE)
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# ── Program header (56 bytes) ──
+
+# type = PT_LOAD = 1 (u32 LE)
+store 1 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# flags = PF_R|PF_W|PF_X = 7 (u32 LE)
+store 7 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# offset = 0 (u64 LE)
+store 0 into j
+while compare j 8
+    store 0 into output at output_len
+    add output_len 1
+    store it into output_len
+    add j 1
+    store it into j
+end
+
+# vaddr = 0x400000 (u64 LE)
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0x40 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# paddr = same as vaddr
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0x40 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# filesz = total_size (u64 LE)
+bitand total_size 0xFF
+store it into output at output_len
+add output_len 1
+store it into output_len
+bitand total_size 0xFF00
+divide it 256
+store it into output at output_len
+add output_len 1
+store it into output_len
+bitand total_size 0xFF0000
+divide it 65536
+store it into output at output_len
+add output_len 1
+store it into output_len
+bitand total_size 0xFF000000
+divide it 16777216
+store it into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# memsz = same as filesz
+bitand total_size 0xFF
+store it into output at output_len
+add output_len 1
+store it into output_len
+bitand total_size 0xFF00
+divide it 256
+store it into output at output_len
+add output_len 1
+store it into output_len
+bitand total_size 0xFF0000
+divide it 65536
+store it into output at output_len
+add output_len 1
+store it into output_len
+bitand total_size 0xFF000000
+divide it 16777216
+store it into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# align = 0x1000 (u64 LE)
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0x10 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+store 0 into output at output_len
+add output_len 1
+store it into output_len
+
+# ── Append .text section to output ──
+store 0 into j
+while compare j text_len
+    load from text at j
+    store it into output at output_len
+    add output_len 1
+    store it into output_len
+    add j 1
+    store it into j
+end
+
+# ── Append .data section to output ──
+store 0 into j
+while compare j data_len
+    load from datasec at j
+    store it into output at output_len
+    add output_len 1
+    store it into output_len
+    add j 1
+    store it into j
+end
+
+# ── DEBUG: Check 0xB5 in output buffer before write ──
+if compare rsi_check_pos 0
+    add rsi_check_pos 120
+    store it into temp3
+    load from output at temp3
+    if compare it 181
+        return 200
+    end
+end
+
+# ── Write output to stdout ──
+# Use addressof to get the output buffer pointer, then syscall directly.
+# The syscall handler works for fd (arg1=literal) and count (arg3).
+# For buf (arg2), the handler emits mov rsi which has a codegen issue
+# in the self-hosted chain. Use addressof to load the address into a
+# variable, then pass it as arg2.
+addressof output
+store it into temp
+syscall 1 1 temp output_len
+
+# Exit with success
+return 0

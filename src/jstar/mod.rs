@@ -1519,6 +1519,19 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn test_selfhost_rejects_unsupported_define_call() {
+        let compiler_bin = build_self_hosted_compiler();
+        let src = "define answer\nreturn 42\nend\ncall answer\nreturn it\n";
+        let (code, elf_bytes, _stderr) = run_with_stdin_timeout(&compiler_bin, src.as_bytes(), 10);
+        let _ = std::fs::remove_file(&compiler_bin);
+
+        assert!(code.is_some(), "self-hosted compiler timed out on unsupported feature check");
+        assert_eq!(code.unwrap(), 198, "self-hosted compiler should fail-fast on 'define'");
+        assert!(elf_bytes.is_empty(), "unsupported feature path should not emit an output binary");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn test_e2e_long_array_basic() {
         let exit = compile_and_run(
             "a long arr 10\nstore 42 into arr at 0\nload from arr at 0\nreturn it"

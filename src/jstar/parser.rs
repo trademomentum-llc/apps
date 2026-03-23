@@ -671,7 +671,7 @@ impl Parser {
         let mut body = Vec::new();
         while !self.is_at_end() {
             if let Some(tok) = self.peek() {
-                if matches!(tok.category, TokenCategory::Operation(JStarInstruction::Halt)) {
+                if matches!(tok.category, TokenCategory::BlockEnd) {
                     self.advance(); // consume "end"
                     break;
                 }

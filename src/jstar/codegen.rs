@@ -263,16 +263,7 @@ impl CodeGen {
                 X86Reg::Rdi, X86Reg::Rsi, X86Reg::Rdx,
                 X86Reg::Rcx, X86Reg::R8, X86Reg::R9,
             ];
-            // Parameters are the first N alloca vregs
-            let mut param_vregs: Vec<VReg> = Vec::new();
-            for block in &func.blocks {
-                for inst in &block.instructions {
-                    if let IrInst::Alloca { dest, .. } = inst {
-                        param_vregs.push(*dest);
-                    }
-                }
-            }
-            for (i, vreg) in param_vregs.iter().enumerate() {
+            for (i, vreg) in func.param_vregs.iter().enumerate() {
                 if i >= arg_regs.len() { break; }
                 let offset = self.vreg_offset(*vreg);
                 self.emit_store_reg_to_rbp_offset(arg_regs[i], offset);
@@ -776,6 +767,32 @@ impl CodeGen {
                 let patch_false = self.text.len();
                 self.text.extend_from_slice(&0i32.to_le_bytes()); // placeholder
                 self.fixups.push((patch_false, false_label.clone()));
+            }
+
+            Terminator::CmpBranch { lhs, rhs, kind, true_label, false_label } => {
+                // Fused compare+branch: emit cmp + jcc directly
+                // This matches the self-hosted compiler's codegen exactly
+                self.emit_load_value(X86Reg::Rax, lhs);
+                self.emit_load_value(X86Reg::Rcx, rhs);
+                // cmp rax, rcx
+                self.emit_cmp_reg_reg(X86Reg::Rax, X86Reg::Rcx);
+                // jcc false_label (skip body when condition is FALSE)
+                let false_jcc_opcode: u8 = match kind {
+                    CmpKind::Ne => 0x84, // JE — skip when equal
+                    CmpKind::Eq => 0x85, // JNE — skip when not equal
+                    CmpKind::Lt => 0x8D, // JGE — skip when >=
+                    CmpKind::Gt => 0x8E, // JLE — skip when <=
+                    CmpKind::Le => 0x8F, // JG — skip when >
+                    CmpKind::Ge => 0x8C, // JL — skip when <
+                };
+                self.text.extend_from_slice(&[0x0F, false_jcc_opcode]);
+                let patch_false = self.text.len();
+                self.text.extend_from_slice(&0i32.to_le_bytes()); // placeholder
+                self.fixups.push((patch_false, false_label.clone()));
+                // Fall through to true_label (no jmp needed — body follows immediately)
+                // But we need to emit jmp to true_label if it's not the next block
+                // Actually, the next block IS the true_label (set by finish_block),
+                // so we just fall through. No jmp needed.
             }
 
             Terminator::Unreachable => {
@@ -1379,6 +1396,7 @@ mod tests {
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
+                param_vregs: vec![],
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![],
@@ -1401,6 +1419,7 @@ mod tests {
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
+                param_vregs: vec![],
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![],
@@ -1433,6 +1452,7 @@ mod tests {
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
+                param_vregs: vec![],
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![IrInst::BinOp {
