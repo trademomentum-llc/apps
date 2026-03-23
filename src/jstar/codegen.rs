@@ -769,32 +769,6 @@ impl CodeGen {
                 self.fixups.push((patch_false, false_label.clone()));
             }
 
-            Terminator::CmpBranch { lhs, rhs, kind, true_label, false_label } => {
-                // Fused compare+branch: emit cmp + jcc directly
-                // This matches the self-hosted compiler's codegen exactly
-                self.emit_load_value(X86Reg::Rax, lhs);
-                self.emit_load_value(X86Reg::Rcx, rhs);
-                // cmp rax, rcx
-                self.emit_cmp_reg_reg(X86Reg::Rax, X86Reg::Rcx);
-                // jcc false_label (skip body when condition is FALSE)
-                let false_jcc_opcode: u8 = match kind {
-                    CmpKind::Ne => 0x84, // JE — skip when equal
-                    CmpKind::Eq => 0x85, // JNE — skip when not equal
-                    CmpKind::Lt => 0x8D, // JGE — skip when >=
-                    CmpKind::Gt => 0x8E, // JLE — skip when <=
-                    CmpKind::Le => 0x8F, // JG — skip when >
-                    CmpKind::Ge => 0x8C, // JL — skip when <
-                };
-                self.text.extend_from_slice(&[0x0F, false_jcc_opcode]);
-                let patch_false = self.text.len();
-                self.text.extend_from_slice(&0i32.to_le_bytes()); // placeholder
-                self.fixups.push((patch_false, false_label.clone()));
-                // Fall through to true_label (no jmp needed — body follows immediately)
-                // But we need to emit jmp to true_label if it's not the next block
-                // Actually, the next block IS the true_label (set by finish_block),
-                // so we just fall through. No jmp needed.
-            }
-
             Terminator::Unreachable => {
                 // UD2 — undefined instruction trap
                 self.text.extend_from_slice(&[0x0F, 0x0B]);
