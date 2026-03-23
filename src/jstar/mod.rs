@@ -1519,15 +1519,18 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn test_selfhost_rejects_unsupported_define_call() {
-        let compiler_bin = build_self_hosted_compiler();
+    fn test_selfhost_function_call_return_42() {
         let src = "define answer\nreturn 42\nend\ncall answer\nreturn it\n";
-        let (code, elf_bytes, _stderr) = run_with_stdin_timeout(&compiler_bin, src.as_bytes(), 10);
-        let _ = std::fs::remove_file(&compiler_bin);
+        let (exit, _) = self_hosted_compile_and_run(src);
+        assert_eq!(exit, 42, "self-hosted: function call should return 42");
+    }
 
-        assert!(code.is_some(), "self-hosted compiler timed out on unsupported feature check");
-        assert_eq!(code.unwrap(), 198, "self-hosted compiler should fail-fast on 'define'");
-        assert!(elf_bytes.is_empty(), "unsupported feature path should not emit an output binary");
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_selfhost_forward_function_call_return_42() {
+        let src = "call answer\nreturn it\n\ndefine answer\nreturn 42\nend\n";
+        let (exit, _) = self_hosted_compile_and_run(src);
+        assert_eq!(exit, 42, "self-hosted: forward function call should return 42");
     }
 
     #[test]

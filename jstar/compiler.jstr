@@ -53,9 +53,9 @@ global data_len
 #  56 = short (type noun)  57 = boolean (type noun) 58 = char (type noun)
 #  59 = global (scope keyword)
 
-global long tok_start 16384
-global long tok_len 16384
-global long tok_type 16384
+global long tok_start 32768
+global long tok_len 32768
+global long tok_type 32768
 global tok_count
 
 # ─── Compiler state ──────────────────────────────────────────────────────────
@@ -97,9 +97,11 @@ global long func_name_start 256
 global long func_name_len 256
 global long func_offset 256
 global long func_param_count 256
+global long func_skip_patch 256
 global func_count
 global is_in_function
 global current_func_idx
+global func_cf_base
 
 # Call fixup tracking (separate from jump fixups)
 global long call_patch 256
@@ -175,6 +177,8 @@ store 0 into fixup_count
 store 0 into cf_depth
 store 0 into func_count
 store 0 into is_in_function
+store 0 into current_func_idx
+store 0 into func_cf_base
 store 0 into call_fixup_count
 
 # Read from stdin (fd=0) into input buffer, looping until EOF
@@ -793,7 +797,7 @@ end
 # Convert ASCII digit sequences in input to integer values.
 # Store parsed values in a parallel array.
 
-global long tok_value 16384
+global long tok_value 32768
 
 store 0 into i
 while compare i tok_count
@@ -925,7 +929,8 @@ end
 # Step 2: Emit _start (top-level code)
 # Step 3: Apply fixups
 
-# For now, emit only _start (no function support in initial bootstrap)
+# _start is emitted first, but define/call blocks are handled inline:
+# each function body is emitted behind a jump so top-level execution skips it.
 
 # ── Emit prologue for _start ──
 # push rbp = 0x55
@@ -1113,17 +1118,237 @@ while compare tok_idx tok_count
     load from tok_type at tok_idx
     store it into temp
 
-    # Self-hosted bootstrap subset guard:
-    # Function definitions/calls are not lowered yet in compiler.jstr.
-    # Fail fast with deterministic exit codes instead of emitting
-    # a broken binary that can segfault at runtime.
+    # ── Function define: define(23) NAME ... end ────────────
     if equal temp 23
-        # unsupported: define
-        return 198
+        # Nested function definitions are unsupported
+        if compare is_in_function 0
+            return 198
+        end
+
+        # NAME token
+        add tok_idx 1
+        store it into temp2
+        if equal temp2 tok_count
+            return 198
+        end
+        load from tok_type at temp2
+        if compare it 52
+            return 198
+        end
+
+        # Resolve function index by name from pre-scan table
+        load from tok_start at temp2
+        store it into lookup_src
+        load from tok_len at temp2
+        store it into lookup_len
+        store 0 into lookup_i
+        subtract 0 1
+        store it into lookup_result
+        while compare lookup_i func_count
+            load from func_name_len at lookup_i
+            store it into lookup_cmp_len
+            if equal lookup_len lookup_cmp_len
+                load from func_name_start at lookup_i
+                store it into lookup_cmp_start
+                store 1 into lookup_match
+                store 0 into lookup_j
+                while compare lookup_j lookup_len
+                    add lookup_src lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_a
+                    add lookup_cmp_start lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_b
+                    if compare lookup_a lookup_b
+                        store 0 into lookup_match
+                    end
+                    add lookup_j 1
+                    store it into lookup_j
+                end
+                if compare lookup_match 0
+                    store lookup_i into lookup_result
+                end
+            end
+            add lookup_i 1
+            store it into lookup_i
+        end
+        subtract 0 1
+        store it into temp3
+        if equal lookup_result temp3
+            return 198
+        end
+        store lookup_result into current_func_idx
+
+        # Parameterized signatures are not implemented yet
+        add temp2 1
+        store it into temp3
+        if compare temp3 tok_count
+            load from tok_type at temp3
+            if equal it 24
+                return 195
+            end
+        end
+
+        # Emit jump over function body so top-level execution skips it
+        # jmp rel32 = 0xE9 + placeholder
+        store 0xE9 into text at text_len
+        add text_len 1
+        store it into text_len
+        store text_len into temp3
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store temp3 into func_skip_patch at current_func_idx
+
+        # Function entry point is immediately after the jump
+        store text_len into func_offset at current_func_idx
+        store 1 into is_in_function
+        store cf_depth into func_cf_base
+
+        # Next iteration should start at first body token (right after NAME)
+        store temp2 into tok_idx
+        store 0 into temp
     end
+
+    # ── Function call: call(25) NAME ────────────────────────
     if equal temp 25
-        # unsupported: call
-        return 197
+        # NAME token
+        add tok_idx 1
+        store it into temp2
+        if equal temp2 tok_count
+            return 197
+        end
+        load from tok_type at temp2
+        if compare it 52
+            return 197
+        end
+
+        # Resolve function index by name
+        load from tok_start at temp2
+        store it into lookup_src
+        load from tok_len at temp2
+        store it into lookup_len
+        store 0 into lookup_i
+        subtract 0 1
+        store it into lookup_result
+        while compare lookup_i func_count
+            load from func_name_len at lookup_i
+            store it into lookup_cmp_len
+            if equal lookup_len lookup_cmp_len
+                load from func_name_start at lookup_i
+                store it into lookup_cmp_start
+                store 1 into lookup_match
+                store 0 into lookup_j
+                while compare lookup_j lookup_len
+                    add lookup_src lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_a
+                    add lookup_cmp_start lookup_j
+                    store it into lookup_k
+                    load from input at lookup_k
+                    store it into lookup_b
+                    if compare lookup_a lookup_b
+                        store 0 into lookup_match
+                    end
+                    add lookup_j 1
+                    store it into lookup_j
+                end
+                if compare lookup_match 0
+                    store lookup_i into lookup_result
+                end
+            end
+            add lookup_i 1
+            store it into lookup_i
+        end
+        subtract 0 1
+        store it into temp3
+        if equal lookup_result temp3
+            return 197
+        end
+
+        # Args are not implemented yet; only bare call NAME
+        add temp2 1
+        store it into temp3
+        if compare temp3 tok_count
+            load from tok_type at temp3
+            store 0 into matched
+            if equal it 50
+                store 1 into matched
+            end
+            if equal it 52
+                store 1 into matched
+            end
+            if equal it 22
+                store 1 into matched
+            end
+            if compare matched 0
+                return 197
+            end
+        end
+
+        # Emit call rel32 (0xE8 + 4-byte displacement)
+        store 0xE8 into text at text_len
+        add text_len 1
+        store it into text_len
+        store text_len into cf_patch
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+        store 0 into text at text_len
+        add text_len 1
+        store it into text_len
+
+        # Patch immediately if target offset is known, else defer
+        load from func_offset at lookup_result
+        store it into temp3
+        if equal temp3 0
+            store cf_patch into call_patch at call_fixup_count
+            store lookup_result into call_func at call_fixup_count
+            add call_fixup_count 1
+            store it into call_fixup_count
+        else
+            add cf_patch 4
+            subtract temp3 it
+            store it into temp4
+            bitand temp4 0xFF
+            store it into text at cf_patch
+            add cf_patch 1
+            store it into cf_patch
+            bitand temp4 0xFF00
+            divide it 256
+            store it into text at cf_patch
+            add cf_patch 1
+            store it into cf_patch
+            bitand temp4 0xFF0000
+            divide it 65536
+            store it into text at cf_patch
+            add cf_patch 1
+            store it into cf_patch
+            bitand temp4 0xFF000000
+            divide it 16777216
+            store it into text at cf_patch
+        end
+
+        # Consume NAME token
+        store temp2 into tok_idx
     end
 
     # ── return N ──────────────────────────────────────────────
@@ -1255,30 +1480,48 @@ while compare tok_idx tok_count
             end
         end
 
-        # mov eax, 60 (sys_exit) = 0xB8 0x3C 0x00 0x00 0x00
-        store 0xB8 into text at text_len
-        add text_len 1
-        store it into text_len
-        store 0x3C into text at text_len
-        add text_len 1
-        store it into text_len
-        store 0 into text at text_len
-        add text_len 1
-        store it into text_len
-        store 0 into text at text_len
-        add text_len 1
-        store it into text_len
-        store 0 into text at text_len
-        add text_len 1
-        store it into text_len
+        # Top-level return exits process; function return uses ret
+        if compare is_in_function 0
+            # mov rax, rdi = 0x48 0x89 0xF8
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x89 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xF8 into text at text_len
+            add text_len 1
+            store it into text_len
+            # ret
+            store 0xC3 into text at text_len
+            add text_len 1
+            store it into text_len
+        else
+            # mov eax, 60 (sys_exit) = 0xB8 0x3C 0x00 0x00 0x00
+            store 0xB8 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x3C into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0 into text at text_len
+            add text_len 1
+            store it into text_len
 
-        # syscall = 0x0F 0x05
-        store 0x0F into text at text_len
-        add text_len 1
-        store it into text_len
-        store 0x05 into text at text_len
-        add text_len 1
-        store it into text_len
+            # syscall = 0x0F 0x05
+            store 0x0F into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x05 into text at text_len
+            add text_len 1
+            store it into text_len
+        end
     end
 
     # ── Arithmetic: add(2) subtract(3) multiply(4) divide(5) ────
@@ -2912,6 +3155,61 @@ while compare tok_idx tok_count
         store 1 into cf_kind at cf_depth
         add cf_depth 1
         store it into cf_depth
+    end
+
+    # ── Function end (top-level end while in function mode) ──
+    if equal temp 16
+        if compare is_in_function 0
+            if equal cf_depth func_cf_base
+                # Implicit function return 0 on fallthrough
+                store 0xB8 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0 into text at text_len
+                add text_len 1
+                store it into text_len
+                store 0xC3 into text at text_len
+                add text_len 1
+                store it into text_len
+
+                # Patch the jump-over-function emitted at define
+                load from func_skip_patch at current_func_idx
+                store it into cf_patch
+                subtract text_len cf_patch
+                subtract it 4
+                store it into temp2
+                bitand temp2 0xFF
+                store it into text at cf_patch
+                add cf_patch 1
+                store it into cf_patch
+                bitand temp2 0xFF00
+                divide it 256
+                store it into text at cf_patch
+                add cf_patch 1
+                store it into cf_patch
+                bitand temp2 0xFF0000
+                divide it 65536
+                store it into text at cf_patch
+                add cf_patch 1
+                store it into cf_patch
+                bitand temp2 0xFF000000
+                divide it 16777216
+                store it into text at cf_patch
+
+                store 0 into is_in_function
+                store 0 into current_func_idx
+                store 0 into temp
+            end
+        end
     end
 
     # ── End: end(16) ─────────────────────────────────────────
@@ -4634,6 +4932,47 @@ while compare tok_idx tok_count
     store it into tok_idx
 end
 
+# ── Patch deferred call rel32 fixups ────────────────────────
+store 0 into i
+while compare i call_fixup_count
+    load from call_patch at i
+    store it into cf_patch
+    load from call_func at i
+    store it into temp2
+    load from func_offset at temp2
+    store it into temp3
+    if equal temp3 0
+        # unresolved function target
+        return 197
+    end
+
+    # rel32 = target - (patch_pos + 4)
+    add cf_patch 4
+    subtract temp3 it
+    store it into temp4
+
+    bitand temp4 0xFF
+    store it into text at cf_patch
+    add cf_patch 1
+    store it into cf_patch
+    bitand temp4 0xFF00
+    divide it 256
+    store it into text at cf_patch
+    add cf_patch 1
+    store it into cf_patch
+    bitand temp4 0xFF0000
+    divide it 65536
+    store it into text at cf_patch
+    add cf_patch 1
+    store it into cf_patch
+    bitand temp4 0xFF000000
+    divide it 16777216
+    store it into text at cf_patch
+
+    add i 1
+    store it into i
+end
+
 # ── DEBUG: Verify 0xB5 byte survived patching ──
 if compare rsi_check_pos 0
     load from text at rsi_check_pos
@@ -5121,7 +5460,8 @@ end
 # variable, then pass it as arg2.
 addressof output
 store it into temp
-syscall 1 1 temp output_len
+store output_len into temp2
+syscall 1 1 temp temp2
 
 # Exit with success
 return 0
