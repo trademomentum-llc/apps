@@ -1398,8 +1398,9 @@ mod tests {
         input: &[u8],
         timeout_secs: u64,
     ) -> (Option<i32>, Vec<u8>, String) {
-        use std::io::Write;
+        use std::io::{Read, Write};
         use std::process::{Command, Stdio};
+        use std::thread;
         use std::time::{Duration, Instant};
 
         let mut child = Command::new(binary)
@@ -1409,26 +1410,57 @@ mod tests {
             .spawn()
             .expect("Failed to spawn binary");
 
+        fn status_code_or_signal(status: std::process::ExitStatus) -> Option<i32> {
+            if let Some(code) = status.code() {
+                return Some(code);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = status.signal() {
+                    return Some(-sig);
+                }
+            }
+            None
+        }
+
+        // Drain stdout/stderr concurrently so large outputs do not block child
+        // on a full pipe buffer before it exits.
+        let mut child_stdout = child.stdout.take().expect("Failed to capture stdout");
+        let mut child_stderr = child.stderr.take().expect("Failed to capture stderr");
+        let stdout_thread = thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = child_stdout.read_to_end(&mut buf);
+            buf
+        });
+        let stderr_thread = thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = child_stderr.read_to_end(&mut buf);
+            buf
+        });
+
         // Write input and close stdin (drop sends EOF)
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(input) {
                 drop(stdin);
-                // Child likely crashed; wait for it and report
-                let output = child.wait_with_output().unwrap();
-                let code = output.status.code();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let _ = child.kill();
+                let status = child.wait().ok();
+                let out_stdout = stdout_thread.join().unwrap_or_default();
+                let out_stderr = stderr_thread.join().unwrap_or_default();
+                let code = status.and_then(status_code_or_signal);
+                let stderr = String::from_utf8_lossy(&out_stderr).to_string();
                 let signal = {
                     #[cfg(unix)]
                     {
                         use std::os::unix::process::ExitStatusExt;
-                        output.status.signal()
+                        status.and_then(|s| s.signal())
                     }
                     #[cfg(not(unix))]
                     { None }
                 };
                 eprintln!("write_all failed: {} (child exit={:?}, signal={:?}, stderr={})",
                     e, code, signal, stderr);
-                return (code, output.stdout, format!("write error: {}, signal: {:?}", e, signal));
+                return (code, out_stdout, format!("write error: {}, signal: {:?}", e, signal));
             }
         }
 
@@ -1438,22 +1470,33 @@ mod tests {
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let out = child.wait_with_output().unwrap();
+                    let out_stdout = stdout_thread.join().unwrap_or_default();
+                    let out_stderr = stderr_thread.join().unwrap_or_default();
                     return (
-                        status.code(),
-                        out.stdout,
-                        String::from_utf8_lossy(&out.stderr).to_string(),
+                        status_code_or_signal(status),
+                        out_stdout,
+                        String::from_utf8_lossy(&out_stderr).to_string(),
                     );
                 }
                 Ok(None) => {
                     if start.elapsed() > deadline {
                         let _ = child.kill();
                         let _ = child.wait();
-                        return (None, vec![], "TIMEOUT".to_string());
+                        let out_stdout = stdout_thread.join().unwrap_or_default();
+                        let out_stderr = stderr_thread.join().unwrap_or_default();
+                        let stderr = String::from_utf8_lossy(&out_stderr).to_string();
+                        if stderr.is_empty() {
+                            return (None, out_stdout, "TIMEOUT".to_string());
+                        }
+                        return (None, out_stdout, format!("TIMEOUT (stderr: {})", stderr));
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
                     return (None, vec![], format!("wait error: {}", e));
                 }
             }
@@ -1540,6 +1583,20 @@ mod tests {
 add left right\nreturn it\nend\ncall adder 17 25\nreturn it";
         let (exit, _) = self_hosted_compile_and_run(src);
         assert_eq!(exit, 42, "self-hosted: function with args should return 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_selfhost_while_countdown() {
+        let src = "a counter\n\
+store 3 into counter\n\
+while compare counter 0\n\
+subtract counter 1\n\
+store it into counter\n\
+end\n\
+return counter\n";
+        let (exit, _) = self_hosted_compile_and_run(src);
+        assert_eq!(exit, 0, "self-hosted: while countdown should end at 0");
     }
 
     #[test]
@@ -2262,7 +2319,7 @@ return ok";
     /// jstar3 = jstar2 compiles compiler.jstr
     /// Verify: jstar2 == jstar3 (fixpoint)
     #[test]
-    #[ignore] // Enable once self-hosted compiler handles full feature set
+    #[ignore] // Still flaky until jstar2 reliably compiles full compiler.jstr without crashing.
     #[cfg(target_os = "linux")]
     fn test_t_diagram_fixpoint() {
         use std::os::unix::fs::PermissionsExt;
