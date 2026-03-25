@@ -172,7 +172,7 @@ fn calculate_exact_size(data: &[u8]) -> MorphResult<usize> {
 /// always produces the same AES key.
 fn derive_aes_key(shared_secret_bytes: &[u8; 32]) -> MorphResult<[u8; 32]> {
     let hk = Hkdf::<Sha3_512>::new(Some(HKDF_SALT), shared_secret_bytes);
-    let mut aes_key = [0u8; 32];
+    let mut aes_key: [u8; 32] = Default::default();
     hk.expand(HKDF_INFO, &mut aes_key)
         .map_err(|e| MorphlexError::EncryptionError(format!("HKDF expand failed: {}", e)))?;
     Ok(aes_key)
