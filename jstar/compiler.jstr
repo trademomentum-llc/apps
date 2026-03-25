@@ -97,6 +97,7 @@ global long func_name_start 256
 global long func_name_len 256
 global long func_offset 256
 global long func_param_count 256
+global long func_param_start 256
 global long func_skip_patch 256
 global func_count
 global is_in_function
@@ -121,6 +122,23 @@ a temp2
 a temp3
 a temp4
 a matched
+a param_cursor
+a param_type
+a param_size
+a param_name_idx
+a param_count_temp
+a param_start
+a param_type_valid
+a param_last_name_idx
+a param_token_len
+a param_with_start
+a param_char
+a arg_idx
+a arg_tok
+a arg_type
+a arg_offset
+a param_base
+a call_func_idx
 a tok_idx
 a byte_val
 
@@ -906,6 +924,7 @@ while compare i tok_count
             store temp2 into func_name_start at func_count
             store temp3 into func_name_len at func_count
             store 0 into func_param_count at func_count
+            store 0 into func_param_start at func_count
 
             add func_count 1
             store it into func_count
@@ -1181,15 +1200,91 @@ while compare tok_idx tok_count
         end
         store lookup_result into current_func_idx
 
-        # Parameterized signatures are not implemented yet
+        # Parse optional parameter list: "with TYPE NAME ..."
+        store var_count into param_start
+        store 0 into param_count_temp
         add temp2 1
-        store it into temp3
-        if compare temp3 tok_count
-            load from tok_type at temp3
+        store it into param_cursor
+        store temp2 into param_last_name_idx
+        if compare param_cursor tok_count
+            # no trailing tokens -> no parameters
+        else
+            load from tok_type at param_cursor
+            store it into temp3
+            store temp3 into text at text_len
+            add text_len 1
+            store it into text_len
             if equal it 24
-                return 195
+                store 0xAB into text at text_len
+                add text_len 1
+                store it into text_len
+                add param_cursor 1
+                store it into param_cursor
+                while compare param_cursor tok_count
+                    load from tok_type at param_cursor
+                    store it into param_type
+                    store 0 into param_type_valid
+                    if equal param_type 53
+                        store 1 into param_type_valid
+                    end
+                    if equal param_type 54
+                        store 1 into param_type_valid
+                    end
+                    if equal param_type 55
+                        store 1 into param_type_valid
+                    end
+                    if equal param_type 56
+                        store 1 into param_type_valid
+                    end
+                    if equal param_type 57
+                        store 1 into param_type_valid
+                    end
+                    if equal param_type 58
+                        store 1 into param_type_valid
+                    end
+                    if compare param_type_valid 0
+                        store 0xAC into text at text_len
+                        add text_len 1
+                        store it into text_len
+                        store tok_count into param_cursor
+                    else
+                        add param_cursor 1
+                        store it into param_name_idx
+                        if compare param_name_idx tok_count
+                            return 195
+                        end
+                        load from tok_start at param_name_idx
+                        store it into var_name_start at var_count
+                        load from tok_len at param_name_idx
+                        store it into var_name_len at var_count
+                        store 8 into param_size
+                        store 0 into var_type at var_count
+                        if equal param_type 53
+                            store 1 into param_size
+                            store 1 into var_type at var_count
+                        end
+                        add vreg_total_size param_size
+                        store it into vreg_total_size
+                        subtract 0 vreg_total_size
+                        store it into var_offset at var_count
+                        add var_count 1
+                        store it into var_count
+                        add param_count_temp 1
+                        store it into param_count_temp
+                        store param_name_idx into param_last_name_idx
+                        add param_cursor 1
+                        store it into param_cursor
+                    end
+                end
+                if compare param_count_temp 0
+                    return 195
+                end
+                store param_last_name_idx into temp2
             end
         end
+
+        store param_start into func_param_start at current_func_idx
+        store param_count_temp into func_param_count at current_func_idx
 
         # Emit jump over function body so top-level execution skips it
         # jmp rel32 = 0xE9 + placeholder
@@ -1215,6 +1310,77 @@ while compare tok_idx tok_count
         store text_len into func_offset at current_func_idx
         store 1 into is_in_function
         store cf_depth into func_cf_base
+        # Copy argument registers into the shared stack frame so parameters behave like locals
+        store 0xBB into text at text_len
+        add text_len 1
+        store it into text_len
+        load from func_param_count at current_func_idx
+        store it into param_count_temp
+        if greater param_count_temp 6
+            return 195
+        end
+        load from func_param_start at current_func_idx
+        store it into param_base
+        store 0 into arg_idx
+        while compare arg_idx param_count_temp
+            store param_base into param_name_idx
+            add param_name_idx arg_idx
+            store it into param_name_idx
+            load from var_offset at param_name_idx
+            store it into arg_offset
+            if equal arg_idx 0
+                store 0x57 into text at text_len
+                add text_len 1
+                store it into text_len
+            else
+                if equal arg_idx 1
+                    store 0x56 into text at text_len
+                    add text_len 1
+                    store it into text_len
+                else
+                    if equal arg_idx 2
+                        store 0x52 into text at text_len
+                        add text_len 1
+                        store it into text_len
+                    else
+                        if equal arg_idx 3
+                            store 0x51 into text at text_len
+                            add text_len 1
+                            store it into text_len
+                        else
+                            if equal arg_idx 4
+                                store 0x41 into text at text_len
+                                add text_len 1
+                                store it into text_len
+                                store 0x50 into text at text_len
+                                add text_len 1
+                                store it into text_len
+                            else
+                                if equal arg_idx 5
+                                    store 0x41 into text at text_len
+                                    add text_len 1
+                                    store it into text_len
+                                    store 0x51 into text at text_len
+                                    add text_len 1
+                                    store it into text_len
+                                else
+                                    return 195
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            store 0x58 into text at text_len
+            add text_len 1
+            store it into text_len
+            store arg_tok into temp2
+            add arg_idx 1
+            store it into arg_idx
+        end
+        store 0xDD into text at text_len
+        add text_len 1
+        store it into text_len
 
         # Next iteration should start at first body token (right after NAME)
         store temp2 into tok_idx
@@ -1277,25 +1443,177 @@ while compare tok_idx tok_count
         if equal lookup_result temp3
             return 197
         end
+        store lookup_result into call_func_idx
+        load from func_param_count at call_func_idx
+        store it into param_count_temp
+        load from func_param_start at call_func_idx
+        store it into param_base
+        store 0 into arg_idx
+        if greater param_count_temp 6
+            return 195
+        end
 
-        # Args are not implemented yet; only bare call NAME
-        add temp2 1
-        store it into temp3
-        if compare temp3 tok_count
-            load from tok_type at temp3
-            store 0 into matched
-            if equal it 50
-                store 1 into matched
-            end
-            if equal it 52
-                store 1 into matched
-            end
-            if equal it 22
-                store 1 into matched
-            end
-            if compare matched 0
+        # Evaluate call arguments (must match parameter count) and write them into the shared stack frame
+        while compare arg_idx param_count_temp
+            add temp2 1
+            store it into arg_tok
+            if compare arg_tok tok_count
                 return 197
             end
+            load from tok_type at arg_tok
+            store it into arg_type
+            if equal arg_type 50
+                load from tok_value at arg_tok
+                store it into temp3
+                store 0xB8 into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand temp3 0xFF
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand temp3 0xFF00
+                divide it 256
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand temp3 0xFF0000
+                divide it 65536
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+                bitand temp3 0xFF000000
+                divide it 16777216
+                store it into text at text_len
+                add text_len 1
+                store it into text_len
+            else
+                if equal arg_type 22
+                    # "it" already lives in rax (no-op)
+                else
+                    # Variable reference: load into rax
+                    load from tok_start at arg_tok
+                    store it into lookup_src
+                    load from tok_len at arg_tok
+                    store it into lookup_len
+                    store 0 into lookup_i
+                    subtract 0 1
+                    store it into lookup_result
+                    while compare lookup_i var_count
+                        load from var_name_len at lookup_i
+                        store it into lookup_cmp_len
+                        if equal lookup_len lookup_cmp_len
+                            load from var_name_start at lookup_i
+                            store it into lookup_cmp_start
+                            store 1 into lookup_match
+                            store 0 into lookup_j
+                            while compare lookup_j lookup_len
+                                add lookup_src lookup_j
+                                store it into lookup_k
+                                load from input at lookup_k
+                                store it into lookup_a
+                                add lookup_cmp_start lookup_j
+                                store it into lookup_k
+                                load from input at lookup_k
+                                store it into lookup_b
+                                if compare lookup_a lookup_b
+                                    store 0 into lookup_match
+                                end
+                                add lookup_j 1
+                                store it into lookup_j
+                            end
+                            if compare lookup_match 0
+                                store lookup_i into lookup_result
+                            end
+                        end
+                        add lookup_i 1
+                        store it into lookup_i
+                    end
+                    load from var_offset at lookup_result
+                    store it into op_off
+                    store 0x48 into text at text_len
+                    add text_len 1
+                    store it into text_len
+                    store 0x8B into text at text_len
+                    add text_len 1
+                    store it into text_len
+                    store 0x85 into text at text_len
+                    add text_len 1
+                    store it into text_len
+                    bitand op_off 0xFF
+                    store it into text at text_len
+                    add text_len 1
+                    store it into text_len
+                    bitand op_off 0xFF00
+                    divide it 256
+                    store it into text at text_len
+                    add text_len 1
+                    store it into text_len
+                    bitand op_off 0xFF0000
+                    divide it 65536
+                    store it into text at text_len
+                    add text_len 1
+                    store it into text_len
+                    bitand op_off 0xFF000000
+                    divide it 16777216
+                    store it into text at text_len
+                    add text_len 1
+                    store it into text_len
+                end
+            end
+            # Move argument value into the appropriate register (push rax; pop target)
+            store 0xAA into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x50 into text at text_len
+            add text_len 1
+            store it into text_len
+            if equal arg_idx 0
+                store 0x5F into text at text_len
+                add text_len 1
+                store it into text_len
+            else
+                if equal arg_idx 1
+                    store 0x5E into text at text_len
+                    add text_len 1
+                    store it into text_len
+                else
+                    if equal arg_idx 2
+                        store 0x5A into text at text_len
+                        add text_len 1
+                        store it into text_len
+                    else
+                        if equal arg_idx 3
+                            store 0x59 into text at text_len
+                            add text_len 1
+                            store it into text_len
+                        else
+                            if equal arg_idx 4
+                                store 0x41 into text at text_len
+                                add text_len 1
+                                store it into text_len
+                                store 0x58 into text at text_len
+                                add text_len 1
+                                store it into text_len
+                            else
+                                if equal arg_idx 5
+                                    store 0x41 into text at text_len
+                                    add text_len 1
+                                    store it into text_len
+                                    store 0x59 into text at text_len
+                                    add text_len 1
+                                    store it into text_len
+                                else
+                                    return 195
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            store arg_tok into temp2
+            add arg_idx 1
+            store it into arg_idx
         end
 
         # Emit call rel32 (0xE8 + 4-byte displacement)
@@ -1317,11 +1635,11 @@ while compare tok_idx tok_count
         store it into text_len
 
         # Patch immediately if target offset is known, else defer
-        load from func_offset at lookup_result
+        load from func_offset at call_func_idx
         store it into temp3
         if equal temp3 0
             store cf_patch into call_patch at call_fixup_count
-            store lookup_result into call_func at call_fixup_count
+            store call_func_idx into call_func at call_fixup_count
             add call_fixup_count 1
             store it into call_fixup_count
         else
