@@ -300,6 +300,9 @@ while compare i input_len
 
                 add tok_count 1
                 store it into tok_count
+                if greater tok_count 32768
+                    return 194
+                end
 
                 # Skip closing quote
                 add i 1
@@ -521,7 +524,12 @@ while compare i input_len
                         # "less" = 108,101,115,115
                         if equal ch 108
                             if equal byte_val 101
-                                store 10 into tok_type at tok_count
+                                add temp2 2
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 115
+                                    store 10 into tok_type at tok_count
+                                end
                             end
                         end
                         # "long" = 108,111,110,103
@@ -735,26 +743,60 @@ while compare i input_len
                     if equal temp3 7
                         load from input at temp2
                         store it into ch
+                        add temp2 1
+                        store it into temp4
+                        load from input at temp4
+                        store it into byte_val
 
-                        # "compare" = 99
+                        # "compare" = 99,111
                         if equal ch 99
-                            store 8 into tok_type at tok_count
+                            if equal byte_val 111
+                                add temp2 2
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 109
+                                    store 8 into tok_type at tok_count
+                                end
+                            end
                         end
-                        # "greater" = 103
+                        # "greater" = 103,114
                         if equal ch 103
-                            store 11 into tok_type at tok_count
+                            if equal byte_val 114
+                                add temp2 2
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 101
+                                    store 11 into tok_type at tok_count
+                                end
+                            end
                         end
-                        # "integer" = 105
+                        # "integer" = 105,110
                         if equal ch 105
-                            store 55 into tok_type at tok_count
+                            if equal byte_val 110
+                                add temp2 2
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 116
+                                    store 55 into tok_type at tok_count
+                                end
+                            end
                         end
-                        # "syscall" = 115
+                        # "syscall" = 115,121
                         if equal ch 115
-                            store 26 into tok_type at tok_count
+                            if equal byte_val 121
+                                add temp2 2
+                                store it into temp4
+                                load from input at temp4
+                                if equal it 115
+                                    store 26 into tok_type at tok_count
+                                end
+                            end
                         end
-                        # "boolean" = 98
+                        # "boolean" = 98,111
                         if equal ch 98
-                            store 57 into tok_type at tok_count
+                            if equal byte_val 111
+                                store 57 into tok_type at tok_count
+                            end
                         end
                     end
 
@@ -802,6 +844,9 @@ while compare i input_len
 
                 add tok_count 1
                 store it into tok_count
+                if greater tok_count 32768
+                    return 194
+                end
             end
         end
     else
@@ -1206,18 +1251,47 @@ while compare tok_idx tok_count
         add temp2 1
         store it into param_cursor
         store temp2 into param_last_name_idx
-        if compare param_cursor tok_count
+        if equal param_cursor tok_count
             # no trailing tokens -> no parameters
         else
             load from tok_type at param_cursor
             store it into temp3
-            store temp3 into text at text_len
-            add text_len 1
-            store it into text_len
-            if equal it 24
-                store 0xAB into text at text_len
-                add text_len 1
-                store it into text_len
+            store 0 into param_with_start
+            if equal temp3 24
+                store 1 into param_with_start
+            end
+            if compare param_with_start 0
+                load from tok_len at param_cursor
+                store it into param_token_len
+                if equal param_token_len 4
+                    load from tok_start at param_cursor
+                    store it into param_with_start
+                    load from input at param_with_start
+                    store it into param_char
+                    if equal param_char 119
+                        add param_with_start 1
+                        store it into temp4
+                        load from input at temp4
+                        store it into param_char
+                        if equal param_char 105
+                            add param_with_start 2
+                            store it into temp4
+                            load from input at temp4
+                            store it into param_char
+                            if equal param_char 116
+                                add param_with_start 3
+                                store it into temp4
+                                load from input at temp4
+                                store it into param_char
+                                if equal param_char 104
+                                    store 1 into param_with_start
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            if compare param_with_start 0
                 add param_cursor 1
                 store it into param_cursor
                 while compare param_cursor tok_count
@@ -1242,15 +1316,12 @@ while compare tok_idx tok_count
                     if equal param_type 58
                         store 1 into param_type_valid
                     end
-                    if compare param_type_valid 0
-                        store 0xAC into text at text_len
-                        add text_len 1
-                        store it into text_len
+                    if equal param_type_valid 0
                         store tok_count into param_cursor
                     else
                         add param_cursor 1
                         store it into param_name_idx
-                        if compare param_name_idx tok_count
+                        if equal param_name_idx tok_count
                             return 195
                         end
                         load from tok_start at param_name_idx
@@ -1269,14 +1340,17 @@ while compare tok_idx tok_count
                         store it into var_offset at var_count
                         add var_count 1
                         store it into var_count
+                        if greater var_count 512
+                            return 195
+                        end
                         add param_count_temp 1
                         store it into param_count_temp
                         store param_name_idx into param_last_name_idx
-                        add param_cursor 1
+                        add param_cursor 2
                         store it into param_cursor
                     end
                 end
-                if compare param_count_temp 0
+                if equal param_count_temp 0
                     return 195
                 end
                 store param_last_name_idx into temp2
@@ -1311,9 +1385,6 @@ while compare tok_idx tok_count
         store 1 into is_in_function
         store cf_depth into func_cf_base
         # Copy argument registers into the shared stack frame so parameters behave like locals
-        store 0xBB into text at text_len
-        add text_len 1
-        store it into text_len
         load from func_param_count at current_func_idx
         store it into param_count_temp
         if greater param_count_temp 6
@@ -1374,14 +1445,38 @@ while compare tok_idx tok_count
             store 0x58 into text at text_len
             add text_len 1
             store it into text_len
-            store arg_tok into temp2
+            # mov [rbp+arg_offset], rax
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x89 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x85 into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand arg_offset 0xFF
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand arg_offset 0xFF00
+            divide it 256
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand arg_offset 0xFF0000
+            divide it 65536
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
+            bitand arg_offset 0xFF000000
+            divide it 16777216
+            store it into text at text_len
+            add text_len 1
+            store it into text_len
             add arg_idx 1
             store it into arg_idx
         end
-        store 0xDD into text at text_len
-        add text_len 1
-        store it into text_len
-
         # Next iteration should start at first body token (right after NAME)
         store temp2 into tok_idx
         store 0 into temp
@@ -1457,7 +1552,7 @@ while compare tok_idx tok_count
         while compare arg_idx param_count_temp
             add temp2 1
             store it into arg_tok
-            if compare arg_tok tok_count
+            if equal arg_tok tok_count
                 return 197
             end
             load from tok_type at arg_tok
@@ -1562,9 +1657,6 @@ while compare tok_idx tok_count
                 end
             end
             # Move argument value into the appropriate register (push rax; pop target)
-            store 0xAA into text at text_len
-            add text_len 1
-            store it into text_len
             store 0x50 into text at text_len
             add text_len 1
             store it into text_len
@@ -2262,6 +2354,9 @@ while compare tok_idx tok_count
             store it into var_offset at var_count
             add var_count 1
             store it into var_count
+            if greater var_count 512
+                return 195
+            end
         else
             # Simple variable: a/global NAME (8 bytes)
             load from tok_start at tok_idx
@@ -2275,6 +2370,9 @@ while compare tok_idx tok_count
             store it into var_offset at var_count
             add var_count 1
             store it into var_count
+            if greater var_count 512
+                return 195
+            end
         end
     end
 
