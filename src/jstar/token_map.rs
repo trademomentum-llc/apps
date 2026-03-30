@@ -63,6 +63,11 @@ pub enum JStarInstruction {
     // Arrays
     Length,
 
+    // String operations
+    StrCmp,
+    StrLen,
+    StrCopy,
+
     // Hashing
     Hash,
 
@@ -251,6 +256,9 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("open",     TokenCategory::Operation(JStarInstruction::Open)),
         ("close",    TokenCategory::Operation(JStarInstruction::Close)),
         ("length",   TokenCategory::Operation(JStarInstruction::Length)),
+        ("strcmp",   TokenCategory::Operation(JStarInstruction::StrCmp)),
+        ("strlen",   TokenCategory::Operation(JStarInstruction::StrLen)),
+        ("strcopy",  TokenCategory::Operation(JStarInstruction::StrCopy)),
         ("hash",     TokenCategory::Operation(JStarInstruction::Hash)),
         // ── Scope (explicit keyword — not a determiner) ──
         ("global",   TokenCategory::Scope(ScopeKind::Global)),
@@ -389,6 +397,11 @@ fn resolve_verb(lemma: &str) -> JStarInstruction {
 
         // Hashing
         "hash" | "digest" => JStarInstruction::Hash,
+
+        // String operations
+        "strcmp" => JStarInstruction::StrCmp,
+        "strlen" => JStarInstruction::StrLen,
+        "strcopy" => JStarInstruction::StrCopy,
 
         // System
         "halt" | "stop" | "exit" | "quit" | "end" | "terminate" => JStarInstruction::Halt,
