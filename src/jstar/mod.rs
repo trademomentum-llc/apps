@@ -2354,8 +2354,10 @@ return ok";
     #[test]
     #[cfg(target_os = "linux")]
     fn test_e2e_strcmp_equal() {
+        // Use arrays to get proper memory buffers; store same byte pattern
+        // array elements are 8 bytes each, so 1 byte at offset 0 will be the low byte
         let exit = compile_and_run(
-            "allocate 8\na buf1\nstore it into buf1\nallocate 8\na buf2\nstore it into buf2\nstore 65 into buf1\nstore 65 into buf2\nstrcmp buf1 buf2 1\nreturn it"
+            "array 2 buf1\narray 2 buf2\nstore 65 into buf1 at 0\nstore 65 into buf2 at 0\nstrcmp buf1 buf2 1\nreturn it"
         );
         assert_eq!(exit, 1, "strcmp of identical single-byte buffers should be 1");
     }
@@ -2363,8 +2365,9 @@ return ok";
     #[test]
     #[cfg(target_os = "linux")]
     fn test_e2e_strcmp_not_equal() {
+        // Use arrays; store different byte values at index 0
         let exit = compile_and_run(
-            "allocate 8\na buf1\nstore it into buf1\nallocate 8\na buf2\nstore it into buf2\nstore 65 into buf1\nstore 66 into buf2\nstrcmp buf1 buf2 1\nreturn it"
+            "array 2 buf1\narray 2 buf2\nstore 65 into buf1 at 0\nstore 66 into buf2 at 0\nstrcmp buf1 buf2 1\nreturn it"
         );
         assert_eq!(exit, 0, "strcmp of different single-byte buffers should be 0");
     }
