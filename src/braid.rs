@@ -105,10 +105,7 @@ pub trait BraidKeyExchange {
     ///
     /// The secret word should be sufficiently long and random to resist
     /// length-based attacks.
-    fn generate_private_key(
-        params: &AagParams,
-        is_alice: bool,
-    ) -> MorphResult<AagPrivateKey>;
+    fn generate_private_key(params: &AagParams, is_alice: bool) -> MorphResult<AagPrivateKey>;
 
     /// Compute the public key by conjugating the other party's generators
     /// with the secret word.

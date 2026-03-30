@@ -29,8 +29,8 @@ pub enum TokenKind {
     Number,
     Punctuation,
     Whitespace,
-    Contraction,  // e.g., "don't", "I'm"
-    Hyphenated,   // e.g., "well-known"
+    Contraction, // e.g., "don't", "I'm"
+    Hyphenated,  // e.g., "well-known"
     Unknown,
 }
 
@@ -39,10 +39,10 @@ pub enum TokenKind {
 /// A morpheme — the smallest meaningful unit of language.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Morpheme {
-    Prefix(String),   // un-, re-, pre-, dis-
-    Root(String),     // the base form
-    Suffix(String),   // -ness, -ing, -ed, -ly
-    Infix(String),    // rare in English
+    Prefix(String), // un-, re-, pre-, dis-
+    Root(String),   // the base form
+    Suffix(String), // -ness, -ing, -ed, -ly
+    Infix(String),  // rare in English
 }
 
 /// Result of morphological decomposition for a single token.
@@ -50,7 +50,7 @@ pub enum Morpheme {
 pub struct MorphAnalysis {
     pub original: Token,
     pub morphemes: Vec<Morpheme>,
-    pub lemma: String,  // dictionary base form
+    pub lemma: String, // dictionary base form
 }
 
 // ─── AST Types ───────────────────────────────────────────────────────────────
@@ -152,29 +152,29 @@ pub const TOKEN_VECTOR_SIZE: usize = 12;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C, packed)]
 pub struct TokenVector {
-    pub id: i32,        // int    — deterministic BLAKE3-derived identity
-    pub lemma_id: i32,  // int    — lemma dictionary index
-    pub pos: i8,        // byte   — PartOfSpeech discriminant
-    pub role: i8,       // byte   — SemanticRole discriminant
-    pub morph: i16,     // short  — morphological flags (bitfield)
+    pub id: i32,       // int    — deterministic BLAKE3-derived identity
+    pub lemma_id: i32, // int    — lemma dictionary index
+    pub pos: i8,       // byte   — PartOfSpeech discriminant
+    pub role: i8,      // byte   — SemanticRole discriminant
+    pub morph: i16,    // short  — morphological flags (bitfield)
 }
 
 /// Morphological flag bits packed into the `morph` field (i16).
 /// Each bit encodes a boolean property — no branching needed to check.
 pub mod morph_flags {
-    pub const HAS_PREFIX: i16    = 1 << 0;
-    pub const HAS_SUFFIX: i16    = 1 << 1;
-    pub const HAS_INFIX: i16     = 1 << 2;
-    pub const IS_COMPOUND: i16   = 1 << 3;  // hyphenated
+    pub const HAS_PREFIX: i16 = 1 << 0;
+    pub const HAS_SUFFIX: i16 = 1 << 1;
+    pub const HAS_INFIX: i16 = 1 << 2;
+    pub const IS_COMPOUND: i16 = 1 << 3; // hyphenated
     pub const IS_CONTRACTION: i16 = 1 << 4;
-    pub const IS_ROOT_ONLY: i16  = 1 << 5;  // bare root, no affixes
-    pub const MULTI_ROOT: i16    = 1 << 6;  // compound with multiple roots
-    pub const PREFIX_NEG: i16    = 1 << 7;  // negation prefix (un-, dis-, in-)
-    pub const PREFIX_REP: i16    = 1 << 8;  // repetition prefix (re-)
-    pub const SUFFIX_NOUN: i16   = 1 << 9;  // nominalizing suffix (-ness, -ment)
-    pub const SUFFIX_VERB: i16   = 1 << 10; // verbalizing suffix (-ize, -ify)
-    pub const SUFFIX_ADJ: i16    = 1 << 11; // adjectival suffix (-able, -ful)
-    pub const SUFFIX_ADV: i16    = 1 << 12; // adverbial suffix (-ly)
+    pub const IS_ROOT_ONLY: i16 = 1 << 5; // bare root, no affixes
+    pub const MULTI_ROOT: i16 = 1 << 6; // compound with multiple roots
+    pub const PREFIX_NEG: i16 = 1 << 7; // negation prefix (un-, dis-, in-)
+    pub const PREFIX_REP: i16 = 1 << 8; // repetition prefix (re-)
+    pub const SUFFIX_NOUN: i16 = 1 << 9; // nominalizing suffix (-ness, -ment)
+    pub const SUFFIX_VERB: i16 = 1 << 10; // verbalizing suffix (-ize, -ify)
+    pub const SUFFIX_ADJ: i16 = 1 << 11; // adjectival suffix (-able, -ful)
+    pub const SUFFIX_ADV: i16 = 1 << 12; // adverbial suffix (-ly)
 }
 
 impl TokenVector {

@@ -3,7 +3,6 @@
 //! These are commands available in both REPL and script modes.
 //! They bypass the JStar compiler and execute directly.
 
-
 /// A built-in command result.
 #[derive(Debug)]
 pub enum BuiltinResult {

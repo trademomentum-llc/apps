@@ -57,9 +57,7 @@ pub enum JStarStatement {
 
     /// Return a value
     /// e.g., "return the result"
-    Return {
-        value: Option<JStarOperand>,
-    },
+    Return { value: Option<JStarOperand> },
 
     /// Label for jump targets
     Label(String),
@@ -300,12 +298,10 @@ mod tests {
     #[test]
     fn test_program_construction() {
         let prog = JStarProgram {
-            statements: vec![
-                JStarStatement::Execute {
-                    op: JStarInstruction::Return,
-                    operands: vec![JStarOperand::Immediate(42)],
-                },
-            ],
+            statements: vec![JStarStatement::Execute {
+                op: JStarInstruction::Return,
+                operands: vec![JStarOperand::Immediate(42)],
+            }],
         };
         assert_eq!(prog.statements.len(), 1);
     }

@@ -130,8 +130,10 @@ fn infer_prepositional_role(node: &AstNode) -> SemanticRole {
 
     match prep_lemma.as_deref() {
         // Spatial prepositions → Location
-        Some("in" | "on" | "at" | "near" | "above" | "below" | "between"
-             | "under" | "over" | "into" | "through") => SemanticRole::Location,
+        Some(
+            "in" | "on" | "at" | "near" | "above" | "below" | "between" | "under" | "over" | "into"
+            | "through",
+        ) => SemanticRole::Location,
 
         // Temporal prepositions → Temporal
         Some("before" | "after" | "during" | "until" | "since") => SemanticRole::Temporal,

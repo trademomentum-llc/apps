@@ -11,16 +11,16 @@
 
 pub mod ast;
 pub mod braid;
+pub mod crawler;
 pub mod database;
+pub mod jsh;
+pub mod jstar;
 pub mod lexer;
 pub mod morphology;
+pub mod search;
 pub mod semantics;
 pub mod types;
 pub mod vectorizer;
-pub mod crawler;
-pub mod search;
-pub mod jstar;
-pub mod jsh;
 
 use std::path::Path;
 use types::*;

@@ -8,32 +8,33 @@ use crate::types::*;
 
 /// Known English prefixes, ordered longest-first for greedy matching.
 const PREFIXES: &[&str] = &[
-    "anti", "auto", "counter", "de", "dis", "down", "extra", "fore",
-    "hyper", "il", "im", "in", "inter", "ir", "mega", "mid", "mis",
-    "mono", "multi", "non", "out", "over", "poly", "post", "pre",
-    "pro", "re", "semi", "sub", "super", "trans", "tri", "ultra",
-    "un", "under", "up",
+    "anti", "auto", "counter", "de", "dis", "down", "extra", "fore", "hyper", "il", "im", "in",
+    "inter", "ir", "mega", "mid", "mis", "mono", "multi", "non", "out", "over", "poly", "post",
+    "pre", "pro", "re", "semi", "sub", "super", "trans", "tri", "ultra", "un", "under", "up",
 ];
 
 /// Known English suffixes, ordered longest-first for greedy matching.
 const SUFFIXES: &[&str] = &[
-    "ation", "ment", "ness", "able", "ible", "ful", "less", "ous",
-    "ive", "tion", "sion", "ing", "ings", "ence", "ance", "ity",
-    "ist", "ism", "ize", "ise", "ify", "ary", "ory", "ery",
-    "ally", "ily", "ly", "er", "or", "ed", "en", "es", "al", "s",
+    "ation", "ment", "ness", "able", "ible", "ful", "less", "ous", "ive", "tion", "sion", "ing",
+    "ings", "ence", "ance", "ity", "ist", "ism", "ize", "ise", "ify", "ary", "ory", "ery", "ally",
+    "ily", "ly", "er", "or", "ed", "en", "es", "al", "s",
 ];
 
 /// Minimum root length — we won't strip affixes if the remaining root
 /// would be shorter than this.
 const MIN_ROOT_LEN: usize = 3;
 
-
 /// Analyze a stream of tokens into morphological decompositions.
 /// Pure function: Vec<Token> → Vec<MorphAnalysis>.
 pub fn analyze(tokens: &[Token]) -> MorphResult<Vec<MorphAnalysis>> {
     tokens
         .iter()
-        .filter(|t| matches!(t.kind, TokenKind::Word | TokenKind::Contraction | TokenKind::Hyphenated))
+        .filter(|t| {
+            matches!(
+                t.kind,
+                TokenKind::Word | TokenKind::Contraction | TokenKind::Hyphenated
+            )
+        })
         .map(|token| analyze_token(token))
         .collect()
 }
@@ -173,7 +174,11 @@ mod tests {
         assert_eq!(analysis.len(), 1);
 
         let morphemes = &analysis[0].morphemes;
-        assert!(morphemes.iter().any(|m| matches!(m, Morpheme::Prefix(p) if p == "un")));
+        assert!(
+            morphemes
+                .iter()
+                .any(|m| matches!(m, Morpheme::Prefix(p) if p == "un"))
+        );
     }
 
     #[test]
@@ -182,7 +187,11 @@ mod tests {
         let analysis = analyze(&tokens).unwrap();
 
         let morphemes = &analysis[0].morphemes;
-        assert!(morphemes.iter().any(|m| matches!(m, Morpheme::Suffix(s) if s == "ness")));
+        assert!(
+            morphemes
+                .iter()
+                .any(|m| matches!(m, Morpheme::Suffix(s) if s == "ness"))
+        );
     }
 
     #[test]
@@ -209,5 +218,4 @@ mod tests {
         let b = analyze(&tokens).unwrap();
         assert_eq!(a, b);
     }
-
 }

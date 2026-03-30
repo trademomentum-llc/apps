@@ -44,12 +44,12 @@ fn infer_pos(analysis: &MorphAnalysis) -> PartOfSpeech {
     for suffix in &suffixes {
         match *suffix {
             // Noun suffixes
-            "ness" | "ment" | "tion" | "sion" | "ation" | "ity" | "ence" | "ance"
-            | "ist" | "ism" | "ery" => return PartOfSpeech::Noun,
+            "ness" | "ment" | "tion" | "sion" | "ation" | "ity" | "ence" | "ance" | "ist"
+            | "ism" | "ery" => return PartOfSpeech::Noun,
 
             // Adjective suffixes
             "able" | "ible" | "ful" | "less" | "ous" | "ive" | "al" | "ary" | "ory" => {
-                return PartOfSpeech::Adjective
+                return PartOfSpeech::Adjective;
             }
 
             // Adverb suffixes
@@ -75,41 +75,33 @@ fn infer_pos(analysis: &MorphAnalysis) -> PartOfSpeech {
     let lemma = analysis.lemma.to_lowercase();
     match lemma.as_str() {
         // Determiners
-        "the" | "a" | "an" | "this" | "that" | "these" | "those" | "my" | "your"
-        | "his" | "her" | "its" | "our" | "their" | "some" | "any" | "no" | "every"
-        | "each" | "all" | "both" | "few" | "many" | "much" | "several" => {
-            PartOfSpeech::Determiner
-        }
+        "the" | "a" | "an" | "this" | "that" | "these" | "those" | "my" | "your" | "his"
+        | "her" | "its" | "our" | "their" | "some" | "any" | "no" | "every" | "each" | "all"
+        | "both" | "few" | "many" | "much" | "several" => PartOfSpeech::Determiner,
 
         // Pronouns
-        "i" | "me" | "we" | "us" | "you" | "he" | "him" | "she" | "it" | "they"
-        | "them" | "who" | "whom" | "what" | "which" | "myself" | "yourself" => {
-            PartOfSpeech::Pronoun
-        }
+        "i" | "me" | "we" | "us" | "you" | "he" | "him" | "she" | "it" | "they" | "them"
+        | "who" | "whom" | "what" | "which" | "myself" | "yourself" => PartOfSpeech::Pronoun,
 
         // Prepositions
-        "in" | "on" | "at" | "to" | "for" | "with" | "by" | "from" | "of" | "about"
-        | "into" | "through" | "during" | "before" | "after" | "above" | "below"
-        | "between" | "under" | "over" | "up" | "down" | "out" | "off" | "near" => {
-            PartOfSpeech::Preposition
-        }
+        "in" | "on" | "at" | "to" | "for" | "with" | "by" | "from" | "of" | "about" | "into"
+        | "through" | "during" | "before" | "after" | "above" | "below" | "between" | "under"
+        | "over" | "up" | "down" | "out" | "off" | "near" => PartOfSpeech::Preposition,
 
         // Conjunctions
-        "and" | "but" | "or" | "nor" | "so" | "yet" | "because" | "although"
-        | "while" | "if" | "unless" | "until" | "since" | "whether" => {
-            PartOfSpeech::Conjunction
-        }
+        "and" | "but" | "or" | "nor" | "so" | "yet" | "because" | "although" | "while" | "if"
+        | "unless" | "until" | "since" | "whether" => PartOfSpeech::Conjunction,
 
         // Common verbs (bare form)
-        "is" | "am" | "are" | "was" | "were" | "be" | "been" | "being" | "have"
-        | "has" | "had" | "do" | "does" | "did" | "will" | "would" | "shall"
-        | "should" | "may" | "might" | "can" | "could" | "must" | "go" | "get"
-        | "make" | "know" | "think" | "take" | "come" | "see" | "want" | "give"
-        | "use" | "find" | "tell" | "say" | "said" => PartOfSpeech::Verb,
+        "is" | "am" | "are" | "was" | "were" | "be" | "been" | "being" | "have" | "has" | "had"
+        | "do" | "does" | "did" | "will" | "would" | "shall" | "should" | "may" | "might"
+        | "can" | "could" | "must" | "go" | "get" | "make" | "know" | "think" | "take" | "come"
+        | "see" | "want" | "give" | "use" | "find" | "tell" | "say" | "said" => PartOfSpeech::Verb,
 
         // Interjections
-        "oh" | "ah" | "wow" | "ouch" | "hey" | "hello" | "hi" | "yes"
-        | "please" | "thanks" => PartOfSpeech::Interjection,
+        "oh" | "ah" | "wow" | "ouch" | "hey" | "hello" | "hi" | "yes" | "please" | "thanks" => {
+            PartOfSpeech::Interjection
+        }
 
         // Particles
         "not" | "n't" => PartOfSpeech::Particle,

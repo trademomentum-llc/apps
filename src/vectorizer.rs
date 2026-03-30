@@ -106,12 +106,11 @@ fn pack_morph_flags(analysis: &MorphAnalysis) -> i16 {
                 flags |= morph_flags::HAS_SUFFIX;
                 // Classify the suffix
                 match s.as_str() {
-                    "ness" | "ment" | "tion" | "sion" | "ation" | "ity" | "ence"
-                    | "ance" | "ist" | "ism" | "ery" => {
+                    "ness" | "ment" | "tion" | "sion" | "ation" | "ity" | "ence" | "ance"
+                    | "ist" | "ism" | "ery" => {
                         flags |= morph_flags::SUFFIX_NOUN;
                     }
-                    "able" | "ible" | "ful" | "less" | "ous" | "ive" | "al"
-                    | "ary" | "ory" => {
+                    "able" | "ible" | "ful" | "less" | "ous" | "ive" | "al" | "ary" | "ory" => {
                         flags |= morph_flags::SUFFIX_ADJ;
                     }
                     "ly" | "ally" | "ily" => {

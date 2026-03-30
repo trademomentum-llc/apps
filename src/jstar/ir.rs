@@ -8,10 +8,10 @@
 //!
 //! Virtual register IDs are u32 (unlimited supply, allocated by codegen).
 
-use std::collections::HashMap;
-use crate::types::MorphResult;
 use super::grammar::*;
-use super::token_map::{JStarInstruction, FlowKind, AddrMode, ScopeKind};
+use super::token_map::{AddrMode, FlowKind, JStarInstruction, ScopeKind};
+use crate::types::MorphResult;
+use std::collections::HashMap;
 
 // ─── IR Types ───────────────────────────────────────────────────────────────
 
@@ -95,10 +95,7 @@ pub enum IrInst {
     },
 
     /// dest = &vreg (address of stack slot)
-    AddressOf {
-        dest: VReg,
-        src: VReg,
-    },
+    AddressOf { dest: VReg, src: VReg },
 
     /// dest = call name(args...)
     Call {
@@ -133,16 +130,11 @@ pub enum IrInst {
 
     /// Print a value to stdout as decimal ASCII + newline.
     /// High-level IR instruction — codegen expands to itoa + sys_write.
-    Print {
-        value: IrValue,
-    },
+    Print { value: IrValue },
 
     /// Print a string literal to stdout (no newline appended).
     /// data_offset = byte offset in .data section, len = string length.
-    PrintStr {
-        data_offset: usize,
-        len: usize,
-    },
+    PrintStr { data_offset: usize, len: usize },
 
     /// Store value to array at base + index: base[index] = value
     StoreIndexed {
@@ -162,10 +154,7 @@ pub enum IrInst {
 
     /// Allocate a fixed-size array on the stack.
     /// dest = base pointer, count = number of 64-bit elements.
-    ArrayAlloc {
-        dest: VReg,
-        count: usize,
-    },
+    ArrayAlloc { dest: VReg, count: usize },
 
     /// Load from array: dest = *(base + index * 8)
     ArrayLoad {
@@ -204,15 +193,10 @@ pub enum IrInst {
     },
 
     /// File close: close(fd)
-    FileClose {
-        fd: IrValue,
-    },
+    FileClose { fd: IrValue },
 
     /// Get array length: dest = count (compile-time constant)
-    ArrayLength {
-        dest: VReg,
-        count: usize,
-    },
+    ArrayLength { dest: VReg, count: usize },
 
     /// No-op (placeholder)
     Nop,
@@ -291,12 +275,14 @@ impl Terminator {
     pub fn referenced_labels(&self) -> Vec<&str> {
         match self {
             Terminator::Jump(label) => vec![label.as_str()],
-            Terminator::Branch { true_label, false_label, .. } => {
+            Terminator::Branch {
+                true_label,
+                false_label,
+                ..
+            } => {
                 vec![true_label.as_str(), false_label.as_str()]
             }
-            Terminator::Return(_)
-            | Terminator::Halt(_)
-            | Terminator::Unreachable => vec![],
+            Terminator::Return(_) | Terminator::Halt(_) | Terminator::Unreachable => vec![],
         }
     }
 }
@@ -310,8 +296,8 @@ impl IrFunction {
     /// before the IR ever reaches codegen. If this passes, apply_fixups
     /// can never encounter a missing label.
     pub fn validate_cfg(&self) -> MorphResult<()> {
-        use std::collections::HashSet;
         use crate::types::MorphlexError;
+        use std::collections::HashSet;
 
         let mut seen = HashSet::new();
         for block in &self.blocks {
@@ -382,16 +368,27 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
     // Pre-scan: register global declarations so they are available in all functions.
     // This must happen before lowering any function body.
     for stmt in &top_level {
-        if let TypedStatement::Declare { scope, name, ty, size, .. } = stmt {
+        if let TypedStatement::Declare {
+            scope,
+            name,
+            ty,
+            size,
+            ..
+        } = stmt
+        {
             if *scope == ScopeKind::Global {
                 let alloc_size = match size {
                     Some(n) => *n * ty.size_bytes(),
                     None => ty.size_bytes().max(8),
                 };
                 let offset = lowerer.global_data_offset;
-                lowerer.global_data.resize(lowerer.global_data_offset + alloc_size, 0);
+                lowerer
+                    .global_data
+                    .resize(lowerer.global_data_offset + alloc_size, 0);
                 lowerer.global_data_offset += alloc_size;
-                lowerer.globals.insert(name.clone(), (offset, alloc_size, *ty));
+                lowerer
+                    .globals
+                    .insert(name.clone(), (offset, alloc_size, *ty));
                 let dest = lowerer.next_global_vreg;
                 lowerer.next_global_vreg += 1;
                 lowerer.global_vregs.insert(dest, offset);
@@ -402,7 +399,13 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
 
     // Lower function definitions (globals are already registered)
     for stmt in &program.statements {
-        if let TypedStatement::FunctionDef { name, params, body, return_type } = stmt {
+        if let TypedStatement::FunctionDef {
+            name,
+            params,
+            body,
+            return_type,
+        } = stmt
+        {
             // Lower each function definition
             lowerer.reset();
             // Declare parameters as variables
@@ -582,7 +585,9 @@ impl Lowerer {
     ) -> MorphResult<()> {
         match stmt {
             TypedStatement::Execute {
-                op, operands, result_type,
+                op,
+                operands,
+                result_type,
             } => {
                 let (ir_insts, maybe_dest) = self.lower_execute(*op, operands, *result_type)?;
                 self.current_insts.extend(ir_insts);
@@ -591,7 +596,13 @@ impl Lowerer {
                 }
             }
 
-            TypedStatement::Declare { scope, name, ty, size, .. } => {
+            TypedStatement::Declare {
+                scope,
+                name,
+                ty,
+                size,
+                ..
+            } => {
                 if *scope == ScopeKind::Global {
                     // Global: already pre-registered in the lower() pre-scan.
                     // Just ensure the variable mapping is current.
@@ -601,7 +612,8 @@ impl Lowerer {
                             None => ty.size_bytes().max(8),
                         };
                         let offset = self.global_data_offset;
-                        self.global_data.resize(self.global_data_offset + alloc_size, 0);
+                        self.global_data
+                            .resize(self.global_data_offset + alloc_size, 0);
                         self.global_data_offset += alloc_size;
                         self.globals.insert(name.clone(), (offset, alloc_size, *ty));
                         let dest = self.next_global_vreg;
@@ -645,7 +657,12 @@ impl Lowerer {
                 *final_terminator = Some(Terminator::Return(ir_val));
             }
 
-            TypedStatement::ControlFlow { kind, condition, body, else_body } => {
+            TypedStatement::ControlFlow {
+                kind,
+                condition,
+                body,
+                else_body,
+            } => {
                 match kind {
                     FlowKind::Conditional => {
                         self.lower_if(condition, body, else_body, final_terminator)?;
@@ -729,10 +746,7 @@ impl Lowerer {
         let true_term = final_terminator
             .take()
             .unwrap_or_else(|| Terminator::Jump(end_label.clone()));
-        self.finish_block(
-            true_term,
-            else_label.as_deref().unwrap_or(&end_label),
-        );
+        self.finish_block(true_term, else_label.as_deref().unwrap_or(&end_label));
 
         // Emit else-branch body (if present)
         if !else_body.is_empty() {
@@ -779,10 +793,7 @@ impl Lowerer {
         let end_label = self.make_label("while_end");
 
         // Finish current block with Jump to condition
-        self.finish_block(
-            Terminator::Jump(cond_label.clone()),
-            &cond_label,
-        );
+        self.finish_block(Terminator::Jump(cond_label.clone()), &cond_label);
 
         // Emit condition into the cond block
         let cond_vreg = self.lower_condition(condition)?;
@@ -822,15 +833,17 @@ impl Lowerer {
 
     /// Lower a condition statement and return the vreg holding the result.
     /// If no condition is provided, defaults to Imm(1) (always true).
-    fn lower_condition(
-        &mut self,
-        condition: &Option<Box<TypedStatement>>,
-    ) -> MorphResult<VReg> {
+    fn lower_condition(&mut self, condition: &Option<Box<TypedStatement>>) -> MorphResult<VReg> {
         match condition {
             Some(cond_stmt) => {
                 match cond_stmt.as_ref() {
-                    TypedStatement::Execute { op, operands, result_type } => {
-                        let (ir_insts, maybe_dest) = self.lower_execute(*op, operands, *result_type)?;
+                    TypedStatement::Execute {
+                        op,
+                        operands,
+                        result_type,
+                    } => {
+                        let (ir_insts, maybe_dest) =
+                            self.lower_execute(*op, operands, *result_type)?;
                         self.current_insts.extend(ir_insts);
                         if let Some(dest) = maybe_dest {
                             self.last_result = Some(dest);
@@ -871,13 +884,12 @@ impl Lowerer {
         }
     }
 
-    fn lower_statement_to_insts(
-        &mut self,
-        stmt: &TypedStatement,
-    ) -> MorphResult<Vec<IrInst>> {
+    fn lower_statement_to_insts(&mut self, stmt: &TypedStatement) -> MorphResult<Vec<IrInst>> {
         match stmt {
             TypedStatement::Execute {
-                op, operands, result_type,
+                op,
+                operands,
+                result_type,
             } => {
                 let (insts, maybe_dest) = self.lower_execute(*op, operands, *result_type)?;
                 if let Some(dest) = maybe_dest {
@@ -886,7 +898,13 @@ impl Lowerer {
                 Ok(insts)
             }
 
-            TypedStatement::Declare { scope, name, ty, size, .. } => {
+            TypedStatement::Declare {
+                scope,
+                name,
+                ty,
+                size,
+                ..
+            } => {
                 if *scope == ScopeKind::Global {
                     // Global: already pre-registered in the lower() pre-scan.
                     if !self.globals.contains_key(name) {
@@ -895,7 +913,8 @@ impl Lowerer {
                             None => ty.size_bytes().max(8),
                         };
                         let offset = self.global_data_offset;
-                        self.global_data.resize(self.global_data_offset + alloc_size, 0);
+                        self.global_data
+                            .resize(self.global_data_offset + alloc_size, 0);
                         self.global_data_offset += alloc_size;
                         self.globals.insert(name.clone(), (offset, alloc_size, *ty));
                         let dest = self.next_global_vreg;
@@ -1064,7 +1083,12 @@ impl Lowerer {
 
                 // Check for indexed addressing: "load from buffer at INDEX"
                 let index_operand = operands.get(1).and_then(|op| {
-                    if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = op {
+                    if let TypedOperand::Addressed {
+                        mode: AddrMode::At,
+                        target,
+                        ..
+                    } = op
+                    {
                         Some(target.as_ref())
                     } else {
                         None
@@ -1081,10 +1105,18 @@ impl Lowerer {
                             ty: array_ty,
                         });
                     } else {
-                        insts.push(IrInst::Load { dest, addr, ty: result_type });
+                        insts.push(IrInst::Load {
+                            dest,
+                            addr,
+                            ty: result_type,
+                        });
                     }
                 } else {
-                    insts.push(IrInst::Load { dest, addr, ty: result_type });
+                    insts.push(IrInst::Load {
+                        dest,
+                        addr,
+                        ty: result_type,
+                    });
                 }
             }
             JStarInstruction::Store => {
@@ -1101,7 +1133,12 @@ impl Lowerer {
 
                     // Check for indexed addressing: "store X into buffer at INDEX"
                     let index_operand = operands.get(2).and_then(|op| {
-                        if let TypedOperand::Addressed { mode: AddrMode::At, target, .. } = op {
+                        if let TypedOperand::Addressed {
+                            mode: AddrMode::At,
+                            target,
+                            ..
+                        } = op
+                        {
                             Some(target.as_ref())
                         } else {
                             None
@@ -1169,11 +1206,7 @@ impl Lowerer {
                 for op in operands.iter().skip(1) {
                     args.push(self.lower_operand(op)?);
                 }
-                insts.push(IrInst::Syscall {
-                    dest,
-                    number,
-                    args,
-                });
+                insts.push(IrInst::Syscall { dest, number, args });
             }
 
             JStarInstruction::AddressOf => {
@@ -1230,9 +1263,7 @@ impl Lowerer {
             }
 
             // These are handled at statement level, not instruction level
-            JStarInstruction::Return
-            | JStarInstruction::Jump
-            | JStarInstruction::JumpIf => {
+            JStarInstruction::Return | JStarInstruction::Jump | JStarInstruction::JumpIf => {
                 produces_result = false;
             }
 
@@ -1293,7 +1324,9 @@ impl Lowerer {
                     });
                 } else {
                     let value = self.get_one_operand(operands)?;
-                    insts.push(IrInst::Print { value: value.clone() });
+                    insts.push(IrInst::Print {
+                        value: value.clone(),
+                    });
                     // Also copy value to dest so "it" tracks the printed value
                     insts.push(IrInst::Copy {
                         dest,
@@ -1318,11 +1351,7 @@ impl Lowerer {
             JStarInstruction::Hash => {
                 // hash <addr> <len> — FNV-1a hash of memory region
                 let (addr, len) = self.get_two_operands(operands)?;
-                insts.push(IrInst::HashOp {
-                    dest,
-                    addr,
-                    len,
-                });
+                insts.push(IrInst::HashOp { dest, addr, len });
             }
 
             JStarInstruction::Open => {
@@ -1408,10 +1437,7 @@ impl Lowerer {
         }
     }
 
-    fn get_two_operands(
-        &self,
-        operands: &[TypedOperand],
-    ) -> MorphResult<(IrValue, IrValue)> {
+    fn get_two_operands(&self, operands: &[TypedOperand]) -> MorphResult<(IrValue, IrValue)> {
         let lhs = if let Some(first) = operands.first() {
             self.lower_operand(first)?
         } else {
@@ -1430,14 +1456,12 @@ impl Lowerer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::token_map::ScopeKind;
+    use super::*;
 
     #[test]
     fn test_lower_empty_program() {
-        let prog = TypedProgram {
-            statements: vec![],
-        };
+        let prog = TypedProgram { statements: vec![] };
         let ir = lower(&prog).unwrap();
         assert_eq!(ir.functions.len(), 1);
         assert_eq!(ir.functions[0].name, "_start");
@@ -1551,7 +1575,9 @@ mod tests {
 
         // First instruction: Alloca for counter
         match &block.instructions[0] {
-            IrInst::Alloca { dest: 0, size: 4, .. } => {}
+            IrInst::Alloca {
+                dest: 0, size: 4, ..
+            } => {}
             other => panic!("Expected Alloca(v0, 4), got {:?}", other),
         }
 
@@ -1580,21 +1606,19 @@ mod tests {
         //   if_body: ...body, Jump(if_end)
         //   if_end: ...post-if, terminator
         let prog = TypedProgram {
-            statements: vec![
-                TypedStatement::ControlFlow {
-                    kind: FlowKind::Conditional,
-                    condition: Some(Box::new(TypedStatement::Execute {
-                        op: JStarInstruction::Compare,
-                        operands: vec![
-                            TypedOperand::Immediate(1, JStarType::Int),
-                            TypedOperand::Immediate(0, JStarType::Int),
-                        ],
-                        result_type: JStarType::Boolean,
-                    })),
-                    body: vec![TypedStatement::Nop],
-                    else_body: vec![],
-                },
-            ],
+            statements: vec![TypedStatement::ControlFlow {
+                kind: FlowKind::Conditional,
+                condition: Some(Box::new(TypedStatement::Execute {
+                    op: JStarInstruction::Compare,
+                    operands: vec![
+                        TypedOperand::Immediate(1, JStarType::Int),
+                        TypedOperand::Immediate(0, JStarType::Int),
+                    ],
+                    result_type: JStarType::Boolean,
+                })),
+                body: vec![TypedStatement::Nop],
+                else_body: vec![],
+            }],
         };
         let ir = lower(&prog).unwrap();
         let func = &ir.functions[0];
@@ -1602,7 +1626,11 @@ mod tests {
 
         // Block 0 (entry): terminates with Branch
         match &func.blocks[0].terminator {
-            Terminator::Branch { true_label, false_label, .. } => {
+            Terminator::Branch {
+                true_label,
+                false_label,
+                ..
+            } => {
                 assert!(true_label.starts_with("if_body"));
                 assert!(false_label.starts_with("if_end"));
             }
@@ -1626,21 +1654,19 @@ mod tests {
         //   while_body: ...body, Jump(while_cond)  <-- back-edge
         //   while_end: terminator
         let prog = TypedProgram {
-            statements: vec![
-                TypedStatement::ControlFlow {
-                    kind: FlowKind::Loop,
-                    condition: Some(Box::new(TypedStatement::Execute {
-                        op: JStarInstruction::Compare,
-                        operands: vec![
-                            TypedOperand::Immediate(5, JStarType::Int),
-                            TypedOperand::Immediate(0, JStarType::Int),
-                        ],
-                        result_type: JStarType::Boolean,
-                    })),
-                    body: vec![TypedStatement::Nop],
-                    else_body: vec![],
-                },
-            ],
+            statements: vec![TypedStatement::ControlFlow {
+                kind: FlowKind::Loop,
+                condition: Some(Box::new(TypedStatement::Execute {
+                    op: JStarInstruction::Compare,
+                    operands: vec![
+                        TypedOperand::Immediate(5, JStarType::Int),
+                        TypedOperand::Immediate(0, JStarType::Int),
+                    ],
+                    result_type: JStarType::Boolean,
+                })),
+                body: vec![TypedStatement::Nop],
+                else_body: vec![],
+            }],
         };
         let ir = lower(&prog).unwrap();
         let func = &ir.functions[0];
@@ -1656,7 +1682,11 @@ mod tests {
 
         // Block 1 (while_cond): Branch to while_body or while_end
         match &func.blocks[1].terminator {
-            Terminator::Branch { true_label, false_label, .. } => {
+            Terminator::Branch {
+                true_label,
+                false_label,
+                ..
+            } => {
                 assert!(true_label.starts_with("while_body"));
                 assert!(false_label.starts_with("while_end"));
             }
@@ -1688,7 +1718,9 @@ mod tests {
         let ir = lower(&prog).unwrap();
         let block = &ir.functions[0].blocks[0];
         match &block.instructions[0] {
-            IrInst::Compare { kind: CmpKind::Ne, .. } => {}
+            IrInst::Compare {
+                kind: CmpKind::Ne, ..
+            } => {}
             other => panic!("Expected Compare(Ne), got {:?}", other),
         }
     }

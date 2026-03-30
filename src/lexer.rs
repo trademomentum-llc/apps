@@ -120,7 +120,10 @@ mod tests {
     #[test]
     fn test_simple_words() {
         let tokens = lex("hello world").unwrap();
-        let words: Vec<_> = tokens.iter().filter(|t| t.kind == TokenKind::Word).collect();
+        let words: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Word)
+            .collect();
         assert_eq!(words.len(), 2);
         assert_eq!(words[0].lexeme, "hello");
         assert_eq!(words[1].lexeme, "world");

@@ -40,13 +40,13 @@ use std::fs;
 use std::path::Path;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, AeadCore, Nonce};
+use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 
 use hkdf::Hkdf;
 use sha3::Sha3_512;
 
-use ml_kem::kem::{Decapsulate, Encapsulate, Kem};
 use ml_kem::MlKem1024;
+use ml_kem::kem::{Decapsulate, Encapsulate, Kem};
 
 use ml_dsa::KeyGen;
 
@@ -84,11 +84,7 @@ const HKDF_INFO: &[u8] = b"morphlex-aes256gcm-v4";
 // ---- Phase 6: Write ----
 
 /// Phase 6: Write token vectors and their lemmas to a binary database.
-pub fn write_database(
-    vectors: &[TokenVector],
-    lemmas: &[String],
-    path: &Path,
-) -> MorphResult<()> {
+pub fn write_database(vectors: &[TokenVector], lemmas: &[String], path: &Path) -> MorphResult<()> {
     assert_eq!(vectors.len(), lemmas.len());
 
     let mut buf = Vec::new();
@@ -237,9 +233,7 @@ pub fn encrypt(path: &Path, output_path: &Path) -> MorphResult<PqcKeyBundle> {
 
     // Build the encrypted payload: [kem_ct | nonce | aes_ciphertext]
     let kem_ct_bytes: &[u8] = kem_ct.as_ref();
-    let mut encrypted_payload = Vec::with_capacity(
-        kem_ct_bytes.len() + 12 + aes_ciphertext.len(),
-    );
+    let mut encrypted_payload = Vec::with_capacity(kem_ct_bytes.len() + 12 + aes_ciphertext.len());
     encrypted_payload.extend_from_slice(kem_ct_bytes);
     encrypted_payload.extend_from_slice(nonce.as_ref());
     encrypted_payload.extend_from_slice(&aes_ciphertext);
@@ -345,12 +339,12 @@ pub fn decrypt(
             // v3: single ML-DSA-65 signature
             false
         } else {
-            return Err(MorphlexError::EncryptionError(
-                format!(
-                    "Unknown .sig file size: {} bytes (expected {} for v3 or {} for v4)",
-                    sig_len, MLDSA65_SIG_SIZE, MLDSA87_SIG_SIZE + SLHDSA_SIG_SIZE
-                ),
-            ));
+            return Err(MorphlexError::EncryptionError(format!(
+                "Unknown .sig file size: {} bytes (expected {} for v3 or {} for v4)",
+                sig_len,
+                MLDSA65_SIG_SIZE,
+                MLDSA87_SIG_SIZE + SLHDSA_SIG_SIZE
+            )));
         }
     } else {
         false // No .sig file -- skip verification, assume v3 key derivation
@@ -366,45 +360,81 @@ pub fn decrypt(
                 let (dsa_sig_bytes, slh_sig_bytes) = sig_bytes.split_at(MLDSA87_SIG_SIZE);
 
                 let vk_encoded = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(vk_raw)
-                    .map_err(|_| MorphlexError::EncryptionError(
-                        format!("Invalid ML-DSA-87 verifying key size (expected {}, got {})", MLDSA87_VK_SIZE, vk_raw.len()),
-                    ))?;
+                    .map_err(|_| {
+                    MorphlexError::EncryptionError(format!(
+                        "Invalid ML-DSA-87 verifying key size (expected {}, got {})",
+                        MLDSA87_VK_SIZE,
+                        vk_raw.len()
+                    ))
+                })?;
                 let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa87>::decode(&vk_encoded);
 
-                let sig_encoded = ml_dsa::EncodedSignature::<ml_dsa::MlDsa87>::try_from(dsa_sig_bytes)
-                    .map_err(|_| MorphlexError::EncryptionError("Invalid ML-DSA-87 signature size".to_string()))?;
-                let sig = ml_dsa::Signature::<ml_dsa::MlDsa87>::decode(&sig_encoded)
-                    .ok_or_else(|| MorphlexError::EncryptionError("Invalid ML-DSA-87 signature data".to_string()))?;
+                let sig_encoded = ml_dsa::EncodedSignature::<ml_dsa::MlDsa87>::try_from(
+                    dsa_sig_bytes,
+                )
+                .map_err(|_| {
+                    MorphlexError::EncryptionError("Invalid ML-DSA-87 signature size".to_string())
+                })?;
+                let sig = ml_dsa::Signature::<ml_dsa::MlDsa87>::decode(&sig_encoded).ok_or_else(
+                    || {
+                        MorphlexError::EncryptionError(
+                            "Invalid ML-DSA-87 signature data".to_string(),
+                        )
+                    },
+                )?;
 
                 use ml_dsa::signature::Verifier;
-                vk.verify(&data, &sig)
-                    .map_err(|e| MorphlexError::EncryptionError(format!("ML-DSA-87 signature verification failed: {}", e)))?;
+                vk.verify(&data, &sig).map_err(|e| {
+                    MorphlexError::EncryptionError(format!(
+                        "ML-DSA-87 signature verification failed: {}",
+                        e
+                    ))
+                })?;
 
                 // v4: Verify SLH-DSA-SHAKE-256s signature (remaining bytes)
                 if let Some(slh_vk_raw) = slh_vk_bytes {
                     let slh_vk = slh_dsa::VerifyingKey::<slh_dsa::Shake256s>::try_from(slh_vk_raw)
-                        .map_err(|_| MorphlexError::EncryptionError("Invalid SLH-DSA verifying key".to_string()))?;
+                        .map_err(|_| {
+                            MorphlexError::EncryptionError(
+                                "Invalid SLH-DSA verifying key".to_string(),
+                            )
+                        })?;
                     let slh_sig = slh_dsa::Signature::<slh_dsa::Shake256s>::try_from(slh_sig_bytes)
-                        .map_err(|_| MorphlexError::EncryptionError("Invalid SLH-DSA signature data".to_string()))?;
+                        .map_err(|_| {
+                            MorphlexError::EncryptionError(
+                                "Invalid SLH-DSA signature data".to_string(),
+                            )
+                        })?;
 
                     use signature::Verifier as SlhVerifier;
-                    slh_vk.verify(&data, &slh_sig)
-                        .map_err(|e| MorphlexError::EncryptionError(format!("SLH-DSA signature verification failed: {}", e)))?;
+                    slh_vk.verify(&data, &slh_sig).map_err(|e| {
+                        MorphlexError::EncryptionError(format!(
+                            "SLH-DSA signature verification failed: {}",
+                            e
+                        ))
+                    })?;
                 }
             } else {
                 // v3: Verify ML-DSA-65 signature (legacy)
                 let vk_encoded = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa65>::try_from(vk_raw)
-                    .map_err(|_| MorphlexError::EncryptionError("Invalid verifying key size".to_string()))?;
+                    .map_err(|_| {
+                    MorphlexError::EncryptionError("Invalid verifying key size".to_string())
+                })?;
                 let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa65>::decode(&vk_encoded);
 
-                let sig_encoded = ml_dsa::EncodedSignature::<ml_dsa::MlDsa65>::try_from(sig_bytes.as_slice())
-                    .map_err(|_| MorphlexError::EncryptionError("Invalid signature size".to_string()))?;
-                let sig = ml_dsa::Signature::<ml_dsa::MlDsa65>::decode(&sig_encoded)
-                    .ok_or_else(|| MorphlexError::EncryptionError("Invalid signature data".to_string()))?;
+                let sig_encoded =
+                    ml_dsa::EncodedSignature::<ml_dsa::MlDsa65>::try_from(sig_bytes.as_slice())
+                        .map_err(|_| {
+                            MorphlexError::EncryptionError("Invalid signature size".to_string())
+                        })?;
+                let sig = ml_dsa::Signature::<ml_dsa::MlDsa65>::decode(&sig_encoded).ok_or_else(
+                    || MorphlexError::EncryptionError("Invalid signature data".to_string()),
+                )?;
 
                 use ml_dsa::signature::Verifier;
-                vk.verify(&data, &sig)
-                    .map_err(|e| MorphlexError::EncryptionError(format!("Signature verification failed: {}", e)))?;
+                vk.verify(&data, &sig).map_err(|e| {
+                    MorphlexError::EncryptionError(format!("Signature verification failed: {}", e))
+                })?;
             }
         }
     }
@@ -422,9 +452,10 @@ pub fn decrypt(
     // Decapsulate ML-KEM-1024
     // Reconstruct DK from seed bytes
     if dk_bytes.len() != 64 {
-        return Err(MorphlexError::EncryptionError(
-            format!("Decapsulation key must be 64 bytes (seed), got {}", dk_bytes.len()),
-        ));
+        return Err(MorphlexError::EncryptionError(format!(
+            "Decapsulation key must be 64 bytes (seed), got {}",
+            dk_bytes.len()
+        )));
     }
     let dk_seed = ml_kem::Seed::try_from(dk_bytes)
         .map_err(|_| MorphlexError::EncryptionError("Invalid seed size".to_string()))?;
@@ -700,11 +731,32 @@ mod tests {
         let bundle = encrypt(&plain_path, &enc_path).unwrap();
 
         // Verify key sizes
-        assert_eq!(bundle.decapsulation_key.len(), 64, "DK seed must be 64 bytes");
-        assert_eq!(bundle.signing_key.len(), 32, "ML-DSA-87 SK seed must be 32 bytes");
-        assert_eq!(bundle.verifying_key.len(), MLDSA87_VK_SIZE, "ML-DSA-87 VK must be {} bytes", MLDSA87_VK_SIZE);
-        assert_eq!(bundle.slh_signing_key.len(), 128, "SLH-DSA SK must be 128 bytes");
-        assert_eq!(bundle.slh_verifying_key.len(), 64, "SLH-DSA VK must be 64 bytes");
+        assert_eq!(
+            bundle.decapsulation_key.len(),
+            64,
+            "DK seed must be 64 bytes"
+        );
+        assert_eq!(
+            bundle.signing_key.len(),
+            32,
+            "ML-DSA-87 SK seed must be 32 bytes"
+        );
+        assert_eq!(
+            bundle.verifying_key.len(),
+            MLDSA87_VK_SIZE,
+            "ML-DSA-87 VK must be {} bytes",
+            MLDSA87_VK_SIZE
+        );
+        assert_eq!(
+            bundle.slh_signing_key.len(),
+            128,
+            "SLH-DSA SK must be 128 bytes"
+        );
+        assert_eq!(
+            bundle.slh_verifying_key.len(),
+            64,
+            "SLH-DSA VK must be 64 bytes"
+        );
 
         // Cleanup
         let mut perms = fs::metadata(&enc_path).unwrap().permissions();

@@ -11,8 +11,8 @@
 //!
 //! The _start entry point is at the beginning of .text.
 
-use crate::types::{MorphResult, MorphlexError};
 use super::codegen::MachineCode;
+use crate::types::{MorphResult, MorphlexError};
 use std::path::Path;
 
 // ─── ELF64 Constants ────────────────────────────────────────────────────────
@@ -60,16 +60,14 @@ pub fn link(code: &MachineCode, output_path: &Path) -> MorphResult<()> {
     patch_data_addresses(&mut code);
     let elf = build_elf(&code)?;
 
-    std::fs::write(output_path, &elf)
-        .map_err(|e| MorphlexError::IoError(e))?;
+    std::fs::write(output_path, &elf).map_err(|e| MorphlexError::IoError(e))?;
 
     // Set executable permission
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(output_path, perms)
-            .map_err(|e| MorphlexError::IoError(e))?;
+        std::fs::set_permissions(output_path, perms).map_err(|e| MorphlexError::IoError(e))?;
     }
 
     Ok(())
@@ -94,13 +92,10 @@ fn patch_data_addresses(code: &mut MachineCode) {
 
     for &fixup_pos in &code.data_fixups {
         if fixup_pos + 8 <= code.text.len() {
-            let offset_bytes: [u8; 8] = code.text[fixup_pos..fixup_pos + 8]
-                .try_into()
-                .unwrap();
+            let offset_bytes: [u8; 8] = code.text[fixup_pos..fixup_pos + 8].try_into().unwrap();
             let current_val = u64::from_le_bytes(offset_bytes);
             let patched = current_val + data_vaddr;
-            code.text[fixup_pos..fixup_pos + 8]
-                .copy_from_slice(&patched.to_le_bytes());
+            code.text[fixup_pos..fixup_pos + 8].copy_from_slice(&patched.to_le_bytes());
         }
     }
 }
@@ -266,10 +261,7 @@ mod tests {
         let phnum = u16::from_le_bytes([elf[56], elf[57]]);
         assert_eq!(phnum, 1);
         // Total size: header + 1 phdr + 1 text + 2 data
-        assert_eq!(
-            elf.len(),
-            ELF64_EHDR_SIZE + ELF64_PHDR_SIZE + 1 + 2
-        );
+        assert_eq!(elf.len(), ELF64_EHDR_SIZE + ELF64_PHDR_SIZE + 1 + 2);
     }
 
     #[test]

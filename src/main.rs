@@ -4,7 +4,11 @@
 
 use clap::{Parser, Subcommand};
 use morphlex::vectorizer;
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "morphlex")]
@@ -173,19 +177,66 @@ enum JStarAction {
 ///   vk.bin      -- ML-DSA-87 verifying key (2,592 bytes)
 ///   slh_sk.bin  -- SLH-DSA-SHAKE-256s signing key (128 bytes)
 ///   slh_vk.bin  -- SLH-DSA-SHAKE-256s verifying key (64 bytes)
+fn write_key_file(path: &Path, bytes: &[u8], mode: u32, label: &str) {
+    #[cfg(unix)]
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(mode)
+            .open(path)
+            .unwrap_or_else(|_| panic!("Failed to write {label}"));
+        file.write_all(bytes)
+            .unwrap_or_else(|_| panic!("Failed to write {label}"));
+        file.sync_all()
+            .unwrap_or_else(|_| panic!("Failed to flush {label}"));
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        std::fs::write(path, bytes).unwrap_or_else(|_| panic!("Failed to write {label}"));
+    }
+}
+
 fn write_key_bundle(bundle: &morphlex::database::PqcKeyBundle, dir: &std::path::Path) {
     std::fs::create_dir_all(dir).expect("Failed to create key directory");
 
-    std::fs::write(dir.join("dk.bin"), &bundle.decapsulation_key)
-        .expect("Failed to write decapsulation key");
-    std::fs::write(dir.join("sk.bin"), &bundle.signing_key)
-        .expect("Failed to write ML-DSA-87 signing key");
-    std::fs::write(dir.join("vk.bin"), &bundle.verifying_key)
-        .expect("Failed to write ML-DSA-87 verifying key");
-    std::fs::write(dir.join("slh_sk.bin"), &bundle.slh_signing_key)
-        .expect("Failed to write SLH-DSA signing key");
-    std::fs::write(dir.join("slh_vk.bin"), &bundle.slh_verifying_key)
-        .expect("Failed to write SLH-DSA verifying key");
+    #[cfg(unix)]
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .expect("Failed to harden key directory permissions");
+
+    write_key_file(
+        &dir.join("dk.bin"),
+        &bundle.decapsulation_key,
+        0o600,
+        "decapsulation key",
+    );
+    write_key_file(
+        &dir.join("sk.bin"),
+        &bundle.signing_key,
+        0o600,
+        "ML-DSA-87 signing key",
+    );
+    write_key_file(
+        &dir.join("vk.bin"),
+        &bundle.verifying_key,
+        0o644,
+        "ML-DSA-87 verifying key",
+    );
+    write_key_file(
+        &dir.join("slh_sk.bin"),
+        &bundle.slh_signing_key,
+        0o600,
+        "SLH-DSA signing key",
+    );
+    write_key_file(
+        &dir.join("slh_vk.bin"),
+        &bundle.slh_verifying_key,
+        0o644,
+        "SLH-DSA verifying key",
+    );
 }
 
 fn main() {
@@ -197,8 +248,8 @@ fn main() {
             let words: Vec<String> = content.lines().map(|l| l.trim().to_string()).collect();
 
             let db_path = output.with_extension("db");
-            let bundle = morphlex::compile_lexicon(&words, &db_path, &output)
-                .expect("Compilation failed");
+            let bundle =
+                morphlex::compile_lexicon(&words, &db_path, &output).expect("Compilation failed");
 
             let key_dir = output.with_extension("keys");
             write_key_bundle(&bundle, &key_dir);
@@ -219,8 +270,8 @@ fn main() {
             println!("Compiling {} words...", words.len());
 
             let db_path = output.with_extension("db");
-            let bundle = morphlex::compile_lexicon(&words, &db_path, &output)
-                .expect("Compilation failed");
+            let bundle =
+                morphlex::compile_lexicon(&words, &db_path, &output).expect("Compilation failed");
 
             let key_dir = output.with_extension("keys");
             write_key_bundle(&bundle, &key_dir);
@@ -258,7 +309,11 @@ fn main() {
             );
         }
 
-        Commands::Index { input, output, store_text } => {
+        Commands::Index {
+            input,
+            output,
+            store_text,
+        } => {
             let mut index = morphlex::search::SearchIndex::new();
             let mut file_count = 0;
 
@@ -269,16 +324,19 @@ fn main() {
                         for entry in entries.flatten() {
                             let p = entry.path();
                             if p.extension().map_or(false, |e| e == "txt") {
-                                let content = std::fs::read_to_string(&p)
-                                    .expect("Failed to read file");
-                                let title = p.file_name()
+                                let content =
+                                    std::fs::read_to_string(&p).expect("Failed to read file");
+                                let title = p
+                                    .file_name()
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_default();
                                 if store_text {
-                                    index.add_document_with_text(&title, &content)
+                                    index
+                                        .add_document_with_text(&title, &content)
                                         .expect("Failed to index document");
                                 } else {
-                                    index.add_document(&title, &content)
+                                    index
+                                        .add_document(&title, &content)
                                         .expect("Failed to index document");
                                 }
                                 file_count += 1;
@@ -286,16 +344,18 @@ fn main() {
                         }
                     }
                 } else {
-                    let content = std::fs::read_to_string(path)
-                        .expect("Failed to read file");
-                    let title = path.file_name()
+                    let content = std::fs::read_to_string(path).expect("Failed to read file");
+                    let title = path
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
                     if store_text {
-                        index.add_document_with_text(&title, &content)
+                        index
+                            .add_document_with_text(&title, &content)
                             .expect("Failed to index document");
                     } else {
-                        index.add_document(&title, &content)
+                        index
+                            .add_document(&title, &content)
                             .expect("Failed to index document");
                     }
                     file_count += 1;
@@ -303,11 +363,23 @@ fn main() {
             }
 
             let size = index.write_to_path(&output).expect("Failed to write index");
-            println!("Indexed {} files, {} postings -> {} ({} bytes)",
-                file_count, index.posting_count(), output.display(), size);
+            println!(
+                "Indexed {} files, {} postings -> {} ({} bytes)",
+                file_count,
+                index.posting_count(),
+                output.display(),
+                size
+            );
         }
 
-        Commands::Search { index: index_path, query, mode, pos, role, max_results } => {
+        Commands::Search {
+            index: index_path,
+            query,
+            mode,
+            pos,
+            role,
+            max_results,
+        } => {
             let index = morphlex::search::SearchIndex::read_from_path(&index_path)
                 .expect("Failed to read index");
 
@@ -326,18 +398,23 @@ fn main() {
                 max_results,
             };
 
-            let results = morphlex::search::search(&index, &query, &config)
-                .expect("Search failed");
+            let results = morphlex::search::search(&index, &query, &config).expect("Search failed");
 
             if results.is_empty() {
                 println!("No results found.");
             } else {
                 for (i, r) in results.iter().enumerate() {
-                    let title = index.get_doc(r.doc_id)
+                    let title = index
+                        .get_doc(r.doc_id)
                         .map(|m| m.title.as_str())
                         .unwrap_or("unknown");
-                    println!("[{:>3}] score={:<6} doc_id={:<12} title={}",
-                        i + 1, r.score, r.doc_id, title);
+                    println!(
+                        "[{:>3}] score={:<6} doc_id={:<12} title={}",
+                        i + 1,
+                        r.score,
+                        r.doc_id,
+                        title
+                    );
                     if let Some(text) = index.get_doc_text(r.doc_id) {
                         let snippet: String = text.chars().take(80).collect();
                         println!("      {}", snippet);
@@ -348,10 +425,20 @@ fn main() {
         }
 
         Commands::Jstar { action } => match action {
-            JStarAction::Compile { input, include, output, raw } => {
+            JStarAction::Compile {
+                input,
+                include,
+                output,
+                raw,
+            } => {
                 let mode = if raw { "raw" } else { "nlp" };
                 if include.is_empty() {
-                    println!("Compiling {} -> {} ({})", input.display(), output.display(), mode);
+                    println!(
+                        "Compiling {} -> {} ({})",
+                        input.display(),
+                        output.display(),
+                        mode
+                    );
                     if raw {
                         morphlex::jstar::compile_file_raw(&input, &output)
                             .expect("JStar compilation failed");
@@ -362,8 +449,14 @@ fn main() {
                 } else {
                     let mut sources: Vec<PathBuf> = include;
                     sources.push(input.clone());
-                    let paths: Vec<&std::path::Path> = sources.iter().map(|p| p.as_path()).collect();
-                    println!("Compiling {} files -> {} ({})", paths.len(), output.display(), mode);
+                    let paths: Vec<&std::path::Path> =
+                        sources.iter().map(|p| p.as_path()).collect();
+                    println!(
+                        "Compiling {} files -> {} ({})",
+                        paths.len(),
+                        output.display(),
+                        mode
+                    );
                     morphlex::jstar::compile_multi(&paths, &output)
                         .expect("JStar compilation failed");
                 }
@@ -384,23 +477,29 @@ fn main() {
                     morphlex::jstar::tokenize_jstar(&source).expect("Tokenization failed");
                 let program = morphlex::jstar::parser::parse(&originals, &lemmas, &vectors)
                     .expect("Parse failed");
-                let typed = morphlex::jstar::typechecker::check(&program)
-                    .expect("Type check failed");
+                let typed =
+                    morphlex::jstar::typechecker::check(&program).expect("Type check failed");
                 println!("{:#?}", typed);
             }
         },
 
         Commands::Jsh { script } => match script {
             Some(path) => {
-                morphlex::jsh::scripting::run_script(&path)
-                    .expect("Script execution failed");
+                morphlex::jsh::scripting::run_script(&path).expect("Script execution failed");
             }
             None => {
                 morphlex::jsh::repl::run().expect("REPL error");
             }
         },
 
-        Commands::Crawl { url, depth, delay, output, max_pages, user_agent } => {
+        Commands::Crawl {
+            url,
+            depth,
+            delay,
+            output,
+            max_pages,
+            user_agent,
+        } => {
             let seed_url = url::Url::parse(&url).unwrap_or_else(|e| {
                 eprintln!("Invalid URL '{}': {}", url, e);
                 std::process::exit(1);
@@ -456,8 +555,8 @@ fn main() {
             )
             .expect("Decryption failed");
 
-            let (lemmas, vectors) = morphlex::database::read_database(&decrypted)
-                .expect("Failed to parse database");
+            let (lemmas, vectors) =
+                morphlex::database::read_database(&decrypted).expect("Failed to parse database");
 
             println!("{} vectors in database", vectors.len());
             for (i, (lemma, tv)) in lemmas.iter().zip(vectors.iter()).take(20).enumerate() {
@@ -477,5 +576,65 @@ fn main() {
                 println!("  ... and {} more", vectors.len() - 20);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_key_bundle_hardens_permissions() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("morphlex_keys_{unique}"));
+        let bundle = morphlex::database::PqcKeyBundle {
+            decapsulation_key: vec![1; 64],
+            signing_key: vec![2; 32],
+            verifying_key: vec![3; 16],
+            slh_signing_key: vec![4; 128],
+            slh_verifying_key: vec![5; 16],
+        };
+
+        write_key_bundle(&bundle, &dir);
+
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        let dk_mode = std::fs::metadata(dir.join("dk.bin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let sk_mode = std::fs::metadata(dir.join("sk.bin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let vk_mode = std::fs::metadata(dir.join("vk.bin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let slh_sk_mode = std::fs::metadata(dir.join("slh_sk.bin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let slh_vk_mode = std::fs::metadata(dir.join("slh_vk.bin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(dk_mode, 0o600);
+        assert_eq!(sk_mode, 0o600);
+        assert_eq!(vk_mode, 0o644);
+        assert_eq!(slh_sk_mode, 0o600);
+        assert_eq!(slh_vk_mode, 0o644);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

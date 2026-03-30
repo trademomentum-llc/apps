@@ -20,17 +20,17 @@ pub fn fetch(url: &Url, user_agent: &str) -> MorphResult<String> {
         .redirects(5)
         .build();
 
-    let response = agent
-        .get(url.as_str())
-        .call()
-        .map_err(|e| MorphlexError::CrawlError(format!("HTTP request failed for {}: {}", url, e)))?;
+    let response = agent.get(url.as_str()).call().map_err(|e| {
+        MorphlexError::CrawlError(format!("HTTP request failed for {}: {}", url, e))
+    })?;
 
     // Check content type -- only accept HTML
     let content_type = response.content_type().to_string();
     if !content_type.contains("text/html") && !content_type.contains("application/xhtml") {
-        return Err(MorphlexError::CrawlError(
-            format!("Non-HTML content type '{}' for {}", content_type, url),
-        ));
+        return Err(MorphlexError::CrawlError(format!(
+            "Non-HTML content type '{}' for {}",
+            content_type, url
+        )));
     }
 
     // Read body with size limit
@@ -39,7 +39,9 @@ pub fn fetch(url: &Url, user_agent: &str) -> MorphResult<String> {
         .into_reader()
         .take(MAX_BODY_SIZE as u64)
         .read_to_string(&mut body)
-        .map_err(|e| MorphlexError::CrawlError(format!("Failed to read body from {}: {}", url, e)))?;
+        .map_err(|e| {
+            MorphlexError::CrawlError(format!("Failed to read body from {}: {}", url, e))
+        })?;
 
     Ok(body)
 }

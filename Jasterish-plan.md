@@ -211,3 +211,4 @@
 │ - Pure functions: each phase is Input -> Output                                                                               │
 │ - No floats in the token system (the language supports f32/f64 as data types, but instruction dispatch is always integer)     │
 │ - PQC: any key material or signing in the toolchain uses the same NIST PQC stack    
+.m

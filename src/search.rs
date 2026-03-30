@@ -35,6 +35,19 @@ const SCORE_TERM_COVERAGE: i32 = 20;
 const INDEX_MAGIC: &[u8; 8] = b"MXSEARCH";
 const INDEX_VERSION: u32 = 1;
 
+fn read_index_slice<'a>(
+    data: &'a [u8],
+    start: usize,
+    len: usize,
+    what: &str,
+) -> MorphResult<&'a [u8]> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| MorphlexError::IndexError(format!("{what} overflow")))?;
+    data.get(start..end)
+        .ok_or_else(|| MorphlexError::IndexError(what.to_string()))
+}
+
 // ─── Search Index ───────────────────────────────────────────────────────────
 
 /// The search index — an inverted index from lemma_id to document hits.
@@ -68,17 +81,21 @@ impl SearchIndex {
         // Collision detection
         if self.documents.contains_key(&doc_id) {
             return Err(MorphlexError::IndexError(format!(
-                "Document hash collision for '{}' (id={})", title, doc_id
+                "Document hash collision for '{}' (id={})",
+                title, doc_id
             )));
         }
 
         let (_lemmas, vectors) = crate::compile(content)?;
 
-        self.documents.insert(doc_id, DocMeta {
+        self.documents.insert(
             doc_id,
-            word_count: vectors.len() as u32,
-            title: title.to_string(),
-        });
+            DocMeta {
+                doc_id,
+                word_count: vectors.len() as u32,
+                title: title.to_string(),
+            },
+        );
 
         // Index each token by lemma_id
         for (position, tv) in vectors.iter().enumerate() {
@@ -90,10 +107,7 @@ impl SearchIndex {
                 morph: tv.morph,
                 id: tv.id,
             };
-            self.inverted
-                .entry(tv.lemma_id)
-                .or_default()
-                .push(hit);
+            self.inverted.entry(tv.lemma_id).or_default().push(hit);
         }
 
         // Sort posting lists by (doc_id, position) for deterministic output
@@ -204,7 +218,8 @@ impl SearchIndex {
         let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
         if version != INDEX_VERSION {
             return Err(MorphlexError::IndexError(format!(
-                "Unsupported version: {}", version
+                "Unsupported version: {}",
+                version
             )));
         }
         let doc_count = u32::from_le_bytes(data[12..16].try_into().unwrap());
@@ -218,25 +233,47 @@ impl SearchIndex {
         // Document Table
         for _ in 0..doc_count {
             if pos + 10 > data.len() {
-                return Err(MorphlexError::IndexError("Truncated document table".to_string()));
+                return Err(MorphlexError::IndexError(
+                    "Truncated document table".to_string(),
+                ));
             }
-            let doc_id = i32::from_le_bytes(data[pos..pos+4].try_into().unwrap());
-            let word_count = u32::from_le_bytes(data[pos+4..pos+8].try_into().unwrap());
-            let title_len = u16::from_le_bytes(data[pos+8..pos+10].try_into().unwrap()) as usize;
+            let doc_id = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            let word_count = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
+            let title_len =
+                u16::from_le_bytes(data[pos + 8..pos + 10].try_into().unwrap()) as usize;
             pos += 10;
 
-            let title = String::from_utf8_lossy(&data[pos..pos+title_len]).to_string();
+            let title =
+                String::from_utf8_lossy(read_index_slice(data, pos, title_len, "Truncated title")?)
+                    .to_string();
             pos += title_len;
 
-            let text_len = u32::from_le_bytes(data[pos..pos+4].try_into().unwrap()) as usize;
+            let text_len = u32::from_le_bytes(
+                read_index_slice(data, pos, 4, "Truncated document text length")?
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
             pos += 4;
             if text_len > 0 {
-                let text = String::from_utf8_lossy(&data[pos..pos+text_len]).to_string();
+                let text = String::from_utf8_lossy(read_index_slice(
+                    data,
+                    pos,
+                    text_len,
+                    "Truncated document text",
+                )?)
+                .to_string();
                 doc_texts.insert(doc_id, text);
                 pos += text_len;
             }
 
-            documents.insert(doc_id, DocMeta { doc_id, word_count, title });
+            documents.insert(
+                doc_id,
+                DocMeta {
+                    doc_id,
+                    word_count,
+                    title,
+                },
+            );
         }
 
         // Posting Table
@@ -244,31 +281,45 @@ impl SearchIndex {
 
         for _ in 0..posting_count {
             if pos + 8 > data.len() {
-                return Err(MorphlexError::IndexError("Truncated posting table".to_string()));
+                return Err(MorphlexError::IndexError(
+                    "Truncated posting table".to_string(),
+                ));
             }
-            let lemma_id = i32::from_le_bytes(data[pos..pos+4].try_into().unwrap());
-            let hit_count = u32::from_le_bytes(data[pos+4..pos+8].try_into().unwrap()) as usize;
+            let lemma_id = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            let hit_count = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
             pos += 8;
 
             let mut hits = Vec::with_capacity(hit_count);
             for _ in 0..hit_count {
-                if pos + 12 > data.len() {
+                if pos + 16 > data.len() {
                     return Err(MorphlexError::IndexError("Truncated hit entry".to_string()));
                 }
-                let doc_id = i32::from_le_bytes(data[pos..pos+4].try_into().unwrap());
-                let position = u32::from_le_bytes(data[pos+4..pos+8].try_into().unwrap());
-                let hit_pos = data[pos+8] as i8;
-                let role = data[pos+9] as i8;
-                let morph = i16::from_le_bytes(data[pos+10..pos+12].try_into().unwrap());
-                let id = i32::from_le_bytes(data[pos+12..pos+16].try_into().unwrap());
+                let doc_id = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+                let position = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
+                let hit_pos = data[pos + 8] as i8;
+                let role = data[pos + 9] as i8;
+                let morph = i16::from_le_bytes(data[pos + 10..pos + 12].try_into().unwrap());
+                let id = i32::from_le_bytes(data[pos + 12..pos + 16].try_into().unwrap());
                 pos += 16;
 
-                hits.push(DocHit { doc_id, position, pos: hit_pos, role, morph, id });
+                hits.push(DocHit {
+                    doc_id,
+                    position,
+                    pos: hit_pos,
+                    role,
+                    morph,
+                    id,
+                });
             }
             inverted.insert(lemma_id, hits);
         }
 
-        Ok(SearchIndex { inverted, documents, doc_texts, doc_count })
+        Ok(SearchIndex {
+            inverted,
+            documents,
+            doc_texts,
+            doc_count,
+        })
     }
 
     /// Write the index to a file.
@@ -374,8 +425,7 @@ pub fn search(
             let first_docs: std::collections::HashSet<DocId> =
                 per_term_doc_hits[0].keys().copied().collect();
             let intersection = per_term_doc_hits[1..].iter().fold(first_docs, |acc, term| {
-                let term_docs: std::collections::HashSet<DocId> =
-                    term.keys().copied().collect();
+                let term_docs: std::collections::HashSet<DocId> = term.keys().copied().collect();
                 acc.intersection(&term_docs).copied().collect()
             });
             let mut docs: Vec<DocId> = intersection.into_iter().collect();
@@ -384,8 +434,7 @@ pub fn search(
         }
         QueryMode::Any => {
             // Union: docs that appear in ANY query term
-            let mut all_docs: std::collections::HashSet<DocId> =
-                std::collections::HashSet::new();
+            let mut all_docs: std::collections::HashSet<DocId> = std::collections::HashSet::new();
             for term_hits in &per_term_doc_hits {
                 all_docs.extend(term_hits.keys());
             }
@@ -457,9 +506,7 @@ pub fn search(
     }
 
     // Sort by score descending, break ties by doc_id ascending (deterministic)
-    results.sort_by(|a, b| {
-        b.score.cmp(&a.score).then(a.doc_id.cmp(&b.doc_id))
-    });
+    results.sort_by(|a, b| b.score.cmp(&a.score).then(a.doc_id.cmp(&b.doc_id)));
 
     // Apply max_results limit
     if config.max_results > 0 && results.len() > config.max_results {
@@ -479,9 +526,18 @@ mod tests {
 
     fn sample_docs() -> Vec<(String, String)> {
         vec![
-            ("doc1".to_string(), "the quick brown fox jumps over the lazy dog".to_string()),
-            ("doc2".to_string(), "the runner is running in the park".to_string()),
-            ("doc3".to_string(), "dogs and cats are friendly animals".to_string()),
+            (
+                "doc1".to_string(),
+                "the quick brown fox jumps over the lazy dog".to_string(),
+            ),
+            (
+                "doc2".to_string(),
+                "the runner is running in the park".to_string(),
+            ),
+            (
+                "doc3".to_string(),
+                "dogs and cats are friendly animals".to_string(),
+            ),
         ]
     }
 
@@ -522,9 +578,9 @@ mod tests {
         };
         let results = search(&index, "running", &config).unwrap();
         // doc2 has "running" — should match via shared lemma_id
-        let doc2_match = results.iter().any(|r| {
-            index.get_doc(r.doc_id).map(|m| m.title.as_str()) == Some("doc2")
-        });
+        let doc2_match = results
+            .iter()
+            .any(|r| index.get_doc(r.doc_id).map(|m| m.title.as_str()) == Some("doc2"));
         assert!(doc2_match, "Should match doc2 via lemma for 'running'");
     }
 
@@ -532,8 +588,14 @@ mod tests {
     fn test_exact_match_bonus() {
         // Create index with two docs: one has "running", other has "run"
         let docs = vec![
-            ("has_running".to_string(), "the athlete is running fast".to_string()),
-            ("has_run".to_string(), "the athlete will run fast".to_string()),
+            (
+                "has_running".to_string(),
+                "the athlete is running fast".to_string(),
+            ),
+            (
+                "has_run".to_string(),
+                "the athlete will run fast".to_string(),
+            ),
         ];
         let index = build_index(&docs).unwrap();
         let config = SearchConfig {
@@ -557,10 +619,16 @@ mod tests {
         };
         // "quick fox" — only doc1 has both
         let results = search(&index, "quick fox", &config).unwrap();
-        assert!(!results.is_empty(), "Should find at least one result for 'quick fox'");
+        assert!(
+            !results.is_empty(),
+            "Should find at least one result for 'quick fox'"
+        );
         for r in &results {
             let title = &index.get_doc(r.doc_id).unwrap().title;
-            assert_eq!(title, "doc1", "Only doc1 should match All mode for 'quick fox'");
+            assert_eq!(
+                title, "doc1",
+                "Only doc1 should match All mode for 'quick fox'"
+            );
         }
     }
 
@@ -646,7 +714,10 @@ mod tests {
     fn test_no_match() {
         let index = build_sample_index();
         let results = search(&index, "xylophone", &default_config()).unwrap();
-        assert!(results.is_empty(), "Non-existent term should return no results");
+        assert!(
+            results.is_empty(),
+            "Non-existent term should return no results"
+        );
     }
 
     #[test]
@@ -672,8 +743,10 @@ mod tests {
         };
         let results = search(&index, "dog", &config).unwrap();
         if results.len() >= 2 {
-            assert!(results[0].score >= results[1].score,
-                "Doc with more matches should rank higher");
+            assert!(
+                results[0].score >= results[1].score,
+                "Doc with more matches should rank higher"
+            );
         }
     }
 
@@ -691,16 +764,19 @@ mod tests {
         };
         let results = search(&index, "quick brown fox", &config).unwrap();
         if results.len() >= 2 {
-            let broad_result = results.iter().find(|r| {
-                index.get_doc(r.doc_id).map(|m| m.title.as_str()) == Some("broad")
-            });
-            let deep_result = results.iter().find(|r| {
-                index.get_doc(r.doc_id).map(|m| m.title.as_str()) == Some("deep")
-            });
+            let broad_result = results
+                .iter()
+                .find(|r| index.get_doc(r.doc_id).map(|m| m.title.as_str()) == Some("broad"));
+            let deep_result = results
+                .iter()
+                .find(|r| index.get_doc(r.doc_id).map(|m| m.title.as_str()) == Some("deep"));
             if let (Some(broad), Some(deep)) = (broad_result, deep_result) {
-                assert!(broad.score > deep.score,
+                assert!(
+                    broad.score > deep.score,
                     "Broader coverage should score higher (broad={}, deep={})",
-                    broad.score, deep.score);
+                    broad.score,
+                    deep.score
+                );
             }
         }
     }
@@ -731,14 +807,37 @@ mod tests {
         let config = default_config();
         let r1 = search(&index, "dog", &config).unwrap();
         let r2 = search(&index2, "dog", &config).unwrap();
-        assert_eq!(r1, r2, "Roundtripped index should produce identical search results");
+        assert_eq!(
+            r1, r2,
+            "Roundtripped index should produce identical search results"
+        );
     }
 
     #[test]
     fn test_index_format_magic() {
         let index = build_sample_index();
         let bytes = index.to_bytes();
-        assert_eq!(&bytes[0..8], b"MXSEARCH", "Index should start with MXSEARCH magic");
+        assert_eq!(
+            &bytes[0..8],
+            b"MXSEARCH",
+            "Index should start with MXSEARCH magic"
+        );
+    }
+
+    #[test]
+    fn test_index_rejects_truncated_title() {
+        let index = build_sample_index();
+        let mut bytes = index.to_bytes();
+        bytes.truncate(34);
+        assert!(SearchIndex::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_index_rejects_truncated_hit_entry() {
+        let index = build_sample_index();
+        let mut bytes = index.to_bytes();
+        bytes.pop();
+        assert!(SearchIndex::from_bytes(&bytes).is_err());
     }
 
     // ── Integer-only scores ─────────────────────────────────────────────

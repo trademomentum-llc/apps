@@ -10,13 +10,13 @@
 //! Words go through morphlex (morphology → AST → semantics → vectorizer).
 //! Numbers get synthetic TokenVectors with POS_LITERAL, interleaved in original order.
 
-pub mod token_map;
-pub mod grammar;
-pub mod parser;
-pub mod typechecker;
-pub mod ir;
 pub mod codegen;
+pub mod grammar;
+pub mod ir;
 pub mod linker;
+pub mod parser;
+pub mod token_map;
+pub mod typechecker;
 
 use crate::types::*;
 use std::path::Path;
@@ -58,7 +58,10 @@ pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<String>, Vec
         kind: SegKind,
         text: String,
     }
-    enum SegKind { Code, Str }
+    enum SegKind {
+        Code,
+        Str,
+    }
 
     let mut segments: Vec<Segment> = Vec::new();
     let mut current = String::new();
@@ -68,21 +71,32 @@ pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<String>, Vec
         if ch == '"' {
             // Flush current code segment
             if !current.is_empty() {
-                segments.push(Segment { kind: SegKind::Code, text: std::mem::take(&mut current) });
+                segments.push(Segment {
+                    kind: SegKind::Code,
+                    text: std::mem::take(&mut current),
+                });
             }
             // Extract string literal
             let mut s = String::new();
             for c in chars.by_ref() {
-                if c == '"' { break; }
+                if c == '"' {
+                    break;
+                }
                 s.push(c);
             }
-            segments.push(Segment { kind: SegKind::Str, text: s });
+            segments.push(Segment {
+                kind: SegKind::Str,
+                text: s,
+            });
         } else {
             current.push(ch);
         }
     }
     if !current.is_empty() {
-        segments.push(Segment { kind: SegKind::Code, text: current });
+        segments.push(Segment {
+            kind: SegKind::Code,
+            text: current,
+        });
     }
 
     // Process each segment
@@ -111,7 +125,10 @@ pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<String>, Vec
                 let mut word_tokens: Vec<Token> = Vec::new();
                 let mut number_lexemes: Vec<String> = Vec::new();
 
-                enum Slot { Word(usize), Number(usize) }
+                enum Slot {
+                    Word(usize),
+                    Number(usize),
+                }
                 let mut order: Vec<Slot> = Vec::new();
 
                 for token in &all_tokens {
@@ -239,7 +256,10 @@ pub fn tokenize_jstar_raw(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVec
         .join("\n");
 
     // Phase 1: extract string literals, split into Code/Str segments
-    struct Seg { is_str: bool, text: String }
+    struct Seg {
+        is_str: bool,
+        text: String,
+    }
     let mut segments: Vec<Seg> = Vec::new();
     let mut current = String::new();
     let mut chars = filtered.chars().peekable();
@@ -247,20 +267,31 @@ pub fn tokenize_jstar_raw(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVec
     while let Some(ch) = chars.next() {
         if ch == '"' {
             if !current.is_empty() {
-                segments.push(Seg { is_str: false, text: std::mem::take(&mut current) });
+                segments.push(Seg {
+                    is_str: false,
+                    text: std::mem::take(&mut current),
+                });
             }
             let mut s = String::new();
             for c in chars.by_ref() {
-                if c == '"' { break; }
+                if c == '"' {
+                    break;
+                }
                 s.push(c);
             }
-            segments.push(Seg { is_str: true, text: s });
+            segments.push(Seg {
+                is_str: true,
+                text: s,
+            });
         } else {
             current.push(ch);
         }
     }
     if !current.is_empty() {
-        segments.push(Seg { is_str: false, text: current });
+        segments.push(Seg {
+            is_str: false,
+            text: current,
+        });
     }
 
     for seg in &segments {
@@ -322,8 +353,7 @@ pub fn compile_source_raw(source: &str, output_path: &Path) -> MorphResult<()> {
 
 /// Compile a .jstr source file using raw tokenization.
 pub fn compile_file_raw(source_path: &Path, output_path: &Path) -> MorphResult<()> {
-    let source = std::fs::read_to_string(source_path)
-        .map_err(MorphlexError::IoError)?;
+    let source = std::fs::read_to_string(source_path).map_err(MorphlexError::IoError)?;
     compile_source_raw(&source, output_path)
 }
 
@@ -331,8 +361,7 @@ pub fn compile_file_raw(source_path: &Path, output_path: &Path) -> MorphResult<(
 
 /// Compile a .jstr source file to a native ELF binary.
 pub fn compile_file(source_path: &Path, output_path: &Path) -> MorphResult<()> {
-    let source = std::fs::read_to_string(source_path)
-        .map_err(MorphlexError::IoError)?;
+    let source = std::fs::read_to_string(source_path).map_err(MorphlexError::IoError)?;
     compile_source(&source, output_path)
 }
 
@@ -341,8 +370,7 @@ pub fn compile_file(source_path: &Path, output_path: &Path) -> MorphResult<()> {
 pub fn compile_multi(sources: &[&Path], output_path: &Path) -> MorphResult<()> {
     let mut combined = String::new();
     for path in sources {
-        let src = std::fs::read_to_string(path)
-            .map_err(MorphlexError::IoError)?;
+        let src = std::fs::read_to_string(path).map_err(MorphlexError::IoError)?;
         combined.push_str(&src);
         combined.push('\n');
     }
@@ -376,8 +404,8 @@ pub fn compile_source(source: &str, output_path: &Path) -> MorphResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::token_map::*;
+    use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Monotonic counter to guarantee unique binary names across parallel tests.
@@ -471,7 +499,7 @@ mod tests {
     fn test_e2e_if_true() {
         // counter=1, compare counter 0 => 1!=0 => true => body runs => counter=42
         let exit = compile_and_run(
-            "a counter\nstore 1 into counter\nif compare counter 0\nstore 42 into counter\nend\nreturn counter"
+            "a counter\nstore 1 into counter\nif compare counter 0\nstore 42 into counter\nend\nreturn counter",
         );
         assert_eq!(exit, 42, "if-true should execute body, exit 42");
     }
@@ -481,7 +509,7 @@ mod tests {
     fn test_e2e_if_false() {
         // counter=0, compare counter 0 => 0!=0 => false => body skipped => counter=0
         let exit = compile_and_run(
-            "a counter\nstore 0 into counter\nif compare counter 0\nstore 42 into counter\nend\nreturn counter"
+            "a counter\nstore 0 into counter\nif compare counter 0\nstore 42 into counter\nend\nreturn counter",
         );
         assert_eq!(exit, 0, "if-false should skip body, exit 0");
     }
@@ -517,9 +545,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_e2e_print_variable() {
-        let stdout = compile_and_capture(
-            "a counter\nstore 99 into counter\nprint counter"
-        );
+        let stdout = compile_and_capture("a counter\nstore 99 into counter\nprint counter");
         assert_eq!(stdout.trim(), "99", "print variable should output '99'");
     }
 
@@ -536,7 +562,7 @@ mod tests {
         // counter=5, while counter!=0: counter = subtract counter 1
         // Loop runs 5 times, counter reaches 0
         let exit = compile_and_run(
-            "a counter\nstore 5 into counter\nwhile compare counter 0\nsubtract counter 1\nstore it into counter\nend\nreturn counter"
+            "a counter\nstore 5 into counter\nwhile compare counter 0\nsubtract counter 1\nstore it into counter\nend\nreturn counter",
         );
         assert_eq!(exit, 0, "while-countdown should exit 0");
     }
@@ -548,7 +574,7 @@ mod tests {
     fn test_e2e_multi_statement_sequence() {
         // Declare, store, arithmetic, store result, return — 5 statements in sequence
         let exit = compile_and_run(
-            "a counter\nstore 10 into counter\nadd counter 20\nstore it into counter\nreturn counter"
+            "a counter\nstore 10 into counter\nadd counter 20\nstore it into counter\nreturn counter",
         );
         assert_eq!(exit, 30, "multi-statement sequence: 10 + 20 = 30");
     }
@@ -557,9 +583,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_e2e_multiple_prints() {
         // Multiple print statements in sequence
-        let stdout = compile_and_capture(
-            "print 1\nprint 2\nprint 3"
-        );
+        let stdout = compile_and_capture("print 1\nprint 2\nprint 3");
         assert_eq!(stdout, "1\n2\n3\n", "three sequential prints");
     }
 
@@ -568,7 +592,7 @@ mod tests {
     fn test_e2e_declare_compute_print_return() {
         // Full pipeline: declare, store, compute, print, return
         let stdout = compile_and_capture(
-            "a result\nstore 7 into result\nadd result 3\nstore it into result\nprint result\nreturn result"
+            "a result\nstore 7 into result\nadd result 3\nstore it into result\nprint result\nreturn result",
         );
         assert_eq!(stdout.trim(), "10", "declare + compute + print");
     }
@@ -600,9 +624,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_e2e_chained_arithmetic() {
         // add 10 20 -> 30, subtract it 5 -> 25, multiply it 2 -> 50
-        let exit = compile_and_run(
-            "add 10 20\nsubtract it 5\nmultiply it 2\nreturn it"
-        );
+        let exit = compile_and_run("add 10 20\nsubtract it 5\nmultiply it 2\nreturn it");
         assert_eq!(exit, 50, "chained arithmetic: (10+20-5)*2 = 50");
     }
 
@@ -613,7 +635,7 @@ mod tests {
     fn test_e2e_two_variables() {
         // Two separate variables
         let exit = compile_and_run(
-            "a counter\na result\nstore 10 into counter\nstore 32 into result\nadd counter result\nreturn it"
+            "a counter\na result\nstore 10 into counter\nstore 32 into result\nadd counter result\nreturn it",
         );
         assert_eq!(exit, 42, "two variables: 10 + 32 = 42");
     }
@@ -623,7 +645,7 @@ mod tests {
     fn test_e2e_variable_overwrite() {
         // Store, overwrite, return
         let exit = compile_and_run(
-            "a counter\nstore 99 into counter\nstore 42 into counter\nreturn counter"
+            "a counter\nstore 99 into counter\nstore 42 into counter\nreturn counter",
         );
         assert_eq!(exit, 42, "variable overwrite: last store wins");
     }
@@ -636,7 +658,7 @@ mod tests {
         // while loop counts 3 to 0, accumulate counter values into result
         // result += counter each iteration: 3 + 2 + 1 = 6
         let exit = compile_and_run(
-            "a counter\na result\nstore 3 into counter\nstore 0 into result\nwhile compare counter 0\nadd result counter\nstore it into result\nsubtract counter 1\nstore it into counter\nend\nreturn result"
+            "a counter\na result\nstore 3 into counter\nstore 0 into result\nwhile compare counter 0\nadd result counter\nstore it into result\nsubtract counter 1\nstore it into counter\nend\nreturn result",
         );
         assert_eq!(exit, 6, "while accumulate: 3+2+1 = 6");
     }
@@ -646,7 +668,7 @@ mod tests {
     fn test_e2e_if_after_while() {
         // Sequence: while loop, then if, then return
         let exit = compile_and_run(
-            "a counter\nstore 3 into counter\nwhile compare counter 0\nsubtract counter 1\nstore it into counter\nend\nif compare counter 0\nstore 99 into counter\nend\nreturn counter"
+            "a counter\nstore 3 into counter\nwhile compare counter 0\nsubtract counter 1\nstore it into counter\nend\nif compare counter 0\nstore 99 into counter\nend\nreturn counter",
         );
         // After while: counter=0. compare 0 0 => 0!=0 => false. Body skipped. Return 0.
         assert_eq!(exit, 0, "if-after-while: condition false, skip body");
@@ -657,7 +679,7 @@ mod tests {
     fn test_e2e_print_in_loop() {
         // Print inside a while loop
         let stdout = compile_and_capture(
-            "a counter\nstore 3 into counter\nwhile compare counter 0\nprint counter\nsubtract counter 1\nstore it into counter\nend"
+            "a counter\nstore 3 into counter\nwhile compare counter 0\nprint counter\nsubtract counter 1\nstore it into counter\nend",
         );
         assert_eq!(stdout, "3\n2\n1\n", "print inside loop: 3, 2, 1");
     }
@@ -708,14 +730,17 @@ mod tests {
         let ir_prog = ir::lower(&typed).unwrap();
         let mc = codegen::generate(&ir_prog).unwrap();
 
-        eprintln!("string_data: {:?}", String::from_utf8_lossy(&ir_prog.string_data));
+        eprintln!(
+            "string_data: {:?}",
+            String::from_utf8_lossy(&ir_prog.string_data)
+        );
         eprintln!("mc.data: {:?}", String::from_utf8_lossy(&mc.data));
         eprintln!("mc.text len: {}", mc.text.len());
 
         // Check for 0x48 0xBE pattern in text
         for i in 0..mc.text.len().saturating_sub(10) {
-            if mc.text[i] == 0x48 && mc.text[i+1] == 0xBE {
-                let val = u64::from_le_bytes(mc.text[i+2..i+10].try_into().unwrap());
+            if mc.text[i] == 0x48 && mc.text[i + 1] == 0xBE {
+                let val = u64::from_le_bytes(mc.text[i + 2..i + 10].try_into().unwrap());
                 eprintln!("mov rsi, imm64 at offset {}: value={:#x}", i, val);
             }
         }
@@ -733,10 +758,12 @@ mod tests {
         compile_source(source, &binary).unwrap();
 
         let output = std::process::Command::new(&binary).output().unwrap();
-        eprintln!("exit: {:?}, stdout: {:?}, stderr: {:?}",
+        eprintln!(
+            "exit: {:?}, stdout: {:?}, stderr: {:?}",
             output.status.code(),
             String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(!output.stdout.is_empty(), "Should produce stdout output");
     }
 
@@ -747,11 +774,16 @@ mod tests {
         let ast = parser::parse(&_originals, &lemmas, &vectors).unwrap();
         let typed = typechecker::check(&ast).unwrap();
         let ir = ir::lower(&typed).unwrap();
-        assert!(!ir.string_data.is_empty(), "string_data should contain hello + newline");
+        assert!(
+            !ir.string_data.is_empty(),
+            "string_data should contain hello + newline"
+        );
         assert_eq!(&ir.string_data, b"hello\n");
         // Check that PrintStr instruction exists
         let has_print_str = ir.functions[0].blocks.iter().any(|b| {
-            b.instructions.iter().any(|i| matches!(i, ir::IrInst::PrintStr { .. }))
+            b.instructions
+                .iter()
+                .any(|i| matches!(i, ir::IrInst::PrintStr { .. }))
         });
         assert!(has_print_str, "Should have PrintStr instruction");
     }
@@ -775,24 +807,32 @@ mod tests {
     #[test]
     fn test_parse_function_def() {
         let words: Vec<String> = ["define", "greet", "print", "42", "end"]
-            .iter().map(|s| s.to_string()).collect();
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let prog = crate::jstar::parser::parse(
             &words,
             &words,
             &["define", "greet", "print", "42", "end"]
-                .iter().map(|w| {
-                    crate::types::TokenVector {
-                        id: crate::vectorizer::hash_to_i32(w),
-                        lemma_id: crate::vectorizer::hash_to_i32(w),
-                        pos: if *w == "42" { token_map::POS_LITERAL } else { 0 },
-                        role: 0,
-                        morph: 0,
-                    }
-                }).collect::<Vec<_>>(),
-        ).unwrap();
-        let has_func_def = prog.statements.iter().any(|s| {
-            matches!(s, grammar::JStarStatement::FunctionDef { .. })
-        });
+                .iter()
+                .map(|w| crate::types::TokenVector {
+                    id: crate::vectorizer::hash_to_i32(w),
+                    lemma_id: crate::vectorizer::hash_to_i32(w),
+                    pos: if *w == "42" {
+                        token_map::POS_LITERAL
+                    } else {
+                        0
+                    },
+                    role: 0,
+                    morph: 0,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let has_func_def = prog
+            .statements
+            .iter()
+            .any(|s| matches!(s, grammar::JStarStatement::FunctionDef { .. }));
         assert!(has_func_def, "Should parse function definition");
     }
 
@@ -800,18 +840,14 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_e2e_function_call_return() {
         // Define a function that returns 42, call it, return the result
-        let exit = compile_and_run(
-            "define answer\nreturn 42\nend\ncall answer\nreturn it"
-        );
+        let exit = compile_and_run("define answer\nreturn 42\nend\ncall answer\nreturn it");
         assert_eq!(exit, 42, "function call should return 42");
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn test_e2e_function_with_print() {
-        let stdout = compile_and_capture(
-            "define greet\nprint \"hello\"\nend\ncall greet"
-        );
+        let stdout = compile_and_capture("define greet\nprint \"hello\"\nend\ncall greet");
         assert_eq!(stdout, "hello\n", "function with print should output hello");
     }
 
@@ -820,7 +856,7 @@ mod tests {
     fn test_e2e_function_call_with_args() {
         // Define a function that adds its two parameters
         let exit = compile_and_run(
-            "define adder with integer left integer right\nadd left right\nreturn it\nend\ncall adder 17 25\nreturn it"
+            "define adder with integer left integer right\nadd left right\nreturn it\nend\ncall adder 17 25\nreturn it",
         );
         assert_eq!(exit, 42, "function with args: 17 + 25 = 42");
     }
@@ -897,7 +933,7 @@ mod tests {
     fn test_e2e_if_else_true_branch() {
         // condition true => if body runs, else body skipped
         let exit = compile_and_run(
-            "a result\nstore 0 into result\nif compare 1 0\nstore 42 into result\nelse\nstore 99 into result\nend\nreturn result"
+            "a result\nstore 0 into result\nif compare 1 0\nstore 42 into result\nelse\nstore 99 into result\nend\nreturn result",
         );
         assert_eq!(exit, 42, "if-true should run if-body, not else-body");
     }
@@ -907,7 +943,7 @@ mod tests {
     fn test_e2e_if_else_false_branch() {
         // condition false => if body skipped, else body runs
         let exit = compile_and_run(
-            "a result\nstore 0 into result\nif compare 0 0\nstore 42 into result\nelse\nstore 99 into result\nend\nreturn result"
+            "a result\nstore 0 into result\nif compare 0 0\nstore 42 into result\nelse\nstore 99 into result\nend\nreturn result",
         );
         assert_eq!(exit, 99, "if-false should run else-body, not if-body");
     }
@@ -916,9 +952,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_e2e_if_else_with_return() {
         // Direct return from branches
-        let exit = compile_and_run(
-            "if compare 5 0\nreturn 42\nelse\nreturn 99\nend"
-        );
+        let exit = compile_and_run("if compare 5 0\nreturn 42\nelse\nreturn 99\nend");
         assert_eq!(exit, 42, "if-true branch should return 42");
     }
 
@@ -990,7 +1024,7 @@ mod tests {
     fn test_e2e_array_store_load() {
         // array 10 buffer; store 42 into buffer at 3; load buffer at 3; return it
         let exit = compile_and_run(
-            "array 10 buffer\nstore 42 into buffer at 3\nload buffer at 3\nreturn it"
+            "array 10 buffer\nstore 42 into buffer at 3\nload buffer at 3\nreturn it",
         );
         assert_eq!(exit, 42, "array store/load at index 3 should return 42");
     }
@@ -1000,9 +1034,12 @@ mod tests {
     fn test_e2e_array_multiple_indices_v2() {
         // Store at two indices, load second, verify (array keyword syntax)
         let exit = compile_and_run(
-            "array 10 buffer\nstore 10 into buffer at 0\nstore 42 into buffer at 1\nload buffer at 1\nreturn it"
+            "array 10 buffer\nstore 10 into buffer at 0\nstore 42 into buffer at 1\nload buffer at 1\nreturn it",
         );
-        assert_eq!(exit, 42, "array store at 0 and 1, load at 1 should return 42");
+        assert_eq!(
+            exit, 42,
+            "array store at 0 and 1, load at 1 should return 42"
+        );
     }
 
     // ── For loop tests ──────────────────────────────────────────────────
@@ -1012,7 +1049,7 @@ mod tests {
     fn test_e2e_for_loop() {
         // for i from 0 to 5: accumulate sum = 0+1+2+3+4 = 10
         let exit = compile_and_run(
-            "a result\nstore 0 into result\nfor counter from 0 to 5\nadd result counter\nstore it into result\nend\nreturn result"
+            "a result\nstore 0 into result\nfor counter from 0 to 5\nadd result counter\nstore it into result\nend\nreturn result",
         );
         assert_eq!(exit, 10, "for 0..5 sum = 0+1+2+3+4 = 10");
     }
@@ -1021,9 +1058,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_e2e_for_loop_print() {
         // Print 0,1,2 using a for loop
-        let stdout = compile_and_capture(
-            "for counter from 0 to 3\nprint counter\nend"
-        );
+        let stdout = compile_and_capture("for counter from 0 to 3\nprint counter\nend");
         assert_eq!(stdout, "0\n1\n2\n", "for loop print 0,1,2");
     }
 
@@ -1035,7 +1070,7 @@ mod tests {
         // Hash some data and verify the result is nonzero
         // Note: hash operates on raw bytes in memory (array elements are 8 bytes each)
         let exit = compile_and_run(
-            "array 4 data\nstore 72 into data at 0\nhash data 8\na result\nstore it into result\ncompare result 0\nreturn it"
+            "array 4 data\nstore 72 into data at 0\nhash data 8\na result\nstore it into result\ncompare result 0\nreturn it",
         );
         assert_eq!(exit, 1, "hash of data should be nonzero");
     }
@@ -1055,7 +1090,7 @@ mod tests {
     fn test_e2e_array_declare_and_store() {
         // Declare a 256-byte buffer, store a byte at index 0, load it back
         let exit = compile_and_run(
-            "a buffer 256\nstore 42 into buffer at 0\nload from buffer at 0\nreturn it"
+            "a buffer 256\nstore 42 into buffer at 0\nload from buffer at 0\nreturn it",
         );
         assert_eq!(exit, 42, "array store/load at index 0 should return 42");
     }
@@ -1065,7 +1100,7 @@ mod tests {
     fn test_e2e_array_multiple_indices() {
         // Store different values at different indices, read back the second
         let exit = compile_and_run(
-            "a buffer 256\nstore 10 into buffer at 0\nstore 20 into buffer at 1\nstore 30 into buffer at 2\nload from buffer at 1\nreturn it"
+            "a buffer 256\nstore 10 into buffer at 0\nstore 20 into buffer at 1\nstore 30 into buffer at 2\nload from buffer at 1\nreturn it",
         );
         assert_eq!(exit, 20, "array load at index 1 should return 20");
     }
@@ -1075,7 +1110,7 @@ mod tests {
     fn test_e2e_array_store_ascii() {
         // Store ASCII 'A' (65) and read it back
         let exit = compile_and_run(
-            "a buffer 256\nstore 65 into buffer at 0\nload from buffer at 0\nreturn it"
+            "a buffer 256\nstore 65 into buffer at 0\nload from buffer at 0\nreturn it",
         );
         assert_eq!(exit, 65, "array store/load ASCII 'A' should return 65");
     }
@@ -1162,15 +1197,21 @@ mod tests {
         for source in &programs {
             let (_nlp_originals, nlp_lemmas, nlp_vecs) = tokenize_jstar(source).unwrap();
             let (raw_lemmas, raw_vecs) = tokenize_jstar_raw(source).unwrap();
-            assert_eq!(nlp_lemmas.len(), raw_lemmas.len(),
-                "Token count mismatch for '{}'", source);
+            assert_eq!(
+                nlp_lemmas.len(),
+                raw_lemmas.len(),
+                "Token count mismatch for '{}'",
+                source
+            );
             // resolve() should produce the same TokenCategory for each token
             for i in 0..nlp_lemmas.len() {
                 let nlp_cat = resolve(&nlp_vecs[i], &nlp_lemmas[i]);
                 let raw_cat = resolve(&raw_vecs[i], &raw_lemmas[i]);
-                assert_eq!(nlp_cat, raw_cat,
+                assert_eq!(
+                    nlp_cat, raw_cat,
                     "Token {} category mismatch for '{}': nlp={:?} raw={:?}",
-                    i, source, nlp_cat, raw_cat);
+                    i, source, nlp_cat, raw_cat
+                );
             }
         }
     }
@@ -1236,9 +1277,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_raw_e2e_variables() {
-        let exit = compile_and_run_raw(
-            "a counter\nstore 42 into counter\nreturn counter"
-        );
+        let exit = compile_and_run_raw("a counter\nstore 42 into counter\nreturn counter");
         assert_eq!(exit, 42, "raw: variable store/load");
     }
 
@@ -1246,7 +1285,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_raw_e2e_if_else() {
         let exit = compile_and_run_raw(
-            "a result\nstore 0 into result\nif compare 1 0\nstore 42 into result\nelse\nstore 99 into result\nend\nreturn result"
+            "a result\nstore 0 into result\nif compare 1 0\nstore 42 into result\nelse\nstore 99 into result\nend\nreturn result",
         );
         assert_eq!(exit, 42, "raw: if-else true branch");
     }
@@ -1255,7 +1294,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_raw_e2e_while_loop() {
         let exit = compile_and_run_raw(
-            "a counter\nstore 5 into counter\nwhile compare counter 0\nsubtract counter 1\nstore it into counter\nend\nreturn counter"
+            "a counter\nstore 5 into counter\nwhile compare counter 0\nsubtract counter 1\nstore it into counter\nend\nreturn counter",
         );
         assert_eq!(exit, 0, "raw: while countdown to 0");
     }
@@ -1263,9 +1302,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_raw_e2e_function_call() {
-        let exit = compile_and_run_raw(
-            "define answer\nreturn 42\nend\ncall answer\nreturn it"
-        );
+        let exit = compile_and_run_raw("define answer\nreturn 42\nend\ncall answer\nreturn it");
         assert_eq!(exit, 42, "raw: function call returns 42");
     }
 
@@ -1302,7 +1339,7 @@ mod tests {
     fn test_e2e_addressof_basic() {
         // addressof gets the stack address of a variable — non-zero pointer
         let exit = compile_and_run(
-            "a counter\nstore 42 into counter\naddressof counter\ncompare it 0\nreturn it"
+            "a counter\nstore 42 into counter\naddressof counter\ncompare it 0\nreturn it",
         );
         assert_eq!(exit, 1, "addressof should return non-zero address");
     }
@@ -1313,7 +1350,7 @@ mod tests {
         // Use addressof to pass a buffer address to sys_write
         // Store bytes 'H','i','\n' into a byte buffer, then sys_write(1, addr, 3)
         let stdout = compile_and_capture(
-            "a byte buf 8\na ptr\nstore 72 into buf at 0\nstore 105 into buf at 1\nstore 10 into buf at 2\naddressof buf\nstore it into ptr\nsyscall 1 1 ptr 3"
+            "a byte buf 8\na ptr\nstore 72 into buf at 0\nstore 105 into buf at 1\nstore 10 into buf at 2\naddressof buf\nstore it into ptr\nsyscall 1 1 ptr 3",
         );
         assert_eq!(stdout, "Hi\n", "addressof + sys_write should output 'Hi'");
     }
@@ -1325,7 +1362,10 @@ mod tests {
     fn test_elf_identity_return_42() {
         let nlp = compile_to_bytes("return 42", false);
         let raw = compile_to_bytes("return 42", true);
-        assert_eq!(nlp, raw, "ELF identity: 'return 42' should be byte-identical");
+        assert_eq!(
+            nlp, raw,
+            "ELF identity: 'return 42' should be byte-identical"
+        );
     }
 
     #[test]
@@ -1333,7 +1373,10 @@ mod tests {
     fn test_elf_identity_arithmetic() {
         let nlp = compile_to_bytes("add 17 25\nreturn it", false);
         let raw = compile_to_bytes("add 17 25\nreturn it", true);
-        assert_eq!(nlp, raw, "ELF identity: arithmetic should be byte-identical");
+        assert_eq!(
+            nlp, raw,
+            "ELF identity: arithmetic should be byte-identical"
+        );
     }
 
     #[test]
@@ -1350,7 +1393,10 @@ mod tests {
         let source = "a counter\nstore 5 into counter\nwhile compare counter 0\nsubtract counter 1\nstore it into counter\nend\nreturn counter";
         let nlp = compile_to_bytes(source, false);
         let raw = compile_to_bytes(source, true);
-        assert_eq!(nlp, raw, "ELF identity: control flow should be byte-identical");
+        assert_eq!(
+            nlp, raw,
+            "ELF identity: control flow should be byte-identical"
+        );
     }
 
     #[test]
@@ -1456,10 +1502,14 @@ mod tests {
                         status.and_then(|s| s.signal())
                     }
                     #[cfg(not(unix))]
-                    { None }
+                    {
+                        None
+                    }
                 };
-                eprintln!("write_all failed: {} (child exit={:?}, signal={:?}, stderr={})",
-                    e, code, signal, stderr);
+                eprintln!(
+                    "write_all failed: {} (child exit={:?}, signal={:?}, stderr={})",
+                    e, code, signal, stderr
+                );
                 return (code, out_stdout, format!("write error: {}, signal: {:?}", e, signal));
             }
         }
@@ -1532,7 +1582,8 @@ mod tests {
         assert!(
             !elf_bytes.is_empty(),
             "Self-hosted compiler produced no output (exit={}, stderr: {})",
-            exit_code, stderr
+            exit_code,
+            stderr
         );
 
         // Write the ELF binary to a temp file and run it
@@ -1602,9 +1653,8 @@ return counter\n";
     #[test]
     #[cfg(target_os = "linux")]
     fn test_e2e_long_array_basic() {
-        let exit = compile_and_run(
-            "a long arr 10\nstore 42 into arr at 0\nload from arr at 0\nreturn it"
-        );
+        let exit =
+            compile_and_run("a long arr 10\nstore 42 into arr at 0\nload from arr at 0\nreturn it");
         assert_eq!(exit, 42, "long array: store/load at index 0");
     }
 
@@ -1613,7 +1663,7 @@ return counter\n";
     fn test_e2e_long_array_large() {
         // Test with a larger array to check alloca sizing
         let exit = compile_and_run(
-            "a long arr 1000\nstore 99 into arr at 500\nload from arr at 500\nreturn it"
+            "a long arr 1000\nstore 99 into arr at 500\nload from arr at 500\nreturn it",
         );
         assert_eq!(exit, 99, "long array: store/load at index 500");
     }
@@ -1623,7 +1673,7 @@ return counter\n";
     fn test_e2e_huge_stack_frame() {
         // Simulate compiler.jstr's stack frame size: ~400KB
         let exit = compile_and_run(
-            "a byte buf1 65536\na byte buf2 65536\na byte buf3 32768\na long arr1 8192\na long arr2 8192\na long arr3 8192\nreturn 42"
+            "a byte buf1 65536\na byte buf2 65536\na byte buf3 32768\na long arr1 8192\na long arr2 8192\na long arr3 8192\nreturn 42",
         );
         assert_eq!(exit, 42, "huge stack frame (~400KB) should work");
     }
@@ -1669,7 +1719,11 @@ return counter\n";
     fn test_selfhost_compile_stats() {
         let compiler_bin = build_self_hosted_compiler();
         let size = std::fs::metadata(&compiler_bin).unwrap().len();
-        assert!(size > 10_000, "selfhost binary should be >10KB, got {} bytes", size);
+        assert!(
+            size > 10_000,
+            "selfhost binary should be >10KB, got {} bytes",
+            size
+        );
         let _ = std::fs::remove_file(&compiler_bin);
     }
 
@@ -1678,7 +1732,7 @@ return counter\n";
     #[cfg(target_os = "linux")]
     fn test_e2e_if_equal_basic() {
         let exit = compile_and_run_raw(
-            "a result\nstore 0 into result\nif equal 1 1\nstore 42 into result\nend\nreturn result"
+            "a result\nstore 0 into result\nif equal 1 1\nstore 42 into result\nend\nreturn result",
         );
         assert_eq!(exit, 42, "if equal 1 1 should enter body");
     }
@@ -1687,7 +1741,7 @@ return counter\n";
     #[cfg(target_os = "linux")]
     fn test_e2e_if_equal_false() {
         let exit = compile_and_run_raw(
-            "a result\nstore 0 into result\nif equal 1 2\nstore 42 into result\nend\nreturn result"
+            "a result\nstore 0 into result\nif equal 1 2\nstore 42 into result\nend\nreturn result",
         );
         assert_eq!(exit, 0, "if equal 1 2 should skip body");
     }
@@ -1697,7 +1751,7 @@ return counter\n";
     fn test_e2e_if_equal_var_simple() {
         // Exact same source as the dump test — should produce identical bytes
         let exit = compile_and_run_raw(
-            "a val\nstore 99 into val\nif equal val 0\nstore 10 into val\nend\nreturn val"
+            "a val\nstore 99 into val\nif equal val 0\nstore 10 into val\nend\nreturn val",
         );
         // val=99, equal val 0 → false, body skipped, return val=99
         assert_eq!(exit, 99, "if equal val 0 (false) should return 99");
@@ -1708,7 +1762,7 @@ return counter\n";
     fn test_e2e_if_equal_two_vars() {
         // Regression: parser used to consume second declaration as operand of previous stmt
         let exit = compile_and_run_raw(
-            "a result\nstore 0 into result\na val\nstore 99 into val\nif equal val 0\nstore 10 into result\nend\nreturn result"
+            "a result\nstore 0 into result\na val\nstore 99 into val\nif equal val 0\nstore 10 into result\nend\nreturn result",
         );
         assert_eq!(exit, 0, "two-vars: equal val 0 is false, result stays 0");
     }
@@ -1718,7 +1772,7 @@ return counter\n";
     fn test_e2e_two_vars_no_if() {
         // Just two variables, no if-block
         let exit = compile_and_run_raw(
-            "a result\nstore 42 into result\na val\nstore 99 into val\nreturn result"
+            "a result\nstore 42 into result\na val\nstore 99 into val\nreturn result",
         );
         assert_eq!(exit, 42, "two vars: return result=42");
     }
@@ -1727,7 +1781,7 @@ return counter\n";
     #[cfg(target_os = "linux")]
     fn test_e2e_two_vars_return_second() {
         let exit = compile_and_run_raw(
-            "a result\nstore 42 into result\na val\nstore 99 into val\nreturn val"
+            "a result\nstore 42 into result\na val\nstore 99 into val\nreturn val",
         );
         assert_eq!(exit, 99, "two vars raw: return val=99");
     }
@@ -1737,7 +1791,7 @@ return counter\n";
     fn test_e2e_two_vars_nlp() {
         // Same program but with NLP tokenization
         let exit = compile_and_run(
-            "a result\nstore 42 into result\na val\nstore 99 into val\nreturn result"
+            "a result\nstore 42 into result\na val\nstore 99 into val\nreturn result",
         );
         assert_eq!(exit, 42, "two vars nlp: return result=42");
     }
@@ -1747,11 +1801,13 @@ return counter\n";
     fn test_e2e_if_equal_threshold() {
         // Stress test: multiple if-equal blocks with two variables
         for count in 1..=6 {
-            let mut source = String::from("a result\nstore 0 into result\na val\nstore 99 into val\n");
+            let mut source =
+                String::from("a result\nstore 0 into result\na val\nstore 99 into val\n");
             for i in 0..count {
                 source.push_str(&format!(
                     "if equal val {}\nstore {} into result\nend\n",
-                    i, i + 10
+                    i,
+                    i + 10
                 ));
             }
             source.push_str("return result\n");
@@ -1868,9 +1924,7 @@ return tok_count";
     fn test_e2e_bitand_byte_extract() {
         // Test the byte extraction pattern used in compiler.jstr
         // Extract low byte of 0x1234 → should be 0x34 = 52
-        let exit = compile_and_run(
-            "a val\nstore 0x1234 into val\nbitand val 0xFF\nreturn it"
-        );
+        let exit = compile_and_run("a val\nstore 0x1234 into val\nbitand val 0xFF\nreturn it");
         assert_eq!(exit, 0x34, "bitand: low byte of 0x1234 should be 0x34");
     }
 
@@ -1879,9 +1933,12 @@ return tok_count";
     fn test_e2e_bitand_divide_byte2() {
         // Extract second byte: (val & 0xFF00) / 256
         let exit = compile_and_run(
-            "a val\nstore 0x1234 into val\nbitand val 0xFF00\ndivide it 256\nreturn it"
+            "a val\nstore 0x1234 into val\nbitand val 0xFF00\ndivide it 256\nreturn it",
         );
-        assert_eq!(exit, 0x12, "bitand+divide: second byte of 0x1234 should be 0x12");
+        assert_eq!(
+            exit, 0x12,
+            "bitand+divide: second byte of 0x1234 should be 0x12"
+        );
     }
 
     /// Phase 1 with long arrays: store token boundaries in long arrays.
@@ -2021,7 +2078,7 @@ return it";
     #[cfg(target_os = "linux")]
     fn test_e2e_boolean_in_condition() {
         let exit = compile_and_run_raw(
-            "a result\nstore 0 into result\na done\nstore true into done\nif equal done 1\nstore 42 into result\nend\nreturn result"
+            "a result\nstore 0 into result\na done\nstore true into done\nif equal done 1\nstore 42 into result\nend\nreturn result",
         );
         assert_eq!(exit, 42, "boolean true in condition should enter if-body");
     }
@@ -2033,7 +2090,7 @@ return it";
     fn test_e2e_recursive_factorial() {
         // factorial(5) = 120
         let exit = compile_and_run_raw(
-            "define factorial with int n\nif equal n 0\nreturn 1\nend\nsubtract n 1\ncall factorial it\nmultiply it n\nreturn it\nend\ncall factorial 5\nreturn it"
+            "define factorial with int n\nif equal n 0\nreturn 1\nend\nsubtract n 1\ncall factorial it\nmultiply it n\nreturn it\nend\ncall factorial 5\nreturn it",
         );
         assert_eq!(exit, 120, "factorial(5) = 120");
     }
@@ -2051,7 +2108,7 @@ return it";
              subtract n 1\ncall fib it\nstore it into prev\n\
              subtract n 2\ncall fib it\n\
              add prev it\nreturn it\nend\n\
-             call fib 7\nreturn it"
+             call fib 7\nreturn it",
         );
         assert_eq!(exit, 13, "fib(7) = 13");
     }
@@ -2063,10 +2120,11 @@ return it";
     fn test_e2e_halt_inside_function() {
         // "halt" should NOT close the function — it should be a real halt instruction
         // "end" closes the function body (BlockEnd), "halt" terminates execution
-        let exit = compile_and_run_raw(
-            "define die\nhalt\nend\nreturn 42"
+        let exit = compile_and_run_raw("define die\nhalt\nend\nreturn 42");
+        assert_eq!(
+            exit, 42,
+            "halt in unused function should not affect main flow"
         );
-        assert_eq!(exit, 42, "halt in unused function should not affect main flow");
     }
 
     // ─── v0.6.0 punch list: File I/O tests ──────────────────────────────────
@@ -2176,7 +2234,10 @@ end
 return ok";
 
         let exit = compile_and_run_raw(source);
-        assert_eq!(exit, 1, "mmap: should return a valid (not MAP_FAILED) pointer");
+        assert_eq!(
+            exit, 1,
+            "mmap: should return a valid (not MAP_FAILED) pointer"
+        );
     }
 
     // ─── Global variables ──────────────────────────────────────────────────
@@ -2184,9 +2245,7 @@ return ok";
     #[test]
     #[cfg(target_os = "linux")]
     fn test_e2e_global_variable() {
-        let exit = compile_and_run_raw(
-            "global counter\nstore 42 into counter\nreturn counter"
-        );
+        let exit = compile_and_run_raw("global counter\nstore 42 into counter\nreturn counter");
         assert_eq!(exit, 42, "global variable store/return");
     }
 
@@ -2194,7 +2253,7 @@ return ok";
     #[cfg(target_os = "linux")]
     fn test_e2e_global_across_functions() {
         let exit = compile_and_run_raw(
-            "global result\nstore 0 into result\ndefine setit\nstore 42 into result\nend\ncall setit\nreturn result"
+            "global result\nstore 0 into result\ndefine setit\nstore 42 into result\nend\ncall setit\nreturn result",
         );
         assert_eq!(exit, 42, "function should modify global variable");
     }
@@ -2203,7 +2262,7 @@ return ok";
     #[cfg(target_os = "linux")]
     fn test_e2e_global_byte_array() {
         let exit = compile_and_run_raw(
-            "global byte buf 256\nstore 99 into buf at 0\nload from buf at 0\nreturn it"
+            "global byte buf 256\nstore 99 into buf at 0\nload from buf at 0\nreturn it",
         );
         assert_eq!(exit, 99, "global byte array indexed access");
     }
@@ -2212,7 +2271,7 @@ return ok";
     #[cfg(target_os = "linux")]
     fn test_e2e_global_long_array() {
         let exit = compile_and_run_raw(
-            "global long table 8\nstore 77 into table at 0\nload from table at 0\nreturn it"
+            "global long table 8\nstore 77 into table at 0\nload from table at 0\nreturn it",
         );
         assert_eq!(exit, 77, "global long array indexed access");
     }
@@ -2221,7 +2280,7 @@ return ok";
     #[cfg(target_os = "linux")]
     fn test_e2e_global_and_local_mixed() {
         let exit = compile_and_run_raw(
-            "global counter\na value\nstore 10 into counter\nstore 32 into value\nadd counter value\nreturn it"
+            "global counter\na value\nstore 10 into counter\nstore 32 into value\nadd counter value\nreturn it",
         );
         assert_eq!(exit, 42, "global + local variable arithmetic");
     }
@@ -2230,7 +2289,7 @@ return ok";
     #[cfg(target_os = "linux")]
     fn test_e2e_global_multiple() {
         let exit = compile_and_run_raw(
-            "global counter\nglobal result\nstore 20 into counter\nstore 22 into result\nadd counter result\nreturn it"
+            "global counter\nglobal result\nstore 20 into counter\nstore 22 into result\nadd counter result\nreturn it",
         );
         assert_eq!(exit, 42, "two global variables added");
     }
@@ -2239,7 +2298,7 @@ return ok";
     #[cfg(target_os = "linux")]
     fn test_e2e_global_in_loop() {
         let exit = compile_and_run_raw(
-            "global counter\nstore 0 into counter\na value\nstore 10 into value\nwhile greater value 0\nadd counter 1\nstore it into counter\nsubtract value 1\nstore it into value\nend\nreturn counter"
+            "global counter\nstore 0 into counter\na value\nstore 10 into value\nwhile greater value 0\nadd counter 1\nstore it into counter\nsubtract value 1\nstore it into value\nend\nreturn counter",
         );
         assert_eq!(exit, 10, "global variable incremented in loop");
     }
@@ -2248,7 +2307,7 @@ return ok";
     #[cfg(target_os = "linux")]
     fn test_e2e_global_function_reads() {
         let exit = compile_and_run_raw(
-            "global counter\nstore 42 into counter\ndefine getit\nreturn counter\nend\ncall getit\nreturn it"
+            "global counter\nstore 42 into counter\ndefine getit\nreturn counter\nend\ncall getit\nreturn it",
         );
         assert_eq!(exit, 42, "function should read global variable");
     }
@@ -2266,7 +2325,11 @@ return ok";
         // Write two source files
         let file1 = dir.join("lib.jstr");
         let file2 = dir.join("main.jstr");
-        std::fs::write(&file1, "define double with int x\nmultiply x 2\nreturn it\nend\n").unwrap();
+        std::fs::write(
+            &file1,
+            "define double with int x\nmultiply x 2\nreturn it\nend\n",
+        )
+        .unwrap();
         std::fs::write(&file2, "call double 21\nreturn it\n").unwrap();
 
         let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -2281,7 +2344,11 @@ return ok";
         let _ = std::fs::remove_file(&file1);
         let _ = std::fs::remove_file(&file2);
 
-        assert_eq!(output.status.code(), Some(42), "multi-file: double(21) = 42");
+        assert_eq!(
+            output.status.code(),
+            Some(42),
+            "multi-file: double(21) = 42"
+        );
     }
 
     // ─── v0.9.0: T-diagram self-hosting verification ────────────────────────
@@ -2298,9 +2365,8 @@ return ok";
     #[test]
     #[cfg(target_os = "linux")]
     fn test_selfhost_variable() {
-        let (exit, _) = self_hosted_compile_and_run(
-            "a result\nstore 99 into result\nreturn result\n"
-        );
+        let (exit, _) =
+            self_hosted_compile_and_run("a result\nstore 99 into result\nreturn result\n");
         assert_eq!(exit, 99, "self-hosted: variable store/return");
     }
 
@@ -2308,7 +2374,7 @@ return ok";
     #[cfg(target_os = "linux")]
     fn test_selfhost_if_else() {
         let (exit, _) = self_hosted_compile_and_run(
-            "a val\nstore 1 into val\nif equal val 1\nreturn 42\nend\nreturn 0\n"
+            "a val\nstore 1 into val\nif equal val 1\nreturn 42\nend\nreturn 0\n",
         );
         assert_eq!(exit, 42, "self-hosted: if-equal should enter body");
     }
@@ -2327,8 +2393,8 @@ return ok";
         let compiler_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("jstar")
             .join("compiler.jstr");
-        let compiler_source = std::fs::read_to_string(&compiler_src)
-            .expect("compiler.jstr not found");
+        let compiler_source =
+            std::fs::read_to_string(&compiler_src).expect("compiler.jstr not found");
 
         // Step 1: jstar1 = Rust bootstrap compiles compiler.jstr
         let jstar1 = build_self_hosted_compiler();
@@ -2337,8 +2403,12 @@ return ok";
         let (code2, elf2, stderr2) =
             run_with_stdin_timeout(&jstar1, compiler_source.as_bytes(), 30);
         assert!(code2.is_some(), "jstar1 timed out compiling compiler.jstr");
-        assert_eq!(code2.unwrap(), 0,
-            "jstar1 failed to compile compiler.jstr (stderr: {})", stderr2);
+        assert_eq!(
+            code2.unwrap(),
+            0,
+            "jstar1 failed to compile compiler.jstr (stderr: {})",
+            stderr2
+        );
         assert!(!elf2.is_empty(), "jstar1 produced empty output");
 
         // Write jstar2 to disk
@@ -2352,8 +2422,12 @@ return ok";
         let (code3, elf3, stderr3) =
             run_with_stdin_timeout(&jstar2_path, compiler_source.as_bytes(), 30);
         assert!(code3.is_some(), "jstar2 timed out compiling compiler.jstr");
-        assert_eq!(code3.unwrap(), 0,
-            "jstar2 failed to compile compiler.jstr (stderr: {})", stderr3);
+        assert_eq!(
+            code3.unwrap(),
+            0,
+            "jstar2 failed to compile compiler.jstr (stderr: {})",
+            stderr3
+        );
         assert!(!elf3.is_empty(), "jstar2 produced empty output");
 
         // Cleanup
@@ -2361,9 +2435,16 @@ return ok";
         let _ = std::fs::remove_file(&jstar2_path);
 
         // Step 4: Verify fixpoint — jstar2 == jstar3 (byte-for-byte)
-        assert_eq!(elf2.len(), elf3.len(),
-            "T-diagram: jstar2 ({} bytes) != jstar3 ({} bytes)", elf2.len(), elf3.len());
-        assert_eq!(elf2, elf3,
-            "T-DIAGRAM FAILED: jstar2 and jstar3 differ! Not a fixpoint.");
+        assert_eq!(
+            elf2.len(),
+            elf3.len(),
+            "T-diagram: jstar2 ({} bytes) != jstar3 ({} bytes)",
+            elf2.len(),
+            elf3.len()
+        );
+        assert_eq!(
+            elf2, elf3,
+            "T-DIAGRAM FAILED: jstar2 and jstar3 differ! Not a fixpoint."
+        );
     }
 }

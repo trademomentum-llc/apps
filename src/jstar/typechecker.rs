@@ -10,10 +10,10 @@
 //!
 //! Monadic error handling: all functions return MorphResult<T>.
 
-use std::collections::HashMap;
-use crate::types::MorphResult;
 use super::grammar::*;
 use super::token_map::*;
+use crate::types::MorphResult;
+use std::collections::HashMap;
 
 /// Symbol table entry — tracks declared variables and their types.
 #[derive(Debug, Clone)]
@@ -68,7 +68,12 @@ impl TypeChecker {
                 })
             }
 
-            JStarStatement::Declare { scope, name, ty, size } => {
+            JStarStatement::Declare {
+                scope,
+                name,
+                ty,
+                size,
+            } => {
                 // Register in symbol table
                 self.symbols.insert(
                     name.clone(),
@@ -87,7 +92,12 @@ impl TypeChecker {
                 })
             }
 
-            JStarStatement::ControlFlow { kind, condition, body, else_body } => {
+            JStarStatement::ControlFlow {
+                kind,
+                condition,
+                body,
+                else_body,
+            } => {
                 let typed_condition = match condition {
                     Some(cond) => Some(Box::new(self.check_statement(cond)?)),
                     None => None,
@@ -125,12 +135,21 @@ impl TypeChecker {
                 })
             }
 
-            JStarStatement::FunctionDef { name, params, body, return_type } => {
+            JStarStatement::FunctionDef {
+                name,
+                params,
+                body,
+                return_type,
+            } => {
                 // Register function parameters as symbols
                 for (pname, pty) in params {
                     self.symbols.insert(
                         pname.clone(),
-                        Symbol { name: pname.clone(), ty: *pty, scope: ScopeKind::Local },
+                        Symbol {
+                            name: pname.clone(),
+                            ty: *pty,
+                            scope: ScopeKind::Local,
+                        },
                     );
                 }
                 let typed_body: Vec<TypedStatement> = body
@@ -167,9 +186,7 @@ impl TypeChecker {
                 };
 
                 // Apply modifiers
-                let ty = modifiers
-                    .iter()
-                    .fold(base_ty, |t, m| t.apply_modifier(*m));
+                let ty = modifiers.iter().fold(base_ty, |t, m| t.apply_modifier(*m));
 
                 Ok(TypedOperand::Variable {
                     name: name.clone(),
@@ -189,9 +206,7 @@ impl TypeChecker {
                 Ok(TypedOperand::Register(*reg, JStarType::Int))
             }
 
-            JStarOperand::StringLiteral(s) => {
-                Ok(TypedOperand::StringLiteral(s.clone()))
-            }
+            JStarOperand::StringLiteral(s) => Ok(TypedOperand::StringLiteral(s.clone())),
 
             JStarOperand::Addressed { mode, target } => {
                 let typed_target = self.check_operand(target)?;
@@ -206,11 +221,7 @@ impl TypeChecker {
     }
 
     /// Infer the result type of an operation from its operands.
-    fn infer_result_type(
-        &self,
-        op: JStarInstruction,
-        operands: &[TypedOperand],
-    ) -> JStarType {
+    fn infer_result_type(&self, op: JStarInstruction, operands: &[TypedOperand]) -> JStarType {
         match op {
             // Comparison operations always produce boolean
             JStarInstruction::Compare
@@ -231,12 +242,7 @@ impl TypeChecker {
             | JStarInstruction::Nop => JStarType::Void,
 
             // For arithmetic and most other ops, use the widest operand type
-            _ => {
-                operands
-                    .first()
-                    .map(|o| o.ty())
-                    .unwrap_or(JStarType::Int)
-            }
+            _ => operands.first().map(|o| o.ty()).unwrap_or(JStarType::Int),
         }
     }
 }
@@ -270,9 +276,7 @@ mod tests {
 
     #[test]
     fn test_check_empty_program() {
-        let prog = JStarProgram {
-            statements: vec![],
-        };
+        let prog = JStarProgram { statements: vec![] };
         let typed = check(&prog).unwrap();
         assert!(typed.statements.is_empty());
     }
@@ -348,10 +352,7 @@ mod tests {
         let prog = JStarProgram {
             statements: vec![JStarStatement::Execute {
                 op: JStarInstruction::Compare,
-                operands: vec![
-                    JStarOperand::Immediate(1),
-                    JStarOperand::Immediate(2),
-                ],
+                operands: vec![JStarOperand::Immediate(1), JStarOperand::Immediate(2)],
             }],
         };
         let typed = check(&prog).unwrap();

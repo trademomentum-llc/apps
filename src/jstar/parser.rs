@@ -13,9 +13,9 @@
 //!
 //! Monadic error handling: all parse functions return MorphResult<T>.
 
-use crate::types::{MorphResult, MorphlexError, TokenVector};
 use super::grammar::*;
 use super::token_map::*;
+use crate::types::{MorphResult, MorphlexError, TokenVector};
 
 /// A positioned token in the parse stream.
 #[derive(Debug, Clone)]
@@ -79,18 +79,16 @@ impl Parser {
 
     /// Parse a single statement. POS of the current token determines the rule.
     fn parse_statement(&mut self) -> MorphResult<JStarStatement> {
-        let current = self.peek().ok_or_else(|| {
-            MorphlexError::AstError("Unexpected end of input".to_string())
-        })?;
+        let current = self
+            .peek()
+            .ok_or_else(|| MorphlexError::AstError("Unexpected end of input".to_string()))?;
 
         match &current.category {
             TokenCategory::Operation(instr) => {
                 let instr = *instr;
                 self.parse_execute(instr)
             }
-            TokenCategory::ControlFlow(FlowKind::ForLoop) => {
-                self.parse_for_loop()
-            }
+            TokenCategory::ControlFlow(FlowKind::ForLoop) => self.parse_for_loop(),
             TokenCategory::ControlFlow(kind) => {
                 let kind = *kind;
                 self.parse_control_flow(kind)
@@ -154,12 +152,15 @@ impl Parser {
         // This prevents bare nouns from the next statement being consumed.
         let mut operands = Vec::new();
         while !self.is_at_end() && self.is_operand_start() {
-            let prev_was_addressed = operands.last().map_or(false, |op| {
-                matches!(op, JStarOperand::Addressed { .. })
-            });
+            let prev_was_addressed = operands
+                .last()
+                .map_or(false, |op| matches!(op, JStarOperand::Addressed { .. }));
             // After an Addressed operand, only continue if next is also Addressing
             if prev_was_addressed {
-                if !matches!(self.peek().map(|t| &t.category), Some(TokenCategory::Addressing(_))) {
+                if !matches!(
+                    self.peek().map(|t| &t.category),
+                    Some(TokenCategory::Addressing(_))
+                ) {
                     break;
                 }
             }
@@ -235,7 +236,12 @@ impl Parser {
             }
         }
 
-        Ok(JStarStatement::ControlFlow { kind, condition, body, else_body })
+        Ok(JStarStatement::ControlFlow {
+            kind,
+            condition,
+            body,
+            else_body,
+        })
     }
 
     /// Parse a declaration starting with a determiner (scope).
@@ -555,10 +561,11 @@ impl Parser {
                         self.advance();
                         // Next token is the parameter name — accept regardless of POS
                         if let Some(name_tok) = self.peek() {
-                            if !matches!(name_tok.category,
+                            if !matches!(
+                                name_tok.category,
                                 TokenCategory::BlockEnd
-                                | TokenCategory::ControlFlow(_)
-                                | TokenCategory::FunctionDef
+                                    | TokenCategory::ControlFlow(_)
+                                    | TokenCategory::FunctionDef
                             ) {
                                 let param_name = name_tok.original.clone();
                                 self.advance();
@@ -586,7 +593,9 @@ impl Parser {
             }
             match self.parse_statement() {
                 Ok(stmt) => body.push(stmt),
-                Err(_) => { self.advance(); }
+                Err(_) => {
+                    self.advance();
+                }
             }
         }
 
@@ -650,7 +659,10 @@ impl Parser {
                 let v = tok.lemma.parse::<i64>().unwrap_or(0);
                 self.advance();
                 v
-            } else if matches!(tok.category, TokenCategory::Data | TokenCategory::Register(_)) {
+            } else if matches!(
+                tok.category,
+                TokenCategory::Data | TokenCategory::Register(_)
+            ) {
                 // Variable or register as end value — wrap as operand
                 let v = tok.original.clone();
                 self.advance();
@@ -658,7 +670,8 @@ impl Parser {
                 // by storing the name and using it below
                 // For now, only support literal end values
                 return Err(MorphlexError::AstError(format!(
-                    "For loop end value must be a literal, got '{}'", v
+                    "For loop end value must be a literal, got '{}'",
+                    v
                 )));
             } else {
                 0
@@ -671,14 +684,21 @@ impl Parser {
         let mut body = Vec::new();
         while !self.is_at_end() {
             if let Some(tok) = self.peek() {
-                if matches!(tok.category, TokenCategory::BlockEnd) {
+                if matches!(tok.category, TokenCategory::BlockEnd)
+                    || matches!(
+                        tok.category,
+                        TokenCategory::Operation(JStarInstruction::Halt)
+                    )
+                {
                     self.advance(); // consume "end"
                     break;
                 }
             }
             match self.parse_statement() {
                 Ok(stmt) => body.push(stmt),
-                Err(_) => { self.advance(); }
+                Err(_) => {
+                    self.advance();
+                }
             }
         }
 
@@ -853,9 +873,10 @@ mod tests {
         // "the dog" → Determiner(the) + Noun(dog) → Declare statement
         // Using "dog" because morphlex reliably POS-tags it as Noun.
         let prog = parse_jstar("the dog");
-        let has_declare = prog.statements.iter().any(|s| {
-            matches!(s, JStarStatement::Declare { .. })
-        });
+        let has_declare = prog
+            .statements
+            .iter()
+            .any(|s| matches!(s, JStarStatement::Declare { .. }));
         assert!(has_declare, "Expected a Declare statement from 'the dog'");
     }
 
