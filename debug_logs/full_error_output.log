@@ -1,0 +1,11 @@
+
+running 1 test
+test jstar::tests::test_t_diagram_fixpoint ... FAILED
+
+failures:
+
+failures:
+    jstar::tests::test_t_diagram_fixpoint
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 348 filtered out; finished in 0.18s
+
