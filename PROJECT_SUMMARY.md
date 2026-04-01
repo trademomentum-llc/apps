@@ -48,37 +48,48 @@
 | Text hash | Diverges ⚠️ | Diverges ⚠️ |
 | Functional | ✅ Yes | ✅ Yes (no data sections) |
 
-**Root Cause Found:** ARCHITECTURAL MISMATCH in data emission phase.
+**Root Cause Found:** CODEGEN BUG in self-hosted compiler's while loop handling.
 
 **Analysis:**
 - jstar2 (Rust bootstrap): 3.9MB with full .text + .data sections ✅
 - jstar3 (jstar2 output): 68KB, functional but missing .data section ⚠️
-- Self-hosted compiler completes but doesn't emit data sections
+- Data collection phase: Causes self-hosted compiler to HANG ❌
 
-**Key Finding (2026-04-01 19:04):**
-Data emission happens in the WRONG PHASE in the self-hosted compiler:
+**Key Finding (2026-04-01 19:38):**
+The self-hosted compiler's CODEGEN for nested while loops has a bug:
 
-| Phase | Rust Implementation | Self-Hosted (Broken) |
-|-------|---------------------|----------------------|
-| 1-2: Tokenize/Parse | ✅ No data emission | ❌ Emits data (wrong!) |
-| 3-4: IR Lowering | ✅ Collects data | ❌ No IR phase |
-| 5-6: Codegen/Link | ✅ Emits data | ✅ Emits .text only |
+| Test | Result |
+|------|--------|
+| Rust bootstrap (no data collection) | ✅ 3.9MB functional |
+| Self-hosted (no data collection) | ✅ 68KB functional |
+| Self-hosted (with data collection) | ❌ Hangs in while loop |
+
+**Root Cause:**
+When the Rust bootstrap compiles compiler.jstr WITH data collection code,
+the generated x86-64 code for the nested while loop enters an infinite loop.
+This is a CODEGEN bug, not a Jasterish source bug.
 
 **Fix Required:**
-Add IR-level data collection phase to compiler.jstr:
-1. Phase 1-2: Tokenize and parse (NO data emission)
-2. Phase 3: Collect strings/globals into datasec
-3. Phase 4-5: Codegen with correct data_vaddr
-4. Phase 6: Append .data section to output
+Debug the self-hosted compiler's codegen for nested while loops:
+```jasterish
+while compare data_copy_idx data_copy_len  # Outer loop
+    load from input at data_copy_src
+    store it into datasec at data_len
+    add data_len 1
+    add data_copy_src 1
+    add data_copy_idx 1  # This increment may not be emitted correctly
+end
+```
 
 **Workaround:**
-Use Rust bootstrap which correctly implements IR-level data collection.
-Produces functional 3.9MB binaries with data sections.
+Use Rust bootstrap WITHOUT data collection phase.
+Produces functional 68KB binaries (no data sections).
 
 **Next Steps:**
-1. Implement IR-level data collection in compiler.jstr
-2. Move data emission from tokenization to IR phase
-3. Re-test self-hosting with proper data sections
+1. Debug codegen for nested while loops
+2. Compare Rust vs self-hosted codegen output
+3. Fix while loop codegen bug
+4. Re-enable data collection phase
 
 ### 🎯 Next Steps for T-Diagram
 
