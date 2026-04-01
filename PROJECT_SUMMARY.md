@@ -43,33 +43,33 @@
 
 | Metric | jstar2 (Rust bootstrap) | jstar3 (jstar2 output) |
 |--------|------------------------|------------------------|
-| Binary size | 3.9 MB | 68 KB (crashes) |
+| Binary size | 3.9 MB | ❌ Hangs (infinite loop) |
 | Data hash | Stable ✅ | N/A |
 | Text hash | Diverges ⚠️ | N/A |
-| Functional | ✅ Yes | ❌ Crashes (SIGSEGV) |
+| Functional | ✅ Yes | ❌ Hangs |
 
-**Root Cause Found:** jstar3 crashes due to PRE-EXISTING BUG in self-hosted compiler.
+**Root Cause Found:** Self-hosted compiler hangs in data emission while loops.
 
 **Analysis:**
 - jstar2 (Rust bootstrap): 3.9MB with full .text + .data sections ✅
-- jstar3 (jstar2 output): 68KB, crashes with SIGSEGV ❌
-- Original jstar_golden.bin ALSO crashes when self-hosting ❌
+- jstar3 (jstar2 output): Hangs with infinite loop ❌
+- Data section fix applied: String literals + globals emission code added
 
-**Key Finding (2026-04-01 16:55):**
-The self-hosted compiler crash is a **PRE-EXISTING BUG** unrelated to data section emission. The crash happens even with the original compiler.jstr code (before any data section fixes were attempted).
+**Fix Applied (2026-04-01 17:11):**
+1. String literal emission: Copy bytes from input to datasec ✅
+2. Global variable emission: Zero-initialize in datasec ✅
+3. data_vaddr calculation: Now includes data_len ✅
 
-**Data Section Fix Status:**
-- String literal emission: DISABLED (needs IR-level handling like Rust)
-- Global variable emission: DISABLED (needs IR-level handling like Rust)
-- datasec size: Increased to 2MB (ready for future fix)
+**Remaining Issue:**
+The self-hosted compiler enters an INFINITE LOOP during data emission. The while loops for copying data (`while compare temp5 temp3`) appear to have a condition that's never satisfied, possibly because temp3 gets overwritten by nested code.
 
 **Workaround:**
-Use Rust bootstrap (`cargo run -- jstar compile`) which produces fully functional binaries with correct data sections.
+Use Rust bootstrap (`cargo run -- jstar compile`) which produces fully functional 3.9MB binaries with correct data sections.
 
 **Next Steps:**
-1. Debug pre-existing self-host crash (unrelated to data sections)
-2. Implement proper IR-level data collection (like Rust implementation)
-3. Re-enable data section emission after crash is fixed
+1. Debug while loop condition (temp3 may be overwritten)
+2. Use dedicated temp variables not used elsewhere
+3. Consider IR-level data collection approach (like Rust)
 
 ### 🎯 Next Steps for T-Diagram
 
