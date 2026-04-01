@@ -30,7 +30,7 @@ global byte text 65536
 global text_len
 
 # .data section (string literals)
-global byte datasec 8192
+global byte datasec 2097152
 global data_len
 
 # ─── Token arrays ────────────────────────────────────────────────────────────
@@ -198,6 +198,7 @@ store 0 into is_in_function
 store 0 into current_func_idx
 store 0 into func_cf_base
 store 0 into call_fixup_count
+store 0 into is_global_decl
 
 # Read from stdin (fd=0) into input buffer, looping until EOF
 store 0 into input_len
@@ -293,6 +294,19 @@ while compare i input_len
                 # Record string token: start=temp2, len=i-temp2
                 subtract i temp2
                 store it into temp3
+
+                # === DATA SECTION FIX: Store string literal into datasec ===
+                # Copy string bytes from input to datasec at data_len
+                store temp2 into temp4  # temp4 = source offset in input
+                store 0 into temp5      # temp5 = byte index
+                while compare temp5 temp3
+                    load from input at temp4
+                    store it into datasec at data_len
+                    add data_len 1
+                    add temp4 1
+                    add temp5 1
+                end
+                # === END DATA SECTION FIX ===
 
                 store temp2 into tok_start at tok_count
                 store temp3 into tok_len at tok_count
@@ -2286,6 +2300,12 @@ while compare tok_idx tok_count
         store 1 into matched
     end
     if compare matched 0
+        # Check if this is a global declaration (for datasec allocation)
+        store 0 into is_global_decl
+        if equal temp 59
+            store 1 into is_global_decl
+        end
+        
         add tok_idx 1
         store it into tok_idx
         load from tok_type at tok_idx
@@ -2347,16 +2367,33 @@ while compare tok_idx tok_count
                 store it into tok_idx
             end
 
-            # Allocate stack space
+            # === DATA SECTION FIX: Handle global declarations ===
+            if compare is_global_decl 1
+                # For global variables, allocate in datasec instead of stack
+                # Zero-initialize space in datasec at data_len
+                store 0 into temp5
+                while compare temp5 temp3
+                    store 0 into datasec at data_len
+                    add data_len 1
+                    add temp5 1
+                end
+                # Record var_offset as datasec offset (not stack offset)
+                subtract data_len temp3
+                store it into var_offset at var_count
+            else
+                # Local variable: allocate on stack
+                add vreg_total_size temp3
+                store it into vreg_total_size
+                subtract 0 vreg_total_size
+                store it into var_offset at var_count
+            end
+            # === END DATA SECTION FIX ===
+            
             if equal temp4 53
                 store 1 into var_type at var_count
             else
                 store 0 into var_type at var_count
             end
-            add vreg_total_size temp3
-            store it into vreg_total_size
-            subtract 0 vreg_total_size
-            store it into var_offset at var_count
             add var_count 1
             store it into var_count
             if greater var_count 512
@@ -2369,10 +2406,27 @@ while compare tok_idx tok_count
             load from tok_len at tok_idx
             store it into var_name_len at var_count
             store 0 into var_type at var_count
-            add vreg_total_size 8
-            store it into vreg_total_size
-            subtract 0 vreg_total_size
-            store it into var_offset at var_count
+            
+            # === DATA SECTION FIX: Handle simple global declarations ===
+            if compare is_global_decl 1
+                # Zero-initialize 8 bytes in datasec
+                store 0 into temp5
+                while compare temp5 8
+                    store 0 into datasec at data_len
+                    add data_len 1
+                    add temp5 1
+                end
+                subtract data_len 8
+                store it into var_offset at var_count
+            else
+                # Local variable: allocate on stack
+                add vreg_total_size 8
+                store it into vreg_total_size
+                subtract 0 vreg_total_size
+                store it into var_offset at var_count
+            end
+            # === END DATA SECTION FIX ===
+            
             add var_count 1
             store it into var_count
             if greater var_count 512
