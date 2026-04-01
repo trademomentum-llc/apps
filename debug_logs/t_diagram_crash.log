@@ -1,0 +1,231 @@
+   Compiling morphlex v0.1.0 (/home/llc/apps)
+warning: unused import: `MorphlexError as MorphError`
+  --> src/rr/agents/base.rs:11:33
+   |
+11 | use crate::types::{MorphResult, MorphlexError as MorphError};
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::collections::HashMap`
+  --> src/rr/agents/base.rs:13:5
+   |
+13 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::hierarchy::*`
+ --> src/rr/comms.rs:7:5
+  |
+7 | use super::hierarchy::*;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::types::MorphResult`
+  --> src/rr/comms.rs:10:5
+   |
+10 | use crate::types::MorphResult;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::rr::mission::*`
+  --> src/rr/daemons.rs:17:5
+   |
+17 | use crate::rr::mission::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MorphlexError as MorphError`
+  --> src/rr/database.rs:12:33
+   |
+12 | use crate::types::{MorphResult, MorphlexError as MorphError};
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Write`
+   --> src/rr/database.rs:497:9
+    |
+497 |     use std::io::Write;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::MorphlexError`
+ --> src/rr/memory.rs:9:5
+  |
+9 | use crate::MorphlexError;
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MorphlexError as MorphError`
+  --> src/rr/orchestrator.rs:12:33
+   |
+12 | use crate::types::{MorphResult, MorphlexError as MorphError};
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: ambiguous glob re-exports
+  --> src/rr/mod.rs:34:9
+   |
+34 | pub use comms::*;
+   |         ^^^^^^^^ the name `ResourceAllocation` in the type namespace is first re-exported here
+...
+39 | pub use mission::*;
+   |         ---------- but the name `ResourceAllocation` in the type namespace is also re-exported here
+   |
+   = note: `#[warn(ambiguous_glob_reexports)]` on by default
+
+warning: unused variable: `sample_idx`
+   --> src/llm/training.rs:371:14
+    |
+371 |         for (sample_idx, sample) in batch.samples.iter().enumerate() {
+    |              ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sample_idx`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `t`
+   --> src/llm/training.rs:379:18
+    |
+379 |             for (t, &target) in sample.targets.iter().enumerate() {
+    |                  ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+   --> src/llm/training.rs:389:18
+    |
+389 |             for (t, &target) in sample.lemma_targets.iter().enumerate() {
+    |                  ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+   --> src/llm/training.rs:397:18
+    |
+397 |             for (t, &target) in sample.pos_targets.iter().enumerate() {
+    |                  ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+   --> src/llm/training.rs:407:18
+    |
+407 |             for (t, &target) in sample.role_targets.iter().enumerate() {
+    |                  ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `model`
+   --> src/llm/training.rs:509:28
+    |
+509 |     pub fn step(&mut self, model: &mut MorphlexLLM, gradients: &[f32]) {
+    |                            ^^^^^ help: if this is intentional, prefix it with an underscore: `_model`
+
+warning: unused variable: `gradients`
+   --> src/llm/training.rs:509:53
+    |
+509 |     pub fn step(&mut self, model: &mut MorphlexLLM, gradients: &[f32]) {
+    |                                                     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_gradients`
+
+warning: variable does not need to be mutable
+   --> src/llm/training.rs:915:13
+    |
+915 |         let mut optimizer = AdamW::default();
+    |             ----^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `d_model`
+   --> src/llm/mod.rs:336:13
+    |
+336 |         let d_model = x[0].len();
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_d_model`
+
+warning: variable does not need to be mutable
+   --> src/llm/mod.rs:457:13
+    |
+457 |         let mut hidden: Vec<f32> = self
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `d_model`
+   --> src/llm/mod.rs:511:13
+    |
+511 |         let d_model = x[0].len();
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_d_model`
+
+warning: unused variable: `search_text`
+   --> src/rr/agents/specialists.rs:903:9
+    |
+903 |     let search_text = if options.case_sensitive {
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_search_text`
+
+warning: variable `offset` is assigned to, but never used
+   --> src/rr/agents/specialists.rs:946:13
+    |
+946 |         let mut offset = 0i32;
+    |             ^^^^^^^^^^
+    |
+    = note: consider using `_offset` instead
+
+warning: unused variable: `orig`
+   --> src/rr/agents/specialists.rs:949:17
+    |
+949 |             let orig = result[pos..pos + pattern.len()].to_string();
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_orig`
+
+warning: value assigned to `offset` is never read
+   --> src/rr/agents/specialists.rs:952:13
+    |
+952 |             offset += replacement.len() as i32 - pattern.len() as i32;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/rr/agents/specialists.rs:1434:13
+     |
+1434 | ...   let mut agent = DataFiltrationAgent::new("filter1".to_string(), "Filter Agent...
+     |           ----^^^^^
+     |           |
+     |           help: remove this `mut`
+
+warning: constant `SCRATCH_REGS` is never used
+  --> src/jstar/codegen.rs:57:7
+   |
+57 | const SCRATCH_REGS: [X86Reg; 7] = [
+   |       ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `lower_statement_to_insts` is never used
+   --> src/jstar/ir.rs:887:8
+    |
+483 | impl Lowerer {
+    | ------------ method in this implementation
+...
+887 |     fn lower_statement_to_insts(&mut self, stmt: &TypedStatement) -> MorphResult<Vec...
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `name` and `scope` are never read
+  --> src/jstar/typechecker.rs:21:5
+   |
+20 | struct Symbol {
+   |        ------ fields in this struct
+21 |     name: String,
+   |     ^^^^
+22 |     ty: JStarType,
+23 |     scope: ScopeKind,
+   |     ^^^^^
+   |
+   = note: `Symbol` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> src/rr/memory.rs:593:24
+    |
+593 |     pub fn get_context(&self, query: &str, recent_count: usize) -> MemoryContext {
+    |                        ^^^^^ the lifetime is elided here           ^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+593 |     pub fn get_context(&self, query: &str, recent_count: usize) -> MemoryContext<'_> {
+    |                                                                                 ++++
+
+warning: `morphlex` (lib test) generated 30 warnings (run `cargo fix --lib -p morphlex --tests` to apply 24 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.08s
+     Running unittests src/lib.rs (target/debug/deps/morphlex-4a207aafa764b1d3)
+
+running 1 test
+test jstar::tests::test_t_diagram_fixpoint ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 348 filtered out; finished in 0.00s
+

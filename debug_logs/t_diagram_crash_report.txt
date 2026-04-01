@@ -1,0 +1,15 @@
+T-DIAGRAM CRASH REPORT
+======================
+
+jstar1 exit code: Some(0)
+jstar1 stderr: 
+jstar2 size: 68186 bytes
+jstar2 exit code: Some(-11)
+jstar2 stderr: 
+jstar3 size: 0 bytes
+
+ANALYSIS:
+- jstar2 crashed with SIGSEGV (exit code -11)
+- This indicates the self-hosted compiler has a bug in codegen
+- Likely causes: incorrect stack frame, bad register allocation, or invalid memory access
+- compiler.jstr Phase 2-6 need debugging
