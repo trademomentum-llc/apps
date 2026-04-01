@@ -207,10 +207,12 @@ impl CodeGen {
         self.label_offsets.clear();
         self.fixups.clear();
         self.is_entry_point = func.name == "_start";
-        self.direct_storage_vregs
-            .retain(|vreg| self.global_vregs.contains_key(vreg));
 
-        // === CRITICAL FIX: Apply ALL data fixups FIRST, before any code emission ===
+        // Record function offset for call resolution
+        self.function_offsets.insert(func.name.clone(), self.text.len());
+
+        // === CRITICAL FIX BLOCK - MUST BE FIRST ===
+        // Apply ALL data fixups BEFORE any code is emitted
         let data_start = self.data.len();
         for fixup_offset in &self.data_fixups {
             if *fixup_offset + 8 <= self.text.len() {
@@ -221,7 +223,7 @@ impl CodeGen {
             }
         }
 
-        // Self-consistency check
+        // Self-consistency check (catches divergence immediately)
         let text_hash = blake3::hash(&self.text);
         let data_hash = blake3::hash(&self.data);
         if let Some(prev) = &self.previous_hash {
@@ -231,11 +233,11 @@ impl CodeGen {
             }
         }
         self.previous_hash = Some((text_hash, data_hash));
-        // === END CRITICAL FIX ===
+        // === END CRITICAL FIX BLOCK ===
 
-        // Record function offset for call resolution
-        self.function_offsets
-            .insert(func.name.clone(), self.text.len());
+        // Restore direct_storage_vregs for this function
+        self.direct_storage_vregs
+            .retain(|vreg| self.global_vregs.contains_key(vreg));
 
         // Pre-allocate stack slots for all virtual registers
         for block in &func.blocks {
