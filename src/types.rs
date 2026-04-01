@@ -149,7 +149,7 @@ pub const TOKEN_VECTOR_SIZE: usize = 12;
 
 /// A deterministic integer-packed token representation.
 /// Each field maps to a Java primitive. The struct IS the object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(C, packed)]
 pub struct TokenVector {
     pub id: i32,       // int    — deterministic BLAKE3-derived identity

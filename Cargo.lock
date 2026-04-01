@@ -894,6 +894,7 @@ dependencies = [
  "rand",
  "scraper",
  "serde",
+ "serde_json",
  "sha3",
  "signature",
  "slh-dsa",
