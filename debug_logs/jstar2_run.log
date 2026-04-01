@@ -204,6 +204,6 @@ Compiling jstar/compiler.jstr -> debug_logs/jstar2.bin (nlp)
 Parse warning: AST construction failed: Expected noun after type modifiers in declaration
 Parse warning: AST construction failed: Expected noun after type modifiers in declaration
 
-thread 'main' (583017) panicked at src/jstar/codegen.rs:232:17:
+thread 'main' (583764) panicked at src/jstar/codegen.rs:232:17:
 jstar2 self-host divergence - see debug_logs/jstar2_crash.log
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

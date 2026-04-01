@@ -1890,23 +1890,9 @@ while compare tok_idx tok_count
             end
         end
 
-        # Top-level return exits process; function return uses ret
+        # Top-level (_start) return exits process via syscall; function return uses ret
         if compare is_in_function 0
-            # mov rax, rdi = 0x48 0x89 0xF8
-            store 0x48 into text at text_len
-            add text_len 1
-            store it into text_len
-            store 0x89 into text at text_len
-            add text_len 1
-            store it into text_len
-            store 0xF8 into text at text_len
-            add text_len 1
-            store it into text_len
-            # ret
-            store 0xC3 into text at text_len
-            add text_len 1
-            store it into text_len
-        else
+            # Top-level (_start): exit via syscall
             # mov eax, 60 (sys_exit) = 0xB8 0x3C 0x00 0x00 0x00
             store 0xB8 into text at text_len
             add text_len 1
@@ -1923,12 +1909,31 @@ while compare tok_idx tok_count
             store 0 into text at text_len
             add text_len 1
             store it into text_len
-
             # syscall = 0x0F 0x05
             store 0x0F into text at text_len
             add text_len 1
             store it into text_len
             store 0x05 into text at text_len
+            add text_len 1
+            store it into text_len
+        else
+            # Function return: epilogue + ret
+            # mov rsp, rbp = 0x48 0x89 0xE5
+            store 0x48 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0x89 into text at text_len
+            add text_len 1
+            store it into text_len
+            store 0xE5 into text at text_len
+            add text_len 1
+            store it into text_len
+            # pop rbp = 0x5D
+            store 0x5D into text at text_len
+            add text_len 1
+            store it into text_len
+            # ret = 0xC3
+            store 0xC3 into text at text_len
             add text_len 1
             store it into text_len
         end
