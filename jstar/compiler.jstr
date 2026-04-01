@@ -121,7 +121,9 @@ a temp
 a temp2
 a temp3
 a temp4
+a temp5
 a matched
+a is_global_decl
 a param_cursor
 a param_type
 a param_size
@@ -295,17 +297,10 @@ while compare i input_len
                 subtract i temp2
                 store it into temp3
 
-                # === DATA SECTION FIX: Store string literal into datasec ===
-                # Copy string bytes from input to datasec at data_len
-                store temp2 into temp4  # temp4 = source offset in input
-                store 0 into temp5      # temp5 = byte index
-                while compare temp5 temp3
-                    load from input at temp4
-                    store it into datasec at data_len
-                    add data_len 1
-                    add temp4 1
-                    add temp5 1
-                end
+                # === DATA SECTION FIX: DISABLED - needs IR-level handling ===
+                # The self-hosted compiler crashes when emitting data during parsing.
+                # Rust implementation collects data in IR phase, emits in codegen phase.
+                # For now, use Rust bootstrap which handles data sections correctly.
                 # === END DATA SECTION FIX ===
 
                 store temp2 into tok_start at tok_count
@@ -2367,26 +2362,10 @@ while compare tok_idx tok_count
                 store it into tok_idx
             end
 
-            # === DATA SECTION FIX: Handle global declarations ===
-            if compare is_global_decl 1
-                # For global variables, allocate in datasec instead of stack
-                # Zero-initialize space in datasec at data_len
-                store 0 into temp5
-                while compare temp5 temp3
-                    store 0 into datasec at data_len
-                    add data_len 1
-                    add temp5 1
-                end
-                # Record var_offset as datasec offset (not stack offset)
-                subtract data_len temp3
-                store it into var_offset at var_count
-            else
-                # Local variable: allocate on stack
-                add vreg_total_size temp3
-                store it into vreg_total_size
-                subtract 0 vreg_total_size
-                store it into var_offset at var_count
-            end
+            # === DATA SECTION FIX: DISABLED - needs IR-level handling ===
+            # The self-hosted compiler crashes when emitting data during parsing.
+            # Rust implementation collects data in IR phase, emits in codegen phase.
+            # For now, use Rust bootstrap which handles data sections correctly.
             # === END DATA SECTION FIX ===
             
             if equal temp4 53
@@ -2407,25 +2386,11 @@ while compare tok_idx tok_count
             store it into var_name_len at var_count
             store 0 into var_type at var_count
             
-            # === DATA SECTION FIX: Handle simple global declarations ===
-            if compare is_global_decl 1
-                # Zero-initialize 8 bytes in datasec
-                store 0 into temp5
-                while compare temp5 8
-                    store 0 into datasec at data_len
-                    add data_len 1
-                    add temp5 1
-                end
-                subtract data_len 8
-                store it into var_offset at var_count
-            else
-                # Local variable: allocate on stack
-                add vreg_total_size 8
-                store it into vreg_total_size
-                subtract 0 vreg_total_size
-                store it into var_offset at var_count
-            end
-            # === END DATA SECTION FIX ===
+            # Local variable: allocate on stack
+            add vreg_total_size 8
+            store it into vreg_total_size
+            subtract 0 vreg_total_size
+            store it into var_offset at var_count
             
             add var_count 1
             store it into var_count

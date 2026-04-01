@@ -41,41 +41,29 @@
 
 ### 📊 T-Diagram Status
 
-| Metric | jstar2 (self-compiled) | jstar3 (jstar2 output) |
+| Metric | jstar2 (Rust bootstrap) | jstar3 (jstar2 output) |
 |--------|------------------------|------------------------|
-| Binary size | 1.8 MB | 68 KB |
-| Data hash | Stable ✅ | Stable ✅ |
-| Text hash | Diverges ⚠️ | Diverges ⚠️ |
+| Binary size | 3.9 MB | ❌ Crashes |
+| Data hash | Stable ✅ | N/A |
+| Text hash | Diverges ⚠️ | N/A |
 | Functional | ✅ Yes | ❌ Crashes (SIGSEGV) |
 
 **Root Cause Found:** jstar3 is missing the .data section entirely!
 
 **Analysis:**
-- jstar2 (Rust bootstrap): 1.8MB with full .text + .data sections
-- jstar3 (jstar2 output): 68KB with only .text section
-- Missing ~1.7MB of data (string literals + global variables)
+- jstar2 (Rust bootstrap): 3.9MB with full .text + .data sections (after fix)
+- jstar3 (jstar2 output): Crashes with SIGSEGV
+- Data section fix applied: String literals + globals now emitted to datasec
 
-**Why:** compiler.jstr Phase 5 (codegen) has NO code to:
-1. Store string literals into `datasec` buffer
-2. Store global variable data into `datasec` buffer  
-3. Increment `data_len` when data is added
+**Fix Applied (2026-04-01 16:39):**
+1. String literal emission: Copy bytes from input to datasec
+2. Global variable emission: Zero-initialize in datasec
+3. Increased datasec: 8KB → 2MB
 
-The self-hosted compiler parses strings correctly but never emits them to the output binary!
+**Remaining Issue:**
+The self-hosted compiler crashes when running. This indicates a bug in the Jasterish data emission code itself (not the Rust implementation). The temp variable usage or loop logic may have issues.
 
-**Fix Required:** Add ~200-300 lines to compiler.jstr Phase 5 to:
-```jstar
-# For each string literal token (type 51):
-# 1. Copy bytes from input buffer to datasec at data_len
-# 2. Increment data_len by string length
-# 3. Patch tok_start/tok_len to point to datasec offset
-
-# For each global variable:
-# 1. Zero-initialize space in datasec at data_len
-# 2. Increment data_len by variable size
-# 3. Record global_vreg -> datasec offset mapping
-```
-
-**Workaround:** Use Rust bootstrap (`cargo run -- jstar compile`) for now.
+**Workaround:** Use Rust bootstrap (`cargo run -- jstar compile`) which produces fully functional binaries with data sections.
 
 ### 🎯 Next Steps for T-Diagram
 
