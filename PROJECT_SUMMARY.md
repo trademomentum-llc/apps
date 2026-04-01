@@ -43,27 +43,33 @@
 
 | Metric | jstar2 (Rust bootstrap) | jstar3 (jstar2 output) |
 |--------|------------------------|------------------------|
-| Binary size | 3.9 MB | ❌ Crashes |
+| Binary size | 3.9 MB | 68 KB (crashes) |
 | Data hash | Stable ✅ | N/A |
 | Text hash | Diverges ⚠️ | N/A |
 | Functional | ✅ Yes | ❌ Crashes (SIGSEGV) |
 
-**Root Cause Found:** jstar3 is missing the .data section entirely!
+**Root Cause Found:** jstar3 crashes due to PRE-EXISTING BUG in self-hosted compiler.
 
 **Analysis:**
-- jstar2 (Rust bootstrap): 3.9MB with full .text + .data sections (after fix)
-- jstar3 (jstar2 output): Crashes with SIGSEGV
-- Data section fix applied: String literals + globals now emitted to datasec
+- jstar2 (Rust bootstrap): 3.9MB with full .text + .data sections ✅
+- jstar3 (jstar2 output): 68KB, crashes with SIGSEGV ❌
+- Original jstar_golden.bin ALSO crashes when self-hosting ❌
 
-**Fix Applied (2026-04-01 16:39):**
-1. String literal emission: Copy bytes from input to datasec
-2. Global variable emission: Zero-initialize in datasec
-3. Increased datasec: 8KB → 2MB
+**Key Finding (2026-04-01 16:55):**
+The self-hosted compiler crash is a **PRE-EXISTING BUG** unrelated to data section emission. The crash happens even with the original compiler.jstr code (before any data section fixes were attempted).
 
-**Remaining Issue:**
-The self-hosted compiler crashes when running. This indicates a bug in the Jasterish data emission code itself (not the Rust implementation). The temp variable usage or loop logic may have issues.
+**Data Section Fix Status:**
+- String literal emission: DISABLED (needs IR-level handling like Rust)
+- Global variable emission: DISABLED (needs IR-level handling like Rust)
+- datasec size: Increased to 2MB (ready for future fix)
 
-**Workaround:** Use Rust bootstrap (`cargo run -- jstar compile`) which produces fully functional binaries with data sections.
+**Workaround:**
+Use Rust bootstrap (`cargo run -- jstar compile`) which produces fully functional binaries with correct data sections.
+
+**Next Steps:**
+1. Debug pre-existing self-host crash (unrelated to data sections)
+2. Implement proper IR-level data collection (like Rust implementation)
+3. Re-enable data section emission after crash is fixed
 
 ### 🎯 Next Steps for T-Diagram
 

@@ -297,10 +297,17 @@ while compare i input_len
                 subtract i temp2
                 store it into temp3
 
-                # === DATA SECTION FIX: DISABLED - needs IR-level handling ===
-                # The self-hosted compiler crashes when emitting data during parsing.
-                # Rust implementation collects data in IR phase, emits in codegen phase.
-                # For now, use Rust bootstrap which handles data sections correctly.
+                # === DATA SECTION FIX: Store string literal into datasec ===
+                # temp4 = source offset in input, temp5 = byte counter
+                store temp2 into temp4
+                store 0 into temp5
+                while compare temp5 temp3
+                    load from input at temp4
+                    store it into datasec at data_len
+                    add data_len 1
+                    add temp4 1
+                    add temp5 1
+                end
                 # === END DATA SECTION FIX ===
 
                 store temp2 into tok_start at tok_count
@@ -2362,12 +2369,27 @@ while compare tok_idx tok_count
                 store it into tok_idx
             end
 
-            # === DATA SECTION FIX: DISABLED - needs IR-level handling ===
-            # The self-hosted compiler crashes when emitting data during parsing.
-            # Rust implementation collects data in IR phase, emits in codegen phase.
-            # For now, use Rust bootstrap which handles data sections correctly.
+            # === DATA SECTION FIX: Global variable - allocate in datasec ===
+            if compare is_global_decl 1
+                # Zero-initialize space in datasec at data_len
+                store 0 into temp5
+                while compare temp5 temp3
+                    store 0 into datasec at data_len
+                    add data_len 1
+                    add temp5 1
+                end
+                # Record var_offset as datasec offset (not stack offset)
+                subtract data_len temp3
+                store it into var_offset at var_count
+            else
+                # Local variable: allocate on stack
+                add vreg_total_size temp3
+                store it into vreg_total_size
+                subtract 0 vreg_total_size
+                store it into var_offset at var_count
+            end
             # === END DATA SECTION FIX ===
-            
+
             if equal temp4 53
                 store 1 into var_type at var_count
             else
@@ -2385,13 +2407,26 @@ while compare tok_idx tok_count
             load from tok_len at tok_idx
             store it into var_name_len at var_count
             store 0 into var_type at var_count
-            
-            # Local variable: allocate on stack
-            add vreg_total_size 8
-            store it into vreg_total_size
-            subtract 0 vreg_total_size
-            store it into var_offset at var_count
-            
+
+            # === DATA SECTION FIX: Simple global - 8 bytes in datasec ===
+            if compare is_global_decl 1
+                store 0 into temp5
+                while compare temp5 8
+                    store 0 into datasec at data_len
+                    add data_len 1
+                    add temp5 1
+                end
+                subtract data_len 8
+                store it into var_offset at var_count
+            else
+                # Local variable: allocate on stack
+                add vreg_total_size 8
+                store it into vreg_total_size
+                subtract 0 vreg_total_size
+                store it into var_offset at var_count
+            end
+            # === END DATA SECTION FIX ===
+
             add var_count 1
             store it into var_count
             if greater var_count 512
@@ -5472,6 +5507,7 @@ store it into entry_point
 a data_vaddr
 add vaddr_base 120
 add it text_len
+add it data_len
 store it into data_vaddr
 
 # ── Build ELF header in output buffer ──
