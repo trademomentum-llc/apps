@@ -878,6 +878,31 @@ while compare i input_len
     end
 end
 
+# === PHASE 2.5: DATA COLLECTION (IR-like) - DISABLED ===
+# String literal collection causes hang in self-hosted compiler
+# The generated code for the while loop has a bug
+# For now, use Rust bootstrap which handles data sections correctly
+#
+# store 0 into i
+# while compare i tok_count
+#     load from tok_type at i
+#     if equal it 51
+#         load from tok_start at i
+#         store it into data_copy_src
+#         load from tok_len at i
+#         store it into data_copy_len
+#         store 0 into data_copy_idx
+#         while compare data_copy_idx data_copy_len
+#             load from input at data_copy_src
+#             store it into datasec at data_len
+#             add data_len 1
+#             add data_copy_src 1
+#             add data_copy_idx 1
+#         end
+#     end
+# end
+# === END DATA COLLECTION ===
+
 # ─── Phase 3: Parse number literals ──────────────────────────────────────────
 # Convert ASCII digit sequences in input to integer values.
 # Store parsed values in a parallel array.

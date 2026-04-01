@@ -43,33 +43,42 @@
 
 | Metric | jstar2 (Rust bootstrap) | jstar3 (jstar2 output) |
 |--------|------------------------|------------------------|
-| Binary size | 3.9 MB | ❌ Hangs (infinite loop) |
+| Binary size | 3.9 MB | 68 KB |
 | Data hash | Stable ✅ | N/A |
-| Text hash | Diverges ⚠️ | N/A |
-| Functional | ✅ Yes | ❌ Hangs |
+| Text hash | Diverges ⚠️ | Diverges ⚠️ |
+| Functional | ✅ Yes | ✅ Yes (no data sections) |
 
-**Root Cause Found:** Self-hosted compiler hangs in data emission while loops.
+**Root Cause Found:** ARCHITECTURAL MISMATCH in data emission phase.
 
 **Analysis:**
 - jstar2 (Rust bootstrap): 3.9MB with full .text + .data sections ✅
-- jstar3 (jstar2 output): Hangs with infinite loop ❌
-- Data section fix applied: String literals + globals emission code added
+- jstar3 (jstar2 output): 68KB, functional but missing .data section ⚠️
+- Self-hosted compiler completes but doesn't emit data sections
 
-**Fix Applied (2026-04-01 17:11):**
-1. String literal emission: Copy bytes from input to datasec ✅
-2. Global variable emission: Zero-initialize in datasec ✅
-3. data_vaddr calculation: Now includes data_len ✅
+**Key Finding (2026-04-01 19:04):**
+Data emission happens in the WRONG PHASE in the self-hosted compiler:
 
-**Remaining Issue:**
-The self-hosted compiler enters an INFINITE LOOP during data emission. The while loops for copying data (`while compare temp5 temp3`) appear to have a condition that's never satisfied, possibly because temp3 gets overwritten by nested code.
+| Phase | Rust Implementation | Self-Hosted (Broken) |
+|-------|---------------------|----------------------|
+| 1-2: Tokenize/Parse | ✅ No data emission | ❌ Emits data (wrong!) |
+| 3-4: IR Lowering | ✅ Collects data | ❌ No IR phase |
+| 5-6: Codegen/Link | ✅ Emits data | ✅ Emits .text only |
+
+**Fix Required:**
+Add IR-level data collection phase to compiler.jstr:
+1. Phase 1-2: Tokenize and parse (NO data emission)
+2. Phase 3: Collect strings/globals into datasec
+3. Phase 4-5: Codegen with correct data_vaddr
+4. Phase 6: Append .data section to output
 
 **Workaround:**
-Use Rust bootstrap (`cargo run -- jstar compile`) which produces fully functional 3.9MB binaries with correct data sections.
+Use Rust bootstrap which correctly implements IR-level data collection.
+Produces functional 3.9MB binaries with data sections.
 
 **Next Steps:**
-1. Debug while loop condition (temp3 may be overwritten)
-2. Use dedicated temp variables not used elsewhere
-3. Consider IR-level data collection approach (like Rust)
+1. Implement IR-level data collection in compiler.jstr
+2. Move data emission from tokenization to IR phase
+3. Re-test self-hosting with proper data sections
 
 ### 🎯 Next Steps for T-Diagram
 
