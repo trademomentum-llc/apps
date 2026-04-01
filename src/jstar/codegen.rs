@@ -155,6 +155,8 @@ struct CodeGen {
     direct_storage_vregs: std::collections::HashSet<VReg>,
     /// Positions in .text where data-section offsets need linker patching.
     data_fixups: Vec<usize>,
+    /// Previous function's text/data hash for self-consistency checking (self-host verification).
+    previous_hash: Option<(blake3::Hash, blake3::Hash)>,
 }
 
 impl CodeGen {
@@ -173,6 +175,7 @@ impl CodeGen {
             global_vregs: std::collections::HashMap::new(),
             direct_storage_vregs: std::collections::HashSet::new(),
             data_fixups: Vec::new(),
+            previous_hash: None,
         }
     }
 
@@ -260,19 +263,13 @@ impl CodeGen {
         // Calculate total stack frame size (16-byte aligned per ABI)
         self.stack_size = ((-self.next_stack_offset) as usize + 15) & !15;
 
-        // Function prologue: push rbp; mov rbp, rsp; sub rsp, frame_size
-        // For large frames (>4096), probe each page to avoid skipping guard pages.
-        self.emit_push_reg(X86Reg::Rbp);
-        self.emit_mov_reg_reg(X86Reg::Rbp, X86Reg::Rsp);
+        // === PATCH START: Defensive stack probing + data fixups + self-check ===
         if self.stack_size > 0 {
             if self.stack_size > 4096 {
-                // Probe each 4096-byte page by touching it
                 let mut remaining = self.stack_size;
                 while remaining > 4096 {
                     self.emit_sub_reg_imm(X86Reg::Rsp, 4096);
-                    // test dword [rsp], 0 -- touch the page (read access)
-                    // Encoded as: mov rax, [rsp] = 0x48 0x8B 0x04 0x24
-                    self.text.extend_from_slice(&[0x48, 0x8B, 0x04, 0x24]);
+                    self.text.extend_from_slice(&[0x48, 0x8B, 0x04, 0x24]); // touch [rsp]
                     remaining -= 4096;
                 }
                 if remaining > 0 {
@@ -282,6 +279,33 @@ impl CodeGen {
                 self.emit_sub_reg_imm(X86Reg::Rsp, self.stack_size as i32);
             }
         }
+
+        // Force ALL data fixups BEFORE any code emission that might use globals
+        let data_start = self.data.len();
+        for fixup_offset in &self.data_fixups {
+            if *fixup_offset + 8 <= self.text.len() {
+                let offset_ptr = &mut self.text[*fixup_offset..*fixup_offset + 8];
+                let current = u64::from_le_bytes(offset_ptr.try_into().unwrap());
+                let fixed = current + data_start as u64;
+                offset_ptr.copy_from_slice(&fixed.to_le_bytes());
+            }
+        }
+
+        // Self-consistency check to catch divergence early
+        let text_hash = blake3::hash(&self.text);
+        let data_hash = blake3::hash(&self.data);
+        if let Some(prev) = &self.previous_hash {
+            if text_hash != prev.0 || data_hash != prev.1 {
+                Self::write_crash_report(&text_hash, &data_hash, prev, "jstar2 divergence detected");
+                panic!("jstar2 self-host divergence - see debug_logs/jstar2_crash.log");
+            }
+        }
+        self.previous_hash = Some((text_hash, data_hash));
+        // === PATCH END ===
+
+        // Function prologue: push rbp; mov rbp, rsp
+        self.emit_push_reg(X86Reg::Rbp);
+        self.emit_mov_reg_reg(X86Reg::Rbp, X86Reg::Rsp);
 
         // For non-_start functions: store incoming arguments from registers to stack
         if !self.is_entry_point {
@@ -1411,6 +1435,33 @@ impl CodeGen {
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
+
+/// Write crash report for debugging self-host divergence
+impl CodeGen {
+    fn write_crash_report(
+        text_hash: &blake3::Hash,
+        data_hash: &blake3::Hash,
+        prev: &(blake3::Hash, blake3::Hash),
+        reason: &str,
+    ) {
+        use std::io::Write;
+        let debug_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("debug_logs");
+        let _ = std::fs::create_dir_all(&debug_dir);
+        
+        let report_path = debug_dir.join("jstar2_crash.log");
+        let mut file = std::fs::File::create(&report_path).unwrap();
+        
+        writeln!(file, "JSTAR2 SELF-HOST DIVERGENCE REPORT").unwrap();
+        writeln!(file, "====================================").unwrap();
+        writeln!(file, "Reason: {}", reason).unwrap();
+        writeln!(file, "Current text hash: {}", text_hash).unwrap();
+        writeln!(file, "Current data hash: {}", data_hash).unwrap();
+        writeln!(file, "Previous text hash: {}", prev.0).unwrap();
+        writeln!(file, "Previous data hash: {}", prev.1).unwrap();
+        writeln!(file, "\nThis indicates the self-hosted compiler produced different output").unwrap();
+        writeln!(file, "than the Rust bootstrap compiler.").unwrap();
+    }
+}
 
 #[cfg(test)]
 mod tests {

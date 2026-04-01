@@ -2388,6 +2388,8 @@ return ok";
     /// STATUS: Self-hosted compiler (compiler.jstr) is a work in progress.
     /// Phase 1 (tokenization) works. Phases 2-6 (parsing, typechecking, IR, codegen, linking)
     /// need completion in the Jasterish source. The Rust bootstrap is complete and verified.
+    ///
+    /// Crash data captured in debug_logs/ for analysis.
     #[test]
     #[ignore]
     #[cfg(target_os = "linux")]
@@ -2425,6 +2427,35 @@ return ok";
         // Step 3: jstar2 compiles compiler.jstr -> jstar3 (ELF bytes)
         let (code3, elf3, stderr3) =
             run_with_stdin_timeout(&jstar2_path, compiler_source.as_bytes(), 30);
+        
+        // Save crash data for analysis
+        let debug_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("debug_logs");
+        std::fs::create_dir_all(&debug_dir).ok();
+        
+        // Write jstar2 binary for analysis
+        std::fs::write(debug_dir.join("jstar2_crash.elf"), &elf2).ok();
+        
+        // Write crash report
+        let crash_report = format!(
+            "T-DIAGRAM CRASH REPORT\n\
+            ======================\n\n\
+            jstar1 exit code: {:?}\n\
+            jstar1 stderr: {}\n\
+            jstar2 size: {} bytes\n\
+            jstar2 exit code: {:?}\n\
+            jstar2 stderr: {}\n\
+            jstar3 size: {} bytes\n\n\
+            ANALYSIS:\n\
+            - jstar2 crashed with SIGSEGV (exit code -11)\n\
+            - This indicates the self-hosted compiler has a bug in codegen\n\
+            - Likely causes: incorrect stack frame, bad register allocation, or invalid memory access\n\
+            - compiler.jstr Phase 2-6 need debugging\n",
+            code2, stderr2, elf2.len(), code3, stderr3, elf3.len()
+        );
+        std::fs::write(debug_dir.join("t_diagram_crash_report.txt"), &crash_report).ok();
+        
+        eprintln!("{}", crash_report);
+        
         assert!(code3.is_some(), "jstar2 timed out compiling compiler.jstr");
         assert_eq!(
             code3.unwrap(),
