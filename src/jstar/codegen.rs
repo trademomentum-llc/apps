@@ -1516,6 +1516,7 @@ mod tests {
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
+                param_vregs: vec![],
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![
@@ -1554,6 +1555,7 @@ mod tests {
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
+                param_vregs: vec![],
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![
@@ -1597,6 +1599,7 @@ mod tests {
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
+                param_vregs: vec![],
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![
