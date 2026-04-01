@@ -1,0 +1,10 @@
+JSTAR2 SELF-HOST DIVERGENCE REPORT
+====================================
+Reason: jstar2 divergence detected
+Current text hash: 8992e520e0060576d2bc4d2ca713b0e371ae0e8432674054e2f4123506b28c37
+Current data hash: b9a12acebb8909db6f08ad3defd2aec59dd7419300b9ce5799255ba620c1c20f
+Previous text hash: af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+Previous data hash: b9a12acebb8909db6f08ad3defd2aec59dd7419300b9ce5799255ba620c1c20f
+
+This indicates the self-hosted compiler produced different output
+than the Rust bootstrap compiler.

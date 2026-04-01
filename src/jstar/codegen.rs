@@ -210,6 +210,29 @@ impl CodeGen {
         self.direct_storage_vregs
             .retain(|vreg| self.global_vregs.contains_key(vreg));
 
+        // === CRITICAL FIX: Apply ALL data fixups FIRST, before any code emission ===
+        let data_start = self.data.len();
+        for fixup_offset in &self.data_fixups {
+            if *fixup_offset + 8 <= self.text.len() {
+                let offset_ptr = &mut self.text[*fixup_offset..*fixup_offset + 8];
+                let current = u64::from_le_bytes(offset_ptr.try_into().unwrap());
+                let fixed = current + data_start as u64;
+                offset_ptr.copy_from_slice(&fixed.to_le_bytes());
+            }
+        }
+
+        // Self-consistency check
+        let text_hash = blake3::hash(&self.text);
+        let data_hash = blake3::hash(&self.data);
+        if let Some(prev) = &self.previous_hash {
+            if text_hash != prev.0 || data_hash != prev.1 {
+                Self::write_crash_report(&text_hash, &data_hash, prev, "jstar2 divergence detected");
+                panic!("jstar2 self-host divergence - see debug_logs/jstar2_crash.log");
+            }
+        }
+        self.previous_hash = Some((text_hash, data_hash));
+        // === END CRITICAL FIX ===
+
         // Record function offset for call resolution
         self.function_offsets
             .insert(func.name.clone(), self.text.len());
@@ -263,7 +286,11 @@ impl CodeGen {
         // Calculate total stack frame size (16-byte aligned per ABI)
         self.stack_size = ((-self.next_stack_offset) as usize + 15) & !15;
 
-        // === PATCH START: Defensive stack probing + data fixups + self-check ===
+        // Function prologue: push rbp; mov rbp, rsp
+        self.emit_push_reg(X86Reg::Rbp);
+        self.emit_mov_reg_reg(X86Reg::Rbp, X86Reg::Rsp);
+        
+        // Stack probing for large frames (>4KB)
         if self.stack_size > 0 {
             if self.stack_size > 4096 {
                 let mut remaining = self.stack_size;
@@ -279,33 +306,6 @@ impl CodeGen {
                 self.emit_sub_reg_imm(X86Reg::Rsp, self.stack_size as i32);
             }
         }
-
-        // Force ALL data fixups BEFORE any code emission that might use globals
-        let data_start = self.data.len();
-        for fixup_offset in &self.data_fixups {
-            if *fixup_offset + 8 <= self.text.len() {
-                let offset_ptr = &mut self.text[*fixup_offset..*fixup_offset + 8];
-                let current = u64::from_le_bytes(offset_ptr.try_into().unwrap());
-                let fixed = current + data_start as u64;
-                offset_ptr.copy_from_slice(&fixed.to_le_bytes());
-            }
-        }
-
-        // Self-consistency check to catch divergence early
-        let text_hash = blake3::hash(&self.text);
-        let data_hash = blake3::hash(&self.data);
-        if let Some(prev) = &self.previous_hash {
-            if text_hash != prev.0 || data_hash != prev.1 {
-                Self::write_crash_report(&text_hash, &data_hash, prev, "jstar2 divergence detected");
-                panic!("jstar2 self-host divergence - see debug_logs/jstar2_crash.log");
-            }
-        }
-        self.previous_hash = Some((text_hash, data_hash));
-        // === PATCH END ===
-
-        // Function prologue: push rbp; mov rbp, rsp
-        self.emit_push_reg(X86Reg::Rbp);
-        self.emit_mov_reg_reg(X86Reg::Rbp, X86Reg::Rsp);
 
         // For non-_start functions: store incoming arguments from registers to stack
         if !self.is_entry_point {
