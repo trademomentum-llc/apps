@@ -2384,8 +2384,12 @@ return ok";
     /// jstar2 = jstar1 compiles compiler.jstr
     /// jstar3 = jstar2 compiles compiler.jstr
     /// Verify: jstar2 == jstar3 (fixpoint)
+    ///
+    /// STATUS: Self-hosted compiler (compiler.jstr) is a work in progress.
+    /// Phase 1 (tokenization) works. Phases 2-6 (parsing, typechecking, IR, codegen, linking)
+    /// need completion in the Jasterish source. The Rust bootstrap is complete and verified.
     #[test]
-    #[ignore] // Still flaky until jstar2 reliably compiles full compiler.jstr without crashing.
+    #[ignore]
     #[cfg(target_os = "linux")]
     fn test_t_diagram_fixpoint() {
         use std::os::unix::fs::PermissionsExt;
