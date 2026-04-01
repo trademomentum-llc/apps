@@ -48,7 +48,34 @@
 | Text hash | Diverges ⚠️ | Diverges ⚠️ |
 | Functional | ✅ Yes | ❌ Crashes (SIGSEGV) |
 
-**Root Cause:** jstar3 crashes because compiler.jstr Phases 2-6 are incomplete. The self-hosted compiler doesn't yet generate fully functional binaries.
+**Root Cause Found:** jstar3 is missing the .data section entirely!
+
+**Analysis:**
+- jstar2 (Rust bootstrap): 1.8MB with full .text + .data sections
+- jstar3 (jstar2 output): 68KB with only .text section
+- Missing ~1.7MB of data (string literals + global variables)
+
+**Why:** compiler.jstr Phase 5 (codegen) has NO code to:
+1. Store string literals into `datasec` buffer
+2. Store global variable data into `datasec` buffer  
+3. Increment `data_len` when data is added
+
+The self-hosted compiler parses strings correctly but never emits them to the output binary!
+
+**Fix Required:** Add ~200-300 lines to compiler.jstr Phase 5 to:
+```jstar
+# For each string literal token (type 51):
+# 1. Copy bytes from input buffer to datasec at data_len
+# 2. Increment data_len by string length
+# 3. Patch tok_start/tok_len to point to datasec offset
+
+# For each global variable:
+# 1. Zero-initialize space in datasec at data_len
+# 2. Increment data_len by variable size
+# 3. Record global_vreg -> datasec offset mapping
+```
+
+**Workaround:** Use Rust bootstrap (`cargo run -- jstar compile`) for now.
 
 ### 🎯 Next Steps for T-Diagram
 

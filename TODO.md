@@ -3,21 +3,48 @@
 ## Immediate Actions
 
 ### T-Diagram Stabilization
-- [ ] Debug jstar3.bin SIGSEGV crash
-  - jstar2_raw.bin: 1.8MB, functional ✅
-  - jstar3.bin: 68KB, crashes ❌
-  - Size difference indicates missing code/data sections
+
+#### ✅ Root Cause Identified (2026-04-01 16:00)
+
+**jstar3 crash cause:** Missing .data section (1.7MB)!
+
+- jstar2 (Rust): 1.8MB with .text + .data
+- jstar3 (jstar2 output): 68KB with .text ONLY
+
+**Missing in compiler.jstr Phase 5:**
+1. String literal emission to `datasec`
+2. Global variable data emission
+3. `data_len` increment logic
+
+#### 🔄 Fix In Progress
+
+- [ ] Add string literal data emission (~100 lines)
+  - Copy string bytes from input to datasec at data_len
+  - Increment data_len by string length
+  - Patch token offsets to point to datasec
   
-- [ ] Compare jstar2 vs jstar3 codegen
-  - Use `objdump -d` to disassemble both
-  - Identify missing instructions in jstar3
+- [ ] Add global variable data emission (~100 lines)
+  - Zero-initialize globals in datasec at data_len
+  - Increment data_len by variable size
+  - Track global_vreg → datasec offset mapping
   
-- [ ] Complete compiler.jstr Phases 2-6
-  - Phase 2: Fix parse warnings for type modifiers
-  - Phase 3: Consider adding type checking pass
-  - Phase 4: Consider adding IR lowering pass
-  - Phase 5: Complete all instruction implementations
-  - Phase 6: Verify ELF linking correctness
+- [ ] Test with simple program first
+  ```
+  return 42
+  ```
+  
+- [ ] Test with string literal
+  ```
+  print "hello"
+  return 0
+  ```
+  
+- [ ] Full self-host test
+  ```bash
+  cargo run -- jstar compile --input jstar/compiler.jstr --output jstar2.bin
+  ./jstar2.bin < jstar/compiler.jstr > jstar3.bin
+  cmp jstar2.bin jstar3.bin  # Should match!
+  ```
 
 ## NNOS Ports (Ready for Commit)
 
