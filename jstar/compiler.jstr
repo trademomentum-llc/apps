@@ -125,9 +125,9 @@ a temp4
 a temp5
 a matched
 a is_global_decl
-a data_copy_len
-a data_copy_src
-a data_copy_idx
+global long data_copy_len
+global long data_copy_src
+global long data_copy_idx
 a param_cursor
 a param_type
 a param_size
@@ -880,21 +880,23 @@ while compare i input_len
 end
 
 # === PHASE 2.5: DATA COLLECTION (IR-like) ===
+# Collect string literals into datasec
 store 0 into i
 while compare i tok_count
     load from tok_type at i
     if equal it 51
+        # String literal: copy bytes from input to datasec
         load from tok_start at i
-        store it into data_copy_src
+        store it into temp4  # temp4 = source offset
         load from tok_len at i
-        store it into data_copy_len
-        store 0 into data_copy_idx
-        while compare data_copy_idx data_copy_len
-            load from input at data_copy_src
+        store it into temp5  # temp5 = length
+        store 0 into temp3   # temp3 = byte counter
+        while compare temp3 temp5
+            load from input at temp4
             store it into datasec at data_len
             add data_len 1
-            add data_copy_src 1
-            add data_copy_idx 1
+            add temp4 1
+            add temp3 1
         end
     end
     add i 1
@@ -1681,21 +1683,25 @@ while compare tok_idx tok_count
                     store 0x85 into text at text_len
                     add text_len 1
                     store it into text_len
-                    bitand op_off 0xFF
+                    store op_off into temp3
+            bitand temp3 0xFF
                     store it into text at text_len
                     add text_len 1
                     store it into text_len
-                    bitand op_off 0xFF00
+                    store op_off into temp3
+            bitand temp3 0xFF00
                     divide it 256
                     store it into text at text_len
                     add text_len 1
                     store it into text_len
-                    bitand op_off 0xFF0000
+                    store op_off into temp3
+            bitand temp3 0xFF0000
                     divide it 65536
                     store it into text at text_len
                     add text_len 1
                     store it into text_len
-                    bitand op_off 0xFF000000
+                    store op_off into temp3
+            bitand temp3 0xFF000000
                     divide it 16777216
                     store it into text at text_len
                     add text_len 1
@@ -1914,21 +1920,25 @@ while compare tok_idx tok_count
                 store 0xBD into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF
+                store op_off into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF00
+                store op_off into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF0000
+                store op_off into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF000000
+                store op_off into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -2133,21 +2143,25 @@ while compare tok_idx tok_count
             store 0xB9 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF
+            store op_val into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF00
+            store op_val into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF0000
+            store op_val into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF000000
+            store op_val into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -2176,21 +2190,25 @@ while compare tok_idx tok_count
             store 0x8D into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -2207,21 +2225,25 @@ while compare tok_idx tok_count
             store 0xB8 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF
+            store op_val into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF00
+            store op_val into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF0000
+            store op_val into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF000000
+            store op_val into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -2241,21 +2263,25 @@ while compare tok_idx tok_count
             store 0x85 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -2399,28 +2425,19 @@ while compare tok_idx tok_count
                 store it into tok_idx
             end
 
-            # === DATA SECTION FIX: DISABLED - emits during parsing (wrong phase) ===
-            # Data emission should happen in IR/codegen phase, not during parsing.
-            # The Rust implementation collects data in IR phase, emits in codegen phase.
-            # For now, use Rust bootstrap which handles data sections correctly.
-            # if compare is_global_decl 1
-            #     store 0 into data_copy_idx
-            #     store temp3 into data_copy_len   # size
-            #     while compare data_copy_idx data_copy_len
-            #         store 0 into datasec at data_len
-            #         add data_len 1
-            #         add data_copy_idx 1
-            #     end
-            #     subtract data_len temp3
-            #     store it into var_offset at var_count
-            # else
+            # Allocate variable: global → datasec, local → stack
+            if compare is_global_decl 1
+                # Global variable: allocate in datasec
+                store data_len into var_offset at var_count
+                add data_len temp3
+                store it into data_len
+            else
                 # Local variable: allocate on stack
                 add vreg_total_size temp3
                 store it into vreg_total_size
                 subtract 0 vreg_total_size
                 store it into var_offset at var_count
-            # end
-            # === END DATA SECTION FIX ===
+            end
 
             if equal temp4 53
                 store 1 into var_type at var_count
@@ -2608,21 +2625,25 @@ while compare tok_idx tok_count
                 store 0xB9 into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF
+                store op_val into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF00
+                store op_val into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF0000
+                store op_val into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF000000
+                store op_val into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -2651,21 +2672,25 @@ while compare tok_idx tok_count
                 store 0x8D into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF
+                store op_off into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF00
+                store op_off into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF0000
+                store op_off into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF000000
+                store op_off into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -2683,21 +2708,25 @@ while compare tok_idx tok_count
             store 0x8D into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -2722,21 +2751,25 @@ while compare tok_idx tok_count
                 store 0xBA into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF
+                store op_val into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF00
+                store op_val into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF0000
+                store op_val into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF000000
+                store op_val into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -2765,21 +2798,25 @@ while compare tok_idx tok_count
                 store 0x95 into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF
+                store op_off into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF00
+                store op_off into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF0000
+                store op_off into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF000000
+                store op_off into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -2848,21 +2885,25 @@ while compare tok_idx tok_count
                 store 0xB9 into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF
+                store op_val into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF00
+                store op_val into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF0000
+                store op_val into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF000000
+                store op_val into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -2891,21 +2932,25 @@ while compare tok_idx tok_count
                 store 0x8D into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF
+                store op_off into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF00
+                store op_off into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF0000
+                store op_off into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF000000
+                store op_off into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -2923,21 +2968,25 @@ while compare tok_idx tok_count
             store 0x85 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -3110,21 +3159,25 @@ while compare tok_idx tok_count
             store 0xB9 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF
+            store op_val into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF00
+            store op_val into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF0000
+            store op_val into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF000000
+            store op_val into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -3151,21 +3204,25 @@ while compare tok_idx tok_count
             store 0x8D into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -3180,21 +3237,25 @@ while compare tok_idx tok_count
             store 0xB8 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF
+            store op_val into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF00
+            store op_val into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF0000
+            store op_val into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF000000
+            store op_val into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -3213,21 +3274,25 @@ while compare tok_idx tok_count
             store 0x85 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -3488,21 +3553,25 @@ while compare tok_idx tok_count
             store 0xB9 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF
+            store op_val into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF00
+            store op_val into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF0000
+            store op_val into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF000000
+            store op_val into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -3529,21 +3598,25 @@ while compare tok_idx tok_count
             store 0x8D into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -3558,21 +3631,25 @@ while compare tok_idx tok_count
             store 0xB8 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF
+            store op_val into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF00
+            store op_val into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF0000
+            store op_val into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF000000
+            store op_val into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -3591,21 +3668,25 @@ while compare tok_idx tok_count
             store 0x85 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -3987,21 +4068,25 @@ while compare tok_idx tok_count
                 store 0xB9 into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF
+                store op_val into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF00
+                store op_val into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF0000
+                store op_val into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF000000
+                store op_val into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -4030,21 +4115,25 @@ while compare tok_idx tok_count
                 store 0x8D into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF
+                store op_off into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF00
+                store op_off into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF0000
+                store op_off into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF000000
+                store op_off into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -4062,21 +4151,25 @@ while compare tok_idx tok_count
             store 0x85 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -4249,21 +4342,25 @@ while compare tok_idx tok_count
             store 0xB9 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF
+            store op_val into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF00
+            store op_val into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF0000
+            store op_val into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF000000
+            store op_val into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -4290,21 +4387,25 @@ while compare tok_idx tok_count
             store 0x8D into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -4319,21 +4420,26 @@ while compare tok_idx tok_count
             store 0xB8 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF
+            # Use temp to avoid modifying op_val
+            store op_val into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF00
+            store op_val into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF0000
+            store op_val into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF000000
+            store op_val into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -4352,21 +4458,25 @@ while compare tok_idx tok_count
             store 0x85 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -4442,21 +4552,25 @@ while compare tok_idx tok_count
         store 0x85 into text at text_len
         add text_len 1
         store it into text_len
-        bitand op_off 0xFF
+        store op_off into temp3
+            bitand temp3 0xFF
         store it into text at text_len
         add text_len 1
         store it into text_len
-        bitand op_off 0xFF00
+        store op_off into temp3
+            bitand temp3 0xFF00
         divide it 256
         store it into text at text_len
         add text_len 1
         store it into text_len
-        bitand op_off 0xFF0000
+        store op_off into temp3
+            bitand temp3 0xFF0000
         divide it 65536
         store it into text at text_len
         add text_len 1
         store it into text_len
-        bitand op_off 0xFF000000
+        store op_off into temp3
+            bitand temp3 0xFF000000
         divide it 16777216
         store it into text at text_len
         add text_len 1
@@ -4693,21 +4807,25 @@ while compare tok_idx tok_count
         store 0xB8 into text at text_len
         add text_len 1
         store it into text_len
-        bitand op_val 0xFF
+        store op_val into temp3
+            bitand temp3 0xFF
         store it into text at text_len
         add text_len 1
         store it into text_len
-        bitand op_val 0xFF00
+        store op_val into temp3
+            bitand temp3 0xFF00
         divide it 256
         store it into text at text_len
         add text_len 1
         store it into text_len
-        bitand op_val 0xFF0000
+        store op_val into temp3
+            bitand temp3 0xFF0000
         divide it 65536
         store it into text at text_len
         add text_len 1
         store it into text_len
-        bitand op_val 0xFF000000
+        store op_val into temp3
+            bitand temp3 0xFF000000
         divide it 16777216
         store it into text at text_len
         add text_len 1
@@ -4938,21 +5056,25 @@ while compare tok_idx tok_count
                 store 0xBF into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF
+                store op_val into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF00
+                store op_val into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF0000
+                store op_val into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF000000
+                store op_val into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -4981,21 +5103,25 @@ while compare tok_idx tok_count
                 store 0xBD into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF
+                store op_off into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF00
+                store op_off into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF0000
+                store op_off into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF000000
+                store op_off into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -5068,21 +5194,25 @@ while compare tok_idx tok_count
                 store 0xBE into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF
+                store op_val into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF00
+                store op_val into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF0000
+                store op_val into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF000000
+                store op_val into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -5113,21 +5243,25 @@ while compare tok_idx tok_count
                 store text_len into rsi_check_pos
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF
+                store op_off into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF00
+                store op_off into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF0000
+                store op_off into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF000000
+                store op_off into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -5200,21 +5334,25 @@ while compare tok_idx tok_count
                 store 0xBA into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF
+                store op_val into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF00
+                store op_val into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF0000
+                store op_val into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_val 0xFF000000
+                store op_val into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -5243,21 +5381,25 @@ while compare tok_idx tok_count
                 store 0x95 into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF
+                store op_off into temp3
+            bitand temp3 0xFF
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF00
+                store op_off into temp3
+            bitand temp3 0xFF00
                 divide it 256
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF0000
+                store op_off into temp3
+            bitand temp3 0xFF0000
                 divide it 65536
                 store it into text at text_len
                 add text_len 1
                 store it into text_len
-                bitand op_off 0xFF000000
+                store op_off into temp3
+            bitand temp3 0xFF000000
                 divide it 16777216
                 store it into text at text_len
                 add text_len 1
@@ -5354,21 +5496,25 @@ while compare tok_idx tok_count
             store 0xB8 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF
+            store op_val into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF00
+            store op_val into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF0000
+            store op_val into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_val 0xFF000000
+            store op_val into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -5388,21 +5534,25 @@ while compare tok_idx tok_count
             store 0x85 into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF
+            store op_off into temp3
+            bitand temp3 0xFF
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF00
+            store op_off into temp3
+            bitand temp3 0xFF00
             divide it 256
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF0000
+            store op_off into temp3
+            bitand temp3 0xFF0000
             divide it 65536
             store it into text at text_len
             add text_len 1
             store it into text_len
-            bitand op_off 0xFF000000
+            store op_off into temp3
+            bitand temp3 0xFF000000
             divide it 16777216
             store it into text at text_len
             add text_len 1
@@ -5527,24 +5677,28 @@ bitand temp 0xFFFFFFF0
 store it into frame_size
 
 # Patch the 4 bytes at frame_patch_offset
-bitand frame_size 0xFF
+store frame_size into temp
+bitand temp 0xFF
 store it into text at frame_patch_offset
 add frame_patch_offset 1
 store it into frame_patch_offset
 
-bitand frame_size 0xFF00
+store frame_size into temp
+bitand temp 0xFF00
 divide it 256
 store it into text at frame_patch_offset
 add frame_patch_offset 1
 store it into frame_patch_offset
 
-bitand frame_size 0xFF0000
+store frame_size into temp
+bitand temp 0xFF0000
 divide it 65536
 store it into text at frame_patch_offset
 add frame_patch_offset 1
 store it into frame_patch_offset
 
-bitand frame_size 0xFF000000
+store frame_size into temp
+bitand temp 0xFF000000
 divide it 16777216
 store it into text at frame_patch_offset
 
