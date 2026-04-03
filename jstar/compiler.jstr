@@ -90,6 +90,7 @@ global fixup_count
 global long cf_kind 256
 global long cf_label_cond 256
 global long cf_label_end 256
+global long cf_else_jmp 256  # Fixup for else's jmp (separate from if's cf_label_end)
 global cf_depth
 
 # Function tracking
@@ -878,29 +879,27 @@ while compare i input_len
     end
 end
 
-# === PHASE 2.5: DATA COLLECTION (IR-like) - DISABLED ===
-# String literal collection causes hang in self-hosted compiler
-# The generated code for the while loop has a bug
-# For now, use Rust bootstrap which handles data sections correctly
-#
-# store 0 into i
-# while compare i tok_count
-#     load from tok_type at i
-#     if equal it 51
-#         load from tok_start at i
-#         store it into data_copy_src
-#         load from tok_len at i
-#         store it into data_copy_len
-#         store 0 into data_copy_idx
-#         while compare data_copy_idx data_copy_len
-#             load from input at data_copy_src
-#             store it into datasec at data_len
-#             add data_len 1
-#             add data_copy_src 1
-#             add data_copy_idx 1
-#         end
-#     end
-# end
+# === PHASE 2.5: DATA COLLECTION (IR-like) ===
+store 0 into i
+while compare i tok_count
+    load from tok_type at i
+    if equal it 51
+        load from tok_start at i
+        store it into data_copy_src
+        load from tok_len at i
+        store it into data_copy_len
+        store 0 into data_copy_idx
+        while compare data_copy_idx data_copy_len
+            load from input at data_copy_src
+            store it into datasec at data_len
+            add data_len 1
+            add data_copy_src 1
+            add data_copy_idx 1
+        end
+    end
+    add i 1
+    store it into i
+end
 # === END DATA COLLECTION ===
 
 # ─── Phase 3: Parse number literals ──────────────────────────────────────────
@@ -3289,6 +3288,7 @@ while compare tok_idx tok_count
 
         # Push control flow stack
         store 0 into cf_kind at cf_depth
+        store 0 into cf_else_jmp at cf_depth  # Initialize else's jmp fixup to 0
         add cf_depth 1
         store it into cf_depth
     end
@@ -3343,9 +3343,10 @@ while compare tok_idx tok_count
         bitand temp4 0xFF000000
         divide it 16777216
         store it into text at cf_patch
-
-        # 3. Replace cf_label_end with the new jmp's fixup position
-        store temp2 into cf_label_end at temp3
+        
+        # FIX: Save else's jmp fixup separately (don't overwrite cf_label_end)
+        # Old buggy code: store temp2 into cf_label_end at temp3
+        store temp2 into cf_else_jmp at temp3
     end
 
     # ── While: while(15) COND A B ... end ──────────────────
@@ -3791,6 +3792,34 @@ while compare tok_idx tok_count
         bitand temp2 0xFF000000
         divide it 16777216
         store it into text at cf_patch
+        
+        # FIX: Also patch else's jmp if it exists (cf_else_jmp != 0)
+        load from cf_else_jmp at cf_depth
+        store it into cf_patch
+        if compare cf_patch 0
+            subtract text_len cf_patch
+            subtract it 4
+            store it into temp2
+            bitand temp2 0xFF
+            store it into text at cf_patch
+            add cf_patch 1
+            store it into cf_patch
+            bitand temp2 0xFF00
+            divide it 256
+            store it into text at cf_patch
+            add cf_patch 1
+            store it into cf_patch
+            bitand temp2 0xFF0000
+            divide it 65536
+            store it into text at cf_patch
+            add cf_patch 1
+            store it into cf_patch
+            bitand temp2 0xFF000000
+            divide it 16777216
+            store it into text at cf_patch
+            # Clear cf_else_jmp for next use
+            store 0 into cf_else_jmp at cf_depth
+        end
     end
 
     # ── Load: load(7) from X [at I] ───────────────────────

@@ -1,0 +1,4 @@
+3931061 /home/llc/apps/jstar_bootstrap_out/jstar1
+  68707 /home/llc/apps/jstar_bootstrap_out/jstar2
+      0 /home/llc/apps/jstar_bootstrap_out/jstar3
+3999768 total
