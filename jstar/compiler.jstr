@@ -1937,9 +1937,9 @@ while compare tok_idx tok_count
         end
 
         # Top-level (_start) return exits process via syscall; function return uses ret
-        if compare is_in_function 0
+        if equal is_in_function 0
             # Top-level (_start): exit via syscall
-            # mov eax, 60 (sys_exit) = 0xB8 0x3C 0x00 0x00 0x00
+            # mov eax, 60 (sys_exit) = 0xB8 0x3C 0x00 0x00 0x00 (5 bytes)
             store 0xB8 into text at text_len
             add text_len 1
             store it into text_len

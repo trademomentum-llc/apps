@@ -1,10 +1,3 @@
-JSTAR2 SELF-HOST DIVERGENCE REPORT
-====================================
-Reason: jstar2 divergence detected
-Current text hash: 9b06137548fc7bdc74739557808065f29da4430445df5176e78d81a6dffd2473
-Current data hash: b9a12acebb8909db6f08ad3defd2aec59dd7419300b9ce5799255ba620c1c20f
-Previous text hash: af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
-Previous data hash: b9a12acebb8909db6f08ad3defd2aec59dd7419300b9ce5799255ba620c1c20f
-
-This indicates the self-hosted compiler produced different output
-than the Rust bootstrap compiler.
+version https://git-lfs.github.com/spec/v1
+oid sha256:83ec4651a8d3c7d76341c7921149b0bd021a035f0a44bad7461468608da891a8
+size 546

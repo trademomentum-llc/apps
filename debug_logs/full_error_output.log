@@ -1,11 +1,3 @@
-
-running 1 test
-test jstar::tests::test_t_diagram_fixpoint ... FAILED
-
-failures:
-
-failures:
-    jstar::tests::test_t_diagram_fixpoint
-
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 348 filtered out; finished in 0.18s
-
+version https://git-lfs.github.com/spec/v1
+oid sha256:4efab18cf56ed937cdfd9db8226d15a8ea3b4782bfd01c094601a4ea8469b022
+size 236

@@ -1,4 +1,3 @@
-3931061 /home/llc/apps/jstar_bootstrap_out/jstar1
-  68707 /home/llc/apps/jstar_bootstrap_out/jstar2
-      0 /home/llc/apps/jstar_bootstrap_out/jstar3
-3999768 total
+version https://git-lfs.github.com/spec/v1
+oid sha256:175633933d194127e4fc3fd001ffb0402c3071c70a0c0ea7239a334a95af31e5
+size 164
