@@ -133,15 +133,39 @@ fn replace_value(val: &mut IrValue, map: &std::collections::HashMap<VReg, i64>) 
 }
 
 fn dead_code_eliminate(func: &mut IrFunction) {
-    let used = collect_used_vregs(func);
-    for block in &mut func.blocks {
-        block.instructions.retain(|inst| {
-            match inst {
-                IrInst::Nop => false,
-                IrInst::Store { .. } | IrInst::StoreIndexed { .. } | IrInst::Call { .. } | IrInst::Syscall { .. } | IrInst::Print { .. } | IrInst::PrintStr { .. } | IrInst::ArrayStore { .. } | IrInst::FileClose { .. } | IrInst::StrCopy { .. } => true,
-                _ => { match inst_dest(inst) { Some(dest) => used.contains(&dest), None => true } }
+    loop {
+        let used = collect_used_vregs(func);
+        let mut changed = false;
+
+        for block in &mut func.blocks {
+            let before_len = block.instructions.len();
+            block.instructions.retain(|inst| {
+                match inst {
+                    IrInst::Nop => false,
+                    IrInst::Store { .. }
+                    | IrInst::StoreIndexed { .. }
+                    | IrInst::Call { .. }
+                    | IrInst::Syscall { .. }
+                    | IrInst::Print { .. }
+                    | IrInst::PrintStr { .. }
+                    | IrInst::ArrayStore { .. }
+                    | IrInst::FileClose { .. }
+                    | IrInst::StrCopy { .. } => true,
+                    _ => match inst_dest(inst) {
+                        Some(dest) => used.contains(&dest),
+                        None => true,
+                    },
+                }
+            });
+
+            if block.instructions.len() != before_len {
+                changed = true;
             }
-        });
+        }
+
+        if !changed {
+            break;
+        }
     }
 }
 
