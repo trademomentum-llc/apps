@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn test_e2e_function_double_print() {
+    fn test_e2e_function_double_prints_result() {
         // Define a function that doubles its parameter, call it, print the result.
         // "define double with integer val" declares one param named "val".
         // "add val val" doubles it. "return it" returns the sum.
