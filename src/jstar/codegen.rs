@@ -733,10 +733,14 @@ impl CodeGen {
                     _ => self.emit_load_value(X86Reg::Rdi, b),
                 }
                 self.emit_load_value(X86Reg::Rcx, len);
+                self.text.extend_from_slice(&[0x48, 0x85, 0xC9]); // test rcx, rcx
+                self.text.extend_from_slice(&[0x74, 0x0B]); // jz len_zero
                 self.text.push(0xFC); // cld
                 self.text.extend_from_slice(&[0xF3, 0xA6]); // repe cmpsb
                 self.text.extend_from_slice(&[0x0F, 0x94, 0xC0]); // sete al
                 self.text.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
+                self.text.extend_from_slice(&[0xEB, 0x0A]); // jmp done
+                self.emit_mov_reg_imm64(X86Reg::Rax, 1); // len_zero: zero-length strings compare equal
                 let offset = self.vreg_offset(*dest);
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
