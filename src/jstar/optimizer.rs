@@ -174,6 +174,8 @@ fn dead_code_eliminate(func: &mut IrFunction) {
                     | IrInst::FileRead { .. }
                     | IrInst::FileOpen { .. }
                     | IrInst::FileRead { .. }
+                    | IrInst::FileOpen { .. }
+                    | IrInst::FileRead { .. }
                     | IrInst::FileClose { .. }
                     | IrInst::StrCopy { .. } => true,
                     _ => match inst_dest(inst) {
