@@ -81,10 +81,14 @@ fn copy_propagate(block: &mut BasicBlock) {
     use std::collections::HashMap;
 fn inst_dest(inst: &IrInst) -> Option<VReg> {
     match inst {
-        IrInst::BinOp { dest, .. } => Some(*dest),
-        IrInst::UnaryOp { dest, .. } => Some(*dest),
-        IrInst::Copy { dest, .. } => Some(*dest),
-        IrInst::Load { dest, .. } => Some(*dest),
+        IrInst::BinOp { dest, .. }
+        | IrInst::UnaryOp { dest, .. }
+        | IrInst::Copy { dest, .. }
+        | IrInst::Load { dest, .. }
+        | IrInst::Compare { dest, .. }
+        | IrInst::Call { dest, .. }
+        | IrInst::Syscall { dest, .. }
+        | IrInst::AddressOf { dest, .. } => Some(*dest),
         _ => None,
     }
 }
