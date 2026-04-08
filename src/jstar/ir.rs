@@ -9,7 +9,7 @@
 //! Virtual register IDs are u32 (unlimited supply, allocated by codegen).
 
 use std::collections::HashMap;
-use crate::types::MorphResult;
+use crate::types::{MorphResult, MorphlexError};
 use super::grammar::*;
 use super::token_map::{JStarInstruction, FlowKind, AddrMode, ScopeKind};
 
@@ -332,8 +332,6 @@ impl IrFunction {
     /// can never encounter a missing label.
     pub fn validate_cfg(&self) -> MorphResult<()> {
         use std::collections::HashSet;
-        use crate::types::MorphlexError;
-
         let mut seen = HashSet::new();
         for block in &self.blocks {
             if !seen.insert(&block.label) {
@@ -1385,9 +1383,15 @@ impl Lowerer {
 
             // String operations
             JStarInstruction::StrCmp => {
-                let a = self.lower_operand(operands.first().unwrap_or(&TypedOperand::Immediate(0, JStarType::Int)))?;
-                let b = self.lower_operand(operands.get(1).unwrap_or(&TypedOperand::Immediate(0, JStarType::Int)))?;
-                let len = self.lower_operand(operands.get(2).unwrap_or(&TypedOperand::Immediate(0, JStarType::Int)))?;
+                let a = operands.first()
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCmp requires 3 operands: a, b, len (missing a)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
+                let b = operands.get(1)
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCmp requires 3 operands: a, b, len (missing b)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
+                let len = operands.get(2)
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCmp requires 3 operands: a, b, len (missing len)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
                 insts.push(IrInst::StrCmp { dest, a, b, len });
             }
             JStarInstruction::StrLen => {
@@ -1396,9 +1400,15 @@ impl Lowerer {
             }
             JStarInstruction::StrCopy => {
                 produces_result = false;
-                let dst = self.lower_operand(operands.first().unwrap_or(&TypedOperand::Immediate(0, JStarType::Int)))?;
-                let src = self.lower_operand(operands.get(1).unwrap_or(&TypedOperand::Immediate(0, JStarType::Int)))?;
-                let len = self.lower_operand(operands.get(2).unwrap_or(&TypedOperand::Immediate(0, JStarType::Int)))?;
+                let dst = operands.first()
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCopy requires 3 operands: dst, src, len (missing dst)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
+                let src = operands.get(1)
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCopy requires 3 operands: dst, src, len (missing src)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
+                let len = operands.get(2)
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCopy requires 3 operands: dst, src, len (missing len)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
                 insts.push(IrInst::StrCopy { dst, src, len });
             }
 

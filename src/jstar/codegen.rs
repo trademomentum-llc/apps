@@ -269,14 +269,20 @@ impl CodeGen {
                 X86Reg::Rcx, X86Reg::R8, X86Reg::R9,
             ];
             let mut param_vregs: Vec<VReg> = Vec::new();
-            for block in &func.blocks {
-                for inst in &block.instructions {
+            if let Some(entry_block) = func.blocks.first() {
+                for inst in &entry_block.instructions {
                     if let IrInst::Alloca { dest, .. } = inst {
                         if param_vregs.len() < func.param_count {
                             param_vregs.push(*dest);
                         }
                     }
                 }
+            }
+            if param_vregs.len() != func.param_count {
+                return Err(MorphlexError::CodegenError(format!(
+                    "function '{}': expected {} parameter allocas in entry block, found {}",
+                    func.name, func.param_count, param_vregs.len()
+                )));
             }
             for (i, vreg) in param_vregs.iter().enumerate() {
                 if i >= arg_regs.len() { break; }
@@ -720,27 +726,58 @@ impl CodeGen {
             IrInst::StrCmp { dest, a, b, len } => {
                 match a {
                     IrValue::Reg(vreg) => {
-                        let off = self.vreg_offset(*vreg);
-                        self.emit_lea_rbp_offset(X86Reg::Rsi, off);
+                        if self.is_global_vreg(*vreg) {
+                            let data_offset = self.global_vregs[vreg];
+                            self.emit_load_global_addr(data_offset);
+                            self.emit_mov_reg_reg(X86Reg::Rsi, X86Reg::Rax);
+                        } else {
+                            let off = self.vreg_offset(*vreg);
+                            self.emit_lea_rbp_offset(X86Reg::Rsi, off);
+                        }
                     }
                     _ => self.emit_load_value(X86Reg::Rsi, a),
                 }
                 match b {
                     IrValue::Reg(vreg) => {
-                        let off = self.vreg_offset(*vreg);
-                        self.emit_lea_rbp_offset(X86Reg::Rdi, off);
+                        if self.is_global_vreg(*vreg) {
+                            let data_offset = self.global_vregs[vreg];
+                            self.emit_load_global_addr(data_offset);
+                            self.emit_mov_reg_reg(X86Reg::Rdi, X86Reg::Rax);
+                        } else {
+                            let off = self.vreg_offset(*vreg);
+                            self.emit_lea_rbp_offset(X86Reg::Rdi, off);
+                        }
                     }
                     _ => self.emit_load_value(X86Reg::Rdi, b),
                 }
                 self.emit_load_value(X86Reg::Rcx, len);
                 self.text.extend_from_slice(&[0x48, 0x85, 0xC9]); // test rcx, rcx
-                self.text.extend_from_slice(&[0x74, 0x0B]); // jz len_zero
+                self.text.extend_from_slice(&[0x74, 0x00]); // jz len_zero (patched below)
+                let jz_disp_pos = self.text.len() - 1;
                 self.text.push(0xFC); // cld
                 self.text.extend_from_slice(&[0xF3, 0xA6]); // repe cmpsb
                 self.text.extend_from_slice(&[0x0F, 0x94, 0xC0]); // sete al
                 self.text.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
-                self.text.extend_from_slice(&[0xEB, 0x0A]); // jmp done
+                self.text.extend_from_slice(&[0xEB, 0x00]); // jmp done (patched below)
+                let jmp_done_disp_pos = self.text.len() - 1;
+                let len_zero_pos = self.text.len();
                 self.emit_mov_reg_imm64(X86Reg::Rax, 1); // len_zero: zero-length strings compare equal
+                let done_pos = self.text.len();
+
+                let jz_rel = len_zero_pos as isize - (jz_disp_pos as isize + 1);
+                assert!(
+                    jz_rel >= i8::MIN as isize && jz_rel <= i8::MAX as isize,
+                    "StrCmp jz len_zero out of rel8 range"
+                );
+                self.text[jz_disp_pos] = jz_rel as i8 as u8;
+
+                let jmp_done_rel = done_pos as isize - (jmp_done_disp_pos as isize + 1);
+                assert!(
+                    jmp_done_rel >= i8::MIN as isize && jmp_done_rel <= i8::MAX as isize,
+                    "StrCmp jmp done out of rel8 range"
+                );
+                self.text[jmp_done_disp_pos] = jmp_done_rel as i8 as u8;
+
                 let offset = self.vreg_offset(*dest);
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
@@ -748,8 +785,14 @@ impl CodeGen {
             IrInst::StrLen { dest, addr } => {
                 match addr {
                     IrValue::Reg(vreg) => {
-                        let off = self.vreg_offset(*vreg);
-                        self.emit_lea_rbp_offset(X86Reg::Rdi, off);
+                        if self.is_global_vreg(*vreg) {
+                            let data_offset = self.global_vregs[vreg];
+                            self.emit_load_global_addr(data_offset);
+                            self.emit_mov_reg_reg(X86Reg::Rdi, X86Reg::Rax);
+                        } else {
+                            let off = self.vreg_offset(*vreg);
+                            self.emit_lea_rbp_offset(X86Reg::Rdi, off);
+                        }
                     }
                     _ => self.emit_load_value(X86Reg::Rdi, addr),
                 }
@@ -767,15 +810,27 @@ impl CodeGen {
             IrInst::StrCopy { dst, src, len } => {
                 match dst {
                     IrValue::Reg(vreg) => {
-                        let off = self.vreg_offset(*vreg);
-                        self.emit_lea_rbp_offset(X86Reg::Rdi, off);
+                        if self.is_global_vreg(*vreg) {
+                            let data_offset = self.global_vregs[vreg];
+                            self.emit_load_global_addr(data_offset);
+                            self.emit_mov_reg_reg(X86Reg::Rdi, X86Reg::Rax);
+                        } else {
+                            let off = self.vreg_offset(*vreg);
+                            self.emit_lea_rbp_offset(X86Reg::Rdi, off);
+                        }
                     }
                     _ => self.emit_load_value(X86Reg::Rdi, dst),
                 }
                 match src {
                     IrValue::Reg(vreg) => {
-                        let off = self.vreg_offset(*vreg);
-                        self.emit_lea_rbp_offset(X86Reg::Rsi, off);
+                        if self.is_global_vreg(*vreg) {
+                            let data_offset = self.global_vregs[vreg];
+                            self.emit_load_global_addr(data_offset);
+                            self.emit_mov_reg_reg(X86Reg::Rsi, X86Reg::Rax);
+                        } else {
+                            let off = self.vreg_offset(*vreg);
+                            self.emit_lea_rbp_offset(X86Reg::Rsi, off);
+                        }
                     }
                     _ => self.emit_load_value(X86Reg::Rsi, src),
                 }

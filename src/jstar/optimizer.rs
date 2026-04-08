@@ -7,7 +7,6 @@
 
 use std::collections::HashSet;
 use super::ir::*;
-use super::grammar::JStarType;
 
 /// Run all optimization passes on the IR program (mutates in place).
 pub fn optimize(program: &mut IrProgram) {
@@ -38,10 +37,12 @@ fn constant_fold(block: &mut BasicBlock) {
                     IrBinOp::Mul => Some(l.wrapping_mul(r)),
                     IrBinOp::Div => match r {
                         0 => None,
+                        -1 if l == i64::MIN => None,
                         _ => Some(l.wrapping_div(r)),
                     },
                     IrBinOp::Mod => match r {
                         0 => None,
+                        -1 if l == i64::MIN => None,
                         _ => Some(l.wrapping_rem(r)),
                     },
                     IrBinOp::And => Some(l & r),
@@ -61,16 +62,6 @@ fn constant_fold(block: &mut BasicBlock) {
                 ty,
             };
         }
-    }
-}
-
-fn inst_dest(inst: &IrInst) -> Option<VReg> {
-    match inst {
-        IrInst::BinOp { dest, .. } => Some(*dest),
-        IrInst::UnaryOp { dest, .. } => Some(*dest),
-        IrInst::Copy { dest, .. } => Some(*dest),
-        IrInst::Load { dest, .. } => Some(*dest),
-        _ => None,
     }
 }
 
@@ -149,6 +140,8 @@ fn dead_code_eliminate(func: &mut IrFunction) {
                     | IrInst::Print { .. }
                     | IrInst::PrintStr { .. }
                     | IrInst::ArrayStore { .. }
+                    | IrInst::FileOpen { .. }
+                    | IrInst::FileRead { .. }
                     | IrInst::FileClose { .. }
                     | IrInst::StrCopy { .. } => true,
                     _ => match inst_dest(inst) {
@@ -230,6 +223,7 @@ fn collect_vreg(val: &IrValue, used: &mut HashSet<VReg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jstar::grammar::JStarType;
     use std::collections::HashMap;
 
     fn make_program(instructions: Vec<IrInst>, terminator: Terminator) -> IrProgram {
