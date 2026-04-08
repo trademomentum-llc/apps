@@ -755,13 +755,31 @@ impl CodeGen {
                 self.text.extend_from_slice(&[0x74, 0x00]); // jz len_zero (patched below)
                 self.emit_load_value(X86Reg::Rcx, len);
                 self.text.extend_from_slice(&[0x48, 0x85, 0xC9]); // test rcx, rcx
-                self.text.extend_from_slice(&[0x74, 0x0B]); // jz len_zero
+                self.text.extend_from_slice(&[0x74, 0x00]); // jz len_zero (patched below)
+                let jz_disp_pos = self.text.len() - 1;
                 self.text.push(0xFC); // cld
                 self.text.extend_from_slice(&[0xF3, 0xA6]); // repe cmpsb
                 self.text.extend_from_slice(&[0x0F, 0x94, 0xC0]); // sete al
                 self.text.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
-                self.text.extend_from_slice(&[0xEB, 0x0A]); // jmp done
+                self.text.extend_from_slice(&[0xEB, 0x00]); // jmp done (patched below)
+                let jmp_done_disp_pos = self.text.len() - 1;
+                let len_zero_pos = self.text.len();
                 self.emit_mov_reg_imm64(X86Reg::Rax, 1); // len_zero: zero-length strings compare equal
+                let done_pos = self.text.len();
+
+                let jz_rel = len_zero_pos as isize - (jz_disp_pos as isize + 1);
+                assert!(
+                    jz_rel >= i8::MIN as isize && jz_rel <= i8::MAX as isize,
+                    "StrCmp jz len_zero out of rel8 range"
+                );
+                self.text[jz_disp_pos] = jz_rel as i8 as u8;
+
+                let jmp_done_rel = done_pos as isize - (jmp_done_disp_pos as isize + 1);
+                assert!(
+                    jmp_done_rel >= i8::MIN as isize && jmp_done_rel <= i8::MAX as isize,
+                    "StrCmp jmp done out of rel8 range"
+                );
+                self.text[jmp_done_disp_pos] = jmp_done_rel as i8 as u8;
                 self.text.extend_from_slice(&[0xEB, 0x00]); // jmp done (patched below)
                 let jmp_done_disp_pos = self.text.len() - 1;
                 let len_zero_pos = self.text.len();
