@@ -37,11 +37,13 @@ fn constant_fold(block: &mut BasicBlock) {
                     IrBinOp::Mul => Some(l.wrapping_mul(r)),
                     IrBinOp::Div => match r {
                         0 => None,
+                        0 => None,
                         -1 if l == i64::MIN => None,
                         _ => Some(l.wrapping_div(r)),
                     },
                     IrBinOp::Mod => match r {
                         0 => None,
+                        -1 if l == i64::MIN => None,
                         -1 if l == i64::MIN => None,
                         _ => Some(l.wrapping_rem(r)),
                     },
