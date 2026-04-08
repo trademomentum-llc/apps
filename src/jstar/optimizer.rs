@@ -97,6 +97,18 @@ fn inst_dest(inst: &IrInst) -> Option<VReg> {
 
 fn copy_propagate(block: &mut BasicBlock) {
     use std::collections::HashMap;
+fn inst_dest(inst: &IrInst) -> Option<VReg> {
+    match inst {
+        IrInst::BinOp { dest, .. } => Some(*dest),
+        IrInst::UnaryOp { dest, .. } => Some(*dest),
+        IrInst::Copy { dest, .. } => Some(*dest),
+        IrInst::Load { dest, .. } => Some(*dest),
+        _ => None,
+    }
+}
+
+fn copy_propagate(block: &mut BasicBlock) {
+    use std::collections::HashMap;
     let mut imm_map: HashMap<VReg, i64> = HashMap::new();
     for inst in &mut block.instructions {
         replace_values_in_inst(inst, &imm_map);
