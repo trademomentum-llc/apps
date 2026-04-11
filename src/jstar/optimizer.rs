@@ -37,13 +37,11 @@ fn constant_fold(block: &mut BasicBlock) {
                     IrBinOp::Mul => Some(l.wrapping_mul(r)),
                     IrBinOp::Div => match r {
                         0 => None,
-                        0 => None,
                         -1 if l == i64::MIN => None,
                         _ => Some(l.wrapping_div(r)),
                     },
                     IrBinOp::Mod => match r {
                         0 => None,
-                        -1 if l == i64::MIN => None,
                         -1 if l == i64::MIN => None,
                         _ => Some(l.wrapping_rem(r)),
                     },
@@ -64,46 +62,6 @@ fn constant_fold(block: &mut BasicBlock) {
                 ty,
             };
         }
-    }
-}
-
-fn copy_propagate(block: &mut BasicBlock) {
-    use std::collections::HashMap;
-fn inst_dest(inst: &IrInst) -> Option<VReg> {
-    match inst {
-        IrInst::BinOp { dest, .. } => Some(*dest),
-        IrInst::UnaryOp { dest, .. } => Some(*dest),
-        IrInst::Copy { dest, .. } => Some(*dest),
-        IrInst::Load { dest, .. } => Some(*dest),
-        _ => None,
-    }
-}
-
-fn copy_propagate(block: &mut BasicBlock) {
-    use std::collections::HashMap;
-fn inst_dest(inst: &IrInst) -> Option<VReg> {
-    match inst {
-        IrInst::BinOp { dest, .. }
-        | IrInst::UnaryOp { dest, .. }
-        | IrInst::Copy { dest, .. }
-        | IrInst::Load { dest, .. }
-        | IrInst::Compare { dest, .. }
-        | IrInst::Call { dest, .. }
-        | IrInst::Syscall { dest, .. }
-        | IrInst::AddressOf { dest, .. } => Some(*dest),
-        _ => None,
-    }
-}
-
-fn copy_propagate(block: &mut BasicBlock) {
-    use std::collections::HashMap;
-fn inst_dest(inst: &IrInst) -> Option<VReg> {
-    match inst {
-        IrInst::BinOp { dest, .. } => Some(*dest),
-        IrInst::UnaryOp { dest, .. } => Some(*dest),
-        IrInst::Copy { dest, .. } => Some(*dest),
-        IrInst::Load { dest, .. } => Some(*dest),
-        _ => None,
     }
 }
 
@@ -182,10 +140,6 @@ fn dead_code_eliminate(func: &mut IrFunction) {
                     | IrInst::Print { .. }
                     | IrInst::PrintStr { .. }
                     | IrInst::ArrayStore { .. }
-                    | IrInst::FileOpen { .. }
-                    | IrInst::FileRead { .. }
-                    | IrInst::FileOpen { .. }
-                    | IrInst::FileRead { .. }
                     | IrInst::FileOpen { .. }
                     | IrInst::FileRead { .. }
                     | IrInst::FileClose { .. }
