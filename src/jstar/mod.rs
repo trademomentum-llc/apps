@@ -14,6 +14,7 @@ pub mod codegen;
 pub mod grammar;
 pub mod ir;
 pub mod linker;
+pub mod optimizer;
 pub mod parser;
 pub mod token_map;
 pub mod typechecker;
@@ -345,7 +346,8 @@ pub fn compile_source_raw(source: &str, output_path: &Path) -> MorphResult<()> {
     let (lemmas, vectors) = tokenize_jstar_raw(source)?;
     let ast = parser::parse(&lemmas, &lemmas, &vectors)?;
     let typed_ast = typechecker::check(&ast)?;
-    let ir_program = ir::lower(&typed_ast)?;
+    let mut ir_program = ir::lower(&typed_ast)?;
+    optimizer::optimize(&mut ir_program);
     let machine_code = codegen::generate(&ir_program)?;
     linker::link(&machine_code, output_path)?;
     Ok(())
@@ -389,7 +391,10 @@ pub fn compile_source(source: &str, output_path: &Path) -> MorphResult<()> {
     let typed_ast = typechecker::check(&ast)?;
 
     // Phase 4: Lower to IR
-    let ir_program = ir::lower(&typed_ast)?;
+    let mut ir_program = ir::lower(&typed_ast)?;
+
+    // Phase 4.5: Optimize IR
+    optimizer::optimize(&mut ir_program);
 
     // Phase 5: Generate x86-64 machine code
     let machine_code = codegen::generate(&ir_program)?;
@@ -859,6 +864,19 @@ mod tests {
             "define adder with integer left integer right\nadd left right\nreturn it\nend\ncall adder 17 25\nreturn it",
         );
         assert_eq!(exit, 42, "function with args: 17 + 25 = 42");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_function_double_prints_result() {
+        // Define a function that doubles its parameter, call it, print the result.
+        // "define double with integer val" declares one param named "val".
+        // "add val val" doubles it. "return it" returns the sum.
+        // Top-level: declare result, call double 5, store into result, print, halt.
+        let stdout = compile_and_capture(
+            "define double with integer val\nadd val val\nreturn it\nend\na result\ncall double 5\nstore it into result\nprint result\nhalt 0"
+        );
+        assert_eq!(stdout.trim(), "10", "double(5) should print 10");
     }
 
     // ── Comparison operator expression tests ─────────────────────────────
@@ -2481,5 +2499,73 @@ return ok";
             elf2, elf3,
             "T-DIAGRAM FAILED: jstar2 and jstar3 differ! Not a fixpoint."
         );
+    }
+
+
+    // ── String operation tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_strcmp_keyword_resolves() {
+        let tv = TokenVector {
+            id: crate::vectorizer::hash_to_i32("strcmp"),
+            lemma_id: 0,
+            pos: 1,
+            role: 0,
+            morph: 0,
+        };
+        match resolve(&tv, "strcmp") {
+            TokenCategory::Operation(JStarInstruction::StrCmp) => {}
+            other => panic!("Expected Operation(StrCmp), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_strlen_keyword_resolves() {
+        let tv = TokenVector {
+            id: crate::vectorizer::hash_to_i32("strlen"),
+            lemma_id: 0,
+            pos: 1,
+            role: 0,
+            morph: 0,
+        };
+        match resolve(&tv, "strlen") {
+            TokenCategory::Operation(JStarInstruction::StrLen) => {}
+            other => panic!("Expected Operation(StrLen), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_strcopy_keyword_resolves() {
+        let tv = TokenVector {
+            id: crate::vectorizer::hash_to_i32("strcopy"),
+            lemma_id: 0,
+            pos: 1,
+            role: 0,
+            morph: 0,
+        };
+        match resolve(&tv, "strcopy") {
+            TokenCategory::Operation(JStarInstruction::StrCopy) => {}
+            other => panic!("Expected Operation(StrCopy), got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_strcmp_equal() {
+        // Use arrays with non-numeric names (NLP splits "buf1" into "buf" + "1")
+        let exit = compile_and_run(
+            "array 2 alpha\narray 2 beta\nstore 65 into alpha at 0\nstore 65 into beta at 0\nstrcmp alpha beta 1\nreturn it"
+        );
+        assert_eq!(exit, 1, "strcmp of identical single-byte buffers should be 1");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_e2e_strcmp_not_equal() {
+        // Use arrays with non-numeric names; store different byte values
+        let exit = compile_and_run(
+            "array 2 alpha\narray 2 beta\nstore 65 into alpha at 0\nstore 66 into beta at 0\nstrcmp alpha beta 1\nreturn it"
+        );
+        assert_eq!(exit, 0, "strcmp of different single-byte buffers should be 0");
     }
 }

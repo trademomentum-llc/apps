@@ -43,6 +43,8 @@ pub struct IrFunction {
     pub param_vregs: Vec<VReg>,
     pub blocks: Vec<BasicBlock>,
     pub next_vreg: VReg,
+    /// Number of parameters (first N Alloca instructions are parameter slots).
+    pub param_count: usize,
 }
 
 /// A basic block — straight-line code ending with a terminator.
@@ -198,6 +200,27 @@ pub enum IrInst {
     /// Get array length: dest = count (compile-time constant)
     ArrayLength { dest: VReg, count: usize },
 
+    /// String compare: dest = 1 if equal, 0 if not (byte-by-byte, len bytes)
+    StrCmp {
+        dest: VReg,
+        a: IrValue,
+        b: IrValue,
+        len: IrValue,
+    },
+
+    /// String length: dest = count bytes until null terminator
+    StrLen {
+        dest: VReg,
+        addr: IrValue,
+    },
+
+    /// String copy: memcpy dst <- src, len bytes (rep movsb)
+    StrCopy {
+        dst: IrValue,
+        src: IrValue,
+        len: IrValue,
+    },
+
     /// No-op (placeholder)
     Nop,
 }
@@ -298,7 +321,6 @@ impl IrFunction {
     pub fn validate_cfg(&self) -> MorphResult<()> {
         use crate::types::MorphlexError;
         use std::collections::HashSet;
-
         let mut seen = HashSet::new();
         for block in &self.blocks {
             if !seen.insert(&block.label) {
@@ -420,7 +442,7 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
                 lowerer.variables.insert(pname.clone(), dest);
                 param_vregs.push(dest);
             }
-            let func = lowerer.lower_to_function(name, body)?;
+            let func = lowerer.lower_to_function(name, body, params.len())?;
             functions.push(IrFunction {
                 return_type: *return_type,
                 param_vregs,
@@ -431,7 +453,7 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
 
     // Lower top-level statements into _start
     lowerer.reset();
-    let main_fn = lowerer.lower_to_function("_start", &top_level)?;
+    let main_fn = lowerer.lower_to_function("_start", &top_level, 0)?;
     functions.insert(0, main_fn);
 
     Ok(IrProgram {
@@ -538,6 +560,7 @@ impl Lowerer {
         &mut self,
         name: &str,
         statements: &[TypedStatement],
+        param_count: usize,
     ) -> MorphResult<IrFunction> {
         self.current_label = "entry".to_string();
         // Preserve any instructions already in current_insts (e.g. param Allocas)
@@ -566,6 +589,7 @@ impl Lowerer {
             param_vregs: Vec::new(),
             blocks,
             next_vreg: self.next_vreg,
+            param_count,
         };
 
         // Self-validate: the CFG must be structurally sound before it
@@ -1391,6 +1415,37 @@ impl Lowerer {
             JStarInstruction::Push | JStarInstruction::Pop => {
                 produces_result = false;
                 insts.push(IrInst::Nop); // placeholder
+            }
+
+            // String operations
+            JStarInstruction::StrCmp => {
+                let a = operands.first()
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCmp requires 3 operands: a, b, len (missing a)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
+                let b = operands.get(1)
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCmp requires 3 operands: a, b, len (missing b)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
+                let len = operands.get(2)
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCmp requires 3 operands: a, b, len (missing len)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
+                insts.push(IrInst::StrCmp { dest, a, b, len });
+            }
+            JStarInstruction::StrLen => {
+                let addr = self.get_one_operand(operands)?;
+                insts.push(IrInst::StrLen { dest, addr });
+            }
+            JStarInstruction::StrCopy => {
+                produces_result = false;
+                let dst = operands.first()
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCopy requires 3 operands: dst, src, len (missing dst)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
+                let src = operands.get(1)
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCopy requires 3 operands: dst, src, len (missing src)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
+                let len = operands.get(2)
+                    .ok_or_else(|| MorphlexError::CodegenError("StrCopy requires 3 operands: dst, src, len (missing len)".to_string()))
+                    .and_then(|o| self.lower_operand(o))?;
+                insts.push(IrInst::StrCopy { dst, src, len });
             }
 
             JStarInstruction::Nop => {

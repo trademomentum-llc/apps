@@ -227,10 +227,14 @@ impl TypeChecker {
             JStarInstruction::Compare
             | JStarInstruction::Equal
             | JStarInstruction::Less
-            | JStarInstruction::Greater => JStarType::Boolean,
+            | JStarInstruction::Greater
+            | JStarInstruction::StrCmp => JStarType::Boolean,
 
             // Address-of produces a pointer (Long = 8 bytes)
             JStarInstruction::AddressOf => JStarType::Long,
+
+            // String length produces an integer
+            JStarInstruction::StrLen => JStarType::Long,
 
             // Void operations
             JStarInstruction::Store
@@ -239,6 +243,7 @@ impl TypeChecker {
             | JStarInstruction::JumpIf
             | JStarInstruction::Syscall
             | JStarInstruction::Halt
+            | JStarInstruction::StrCopy
             | JStarInstruction::Nop => JStarType::Void,
 
             // For arithmetic and most other ops, use the widest operand type
