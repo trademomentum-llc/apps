@@ -4,7 +4,7 @@
 
 ### T-Diagram Stabilization
 
-#### ✅ Root Cause Identified (2026-04-01 16:00)
+#### [DONE] Root Cause Identified (2026-04-01 16:00)
 
 **jstar3 crash cause:** Missing .data section (1.7MB)!
 
@@ -16,7 +16,7 @@
 2. Global variable data emission
 3. `data_len` increment logic
 
-#### 🔄 Fix In Progress
+#### [IN PROGRESS] Fix In Progress
 
 - [ ] Add string literal data emission (~100 lines)
   - Copy string bytes from input to datasec at data_len
@@ -98,10 +98,10 @@
 
 ## Status Legend
 
-- ✅ Complete
-- ⚠️ In Progress / Partial
-- ❌ Not Started / Blocked
-- 🔄 In Review
+- [DONE] Complete
+- [!] In Progress / Partial
+- [X] Not Started / Blocked
+- [~] In Review
 
 ---
 

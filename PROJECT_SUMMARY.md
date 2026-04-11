@@ -2,7 +2,7 @@
 
 ## Current Status: T-Diagram Stabilization Phase
 
-### ✅ Completed
+### [DONE] Completed
 
 1. **System Daemons (Rational Reserve)**
    - SystemIntegrityDaemon: Running via systemd
@@ -19,13 +19,13 @@
    - GGUF export for llama.cpp compatibility
 
 3. **Jasterish Self-Hosting Progress**
-   - Phase 1 (Tokenization): ✅ Complete
-   - Phase 2 (Parsing): ⚠️ Partial (90%)
-   - Phase 3-4 (Typecheck/IR): ❌ Skipped (direct codegen)
-   - Phase 5 (Codegen): ⚠️ Partial (85%)
-   - Phase 6 (ELF Linking): ✅ Complete
+    - Phase 1 (Tokenization): [DONE] Complete
+    - Phase 2 (Parsing): [!] Partial (90%)
+    - Phase 3-4 (Typecheck/IR): [X] Skipped (direct codegen)
+    - Phase 5 (Codegen): [!] Partial (85%)
+    - Phase 6 (ELF Linking): [DONE] Complete
 
-### 🔧 Critical Fixes Applied
+### [TOOL] Critical Fixes Applied
 
 1. **Return Statement Logic** (compiler.jstr:1869-1920)
    - Fixed inverted `_start` vs function return logic
@@ -39,20 +39,20 @@
    - Accept Register tokens as variable names
    - Handle miscategorized scope keywords
 
-### 📊 T-Diagram Status
+### [CHART] T-Diagram Status
 
 | Metric | jstar2 (Rust bootstrap) | jstar3 (jstar2 output) |
 |--------|------------------------|------------------------|
 | Binary size | 3.9 MB | 68 KB |
-| Data hash | Stable ✅ | N/A |
-| Text hash | Diverges ⚠️ | Diverges ⚠️ |
-| Functional | ✅ Yes | ✅ Yes (no data sections) |
+| Data hash | Stable [DONE] | N/A |
+| Text hash | Diverges [!] | Diverges [!] |
+| Functional | [DONE] Yes | [DONE] Yes (no data sections) |
 
 **Root Cause Found:** CODEGEN BUG in self-hosted compiler's while loop handling.
 
 **Analysis:**
-- jstar2 (Rust bootstrap): 3.9MB with full .text + .data sections ✅
-- jstar3 (jstar2 output): 68KB, functional but missing .data section ⚠️
+- jstar2 (Rust bootstrap): 3.9MB with full .text + .data sections [DONE]
+- jstar3 (jstar2 output): 68KB, functional but missing .data section [!]
 - Data collection phase: Causes self-hosted compiler to HANG ❌
 
 **Key Finding (2026-04-01 19:38):**

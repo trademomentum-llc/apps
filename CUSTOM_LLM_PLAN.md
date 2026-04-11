@@ -1,7 +1,7 @@
 # Custom LLM Architecture Plan
 ## Building a Model from Scratch with Jasterish + Morphlex
 
-### Executive Summary
+## Executive Summary
 
 This document outlines the architecture for building a custom large language model leveraging the unique capabilities of the Morphlex vector system and Jasterish compiler framework. The approach combines morphlex's deterministic 12-byte integer token vectors with Jasterish's type-safe compilation pipeline to create an efficient, interpretable language model.
 

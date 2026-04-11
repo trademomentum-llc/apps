@@ -991,12 +991,12 @@ fn main() {
                             println!("Maintenance completed in {}s", report.duration_seconds);
                             println!("Tasks completed:");
                             for task in &report.tasks_completed {
-                                println!("  ✓ {}", task);
+                                println!("  [DONE] {}", task);
                             }
                             if !report.optimizations.is_empty() {
                                 println!("Optimizations:");
                                 for opt in &report.optimizations {
-                                    println!("  ✓ {}", opt);
+                                    println!("  [DONE] {}", opt);
                                 }
                             }
                         }
@@ -1026,10 +1026,10 @@ fn main() {
                 {
                     use morphlex::rr::SystemIntegrityDaemon;
                     let daemon = SystemIntegrityDaemon::new(vec![
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                     ]);
                     daemon.start();
-                    println!("  ✓ System Integrity Daemon started");
+                    println!("  [DONE] System Integrity Daemon started");
                 }
 
                 // Start threat manager
@@ -1037,7 +1037,7 @@ fn main() {
                     use morphlex::rr::ThreatIntelligenceManager;
                     let manager = ThreatIntelligenceManager::new();
                     manager.start();
-                    println!("  ✓ Threat Intelligence Manager started");
+                    println!("  [DONE] Threat Intelligence Manager started");
                 }
 
                 println!("All daemons started.");
@@ -1132,7 +1132,7 @@ fn main() {
                 output,
                 quantize,
             } => {
-                use morphlex::llm::{MorphlexLLM, export_to_gguf};
+                use morphlex::llm::{export_to_gguf, MorphlexLLM};
 
                 println!("Exporting model to GGUF format...");
                 println!("Input: {}", model.display());
