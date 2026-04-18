@@ -1,0 +1,21 @@
+[Unit]
+Description=Rational Reserve - Threat Intelligence Manager
+Documentation=https://github.com/morphlex/rational-reserve
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/llc/apps/target/release/morphlex daemon threat --scan-interval 30
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rr-threat
+
+# Resource limits
+MemoryMax=1G
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

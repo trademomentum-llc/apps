@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::types::{MorphResult, MorphlexError};
 use super::CrawlPage;
+use crate::types::{MorphResult, MorphlexError};
 
 /// Write a crawled page to disk as a markdown file with YAML front matter.
 ///
@@ -34,8 +34,9 @@ pub fn write_page(page: &CrawlPage, output_dir: &Path) -> MorphResult<PathBuf> {
     content.push_str(&page.markdown);
     content.push('\n');
 
-    std::fs::write(&path, &content)
-        .map_err(|e| MorphlexError::CrawlError(format!("Failed to write {}: {}", path.display(), e)))?;
+    std::fs::write(&path, &content).map_err(|e| {
+        MorphlexError::CrawlError(format!("Failed to write {}: {}", path.display(), e))
+    })?;
 
     Ok(path)
 }

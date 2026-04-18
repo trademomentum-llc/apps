@@ -115,7 +115,10 @@ pub fn crawl(config: &CrawlConfig) -> MorphResult<CrawlSummary> {
 
     robots_cache.insert(seed_domain.clone(), rules);
 
-    eprintln!("Starting crawl from {} (max_depth={}, delay={}ms)", config.seed_url, config.max_depth, effective_delay);
+    eprintln!(
+        "Starting crawl from {} (max_depth={}, delay={}ms)",
+        config.seed_url, config.max_depth, effective_delay
+    );
 
     // BFS loop
     while let Some(entry) = queue.pop_front() {
@@ -229,8 +232,7 @@ fn get_or_fetch_robots<'a>(
     user_agent: &str,
 ) -> &'a robots::RobotsRules {
     if !cache.contains_key(domain) {
-        let content = fetcher::fetch_robots_txt(domain, scheme, user_agent)
-            .unwrap_or_default();
+        let content = fetcher::fetch_robots_txt(domain, scheme, user_agent).unwrap_or_default();
         let rules = robots::parse_robots_txt(&content, user_agent);
         cache.insert(domain.to_string(), rules);
     }

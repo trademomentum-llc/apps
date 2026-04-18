@@ -13,9 +13,9 @@
 //! Register allocation: simple linear mapping from virtual registers.
 //! SSA form from IR makes this straightforward.
 
-use crate::types::{MorphResult, MorphlexError};
 use super::grammar::JStarType;
 use super::ir::*;
+use crate::types::{MorphResult, MorphlexError};
 
 // ─── x86-64 Register Encoding ───────────────────────────────────────────────
 
@@ -99,6 +99,15 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
     // Build the global_vregs map with adjusted offsets
     for (&vreg, &offset) in &program.global_vregs {
         emitter.global_vregs.insert(vreg, global_base + offset);
+        let is_direct_storage = program
+            .global_vars
+            .values()
+            .find(|(var_offset, _, _)| *var_offset == offset)
+            .map(|(_, alloc_size, ty)| *alloc_size > ty.size_bytes())
+            .unwrap_or(false);
+        if is_direct_storage {
+            emitter.direct_storage_vregs.insert(vreg);
+        }
     }
 
     for func in &program.functions {
@@ -137,8 +146,17 @@ struct CodeGen {
     /// Global vregs: vreg -> data_offset (absolute offset in .data section).
     /// If a vreg is in this map, it lives in .data, not on the stack.
     global_vregs: std::collections::HashMap<VReg, usize>,
+    /// Vregs whose identity is the storage object itself, not a slot holding a value.
+    ///
+    /// Examples:
+    /// - `a byte buf 256` -> `buf` is inline storage; indexed access should use its address
+    /// - `allocate 256` returns a pointer value; indexed access must load that pointer first
+    /// - `addressof buf` returns a pointer value; same rule
+    direct_storage_vregs: std::collections::HashSet<VReg>,
     /// Positions in .text where data-section offsets need linker patching.
     data_fixups: Vec<usize>,
+    /// Previous function's text/data hash for self-consistency checking (self-host verification).
+    previous_hash: Option<(blake3::Hash, blake3::Hash)>,
 }
 
 impl CodeGen {
@@ -155,7 +173,9 @@ impl CodeGen {
             call_fixups: Vec::new(),
             is_entry_point: false,
             global_vregs: std::collections::HashMap::new(),
+            direct_storage_vregs: std::collections::HashSet::new(),
             data_fixups: Vec::new(),
+            previous_hash: None,
         }
     }
 
@@ -191,11 +211,42 @@ impl CodeGen {
         // Record function offset for call resolution
         self.function_offsets.insert(func.name.clone(), self.text.len());
 
+        // === CRITICAL FIX BLOCK - MUST BE FIRST ===
+        // Apply ALL data fixups BEFORE any code is emitted
+        let data_start = self.data.len();
+        for fixup_offset in &self.data_fixups {
+            if *fixup_offset + 8 <= self.text.len() {
+                let offset_ptr = &mut self.text[*fixup_offset..*fixup_offset + 8];
+                let current = u64::from_le_bytes(offset_ptr.try_into().unwrap());
+                let fixed = current + data_start as u64;
+                offset_ptr.copy_from_slice(&fixed.to_le_bytes());
+            }
+        }
+
+        // Self-consistency check (catches divergence immediately)
+        let text_hash = blake3::hash(&self.text);
+        let data_hash = blake3::hash(&self.data);
+        if let Some(prev) = &self.previous_hash {
+            if text_hash != prev.0 || data_hash != prev.1 {
+                Self::write_crash_report(&text_hash, &data_hash, prev, "jstar2 divergence detected");
+                panic!("jstar2 self-host divergence - see debug_logs/jstar2_crash.log");
+            }
+        }
+        self.previous_hash = Some((text_hash, data_hash));
+        // === END CRITICAL FIX BLOCK ===
+
+        // Restore direct_storage_vregs for this function
+        self.direct_storage_vregs
+            .retain(|vreg| self.global_vregs.contains_key(vreg));
+
         // Pre-allocate stack slots for all virtual registers
         for block in &func.blocks {
             for inst in &block.instructions {
                 match inst {
                     IrInst::Alloca { dest, size, .. } => {
+                        if self.instruction_allocates_direct_storage(inst) {
+                            self.direct_storage_vregs.insert(*dest);
+                        }
                         self.alloc_stack_slot(*dest, *size);
                     }
                     IrInst::BinOp { dest, ty, .. }
@@ -237,19 +288,17 @@ impl CodeGen {
         // Calculate total stack frame size (16-byte aligned per ABI)
         self.stack_size = ((-self.next_stack_offset) as usize + 15) & !15;
 
-        // Function prologue: push rbp; mov rbp, rsp; sub rsp, frame_size
-        // For large frames (>4096), probe each page to avoid skipping guard pages.
+        // Function prologue: push rbp; mov rbp, rsp
         self.emit_push_reg(X86Reg::Rbp);
         self.emit_mov_reg_reg(X86Reg::Rbp, X86Reg::Rsp);
+        
+        // Stack probing for large frames (>4KB)
         if self.stack_size > 0 {
             if self.stack_size > 4096 {
-                // Probe each 4096-byte page by touching it
                 let mut remaining = self.stack_size;
                 while remaining > 4096 {
                     self.emit_sub_reg_imm(X86Reg::Rsp, 4096);
-                    // test dword [rsp], 0 -- touch the page (read access)
-                    // Encoded as: mov rax, [rsp] = 0x48 0x8B 0x04 0x24
-                    self.text.extend_from_slice(&[0x48, 0x8B, 0x04, 0x24]);
+                    self.text.extend_from_slice(&[0x48, 0x8B, 0x04, 0x24]); // touch [rsp]
                     remaining -= 4096;
                 }
                 if remaining > 0 {
@@ -265,8 +314,12 @@ impl CodeGen {
         // subsequent Allocas are local variables and must not receive ABI args.
         if !self.is_entry_point && func.param_count > 0 {
             let arg_regs = [
-                X86Reg::Rdi, X86Reg::Rsi, X86Reg::Rdx,
-                X86Reg::Rcx, X86Reg::R8, X86Reg::R9,
+                X86Reg::Rdi,
+                X86Reg::Rsi,
+                X86Reg::Rdx,
+                X86Reg::Rcx,
+                X86Reg::R8,
+                X86Reg::R9,
             ];
             let mut param_vregs: Vec<VReg> = Vec::new();
             if let Some(entry_block) = func.blocks.first() {
@@ -285,7 +338,9 @@ impl CodeGen {
                 )));
             }
             for (i, vreg) in param_vregs.iter().enumerate() {
-                if i >= arg_regs.len() { break; }
+                if i >= arg_regs.len() {
+                    break;
+                }
                 let offset = self.vreg_offset(*vreg);
                 self.emit_store_reg_to_rbp_offset(arg_regs[i], offset);
             }
@@ -293,7 +348,8 @@ impl CodeGen {
 
         // Emit each basic block, recording label offsets
         for block in &func.blocks {
-            self.label_offsets.insert(block.label.clone(), self.text.len());
+            self.label_offsets
+                .insert(block.label.clone(), self.text.len());
             self.emit_block(block)?;
         }
 
@@ -314,11 +370,7 @@ impl CodeGen {
     fn emit_instruction(&mut self, inst: &IrInst) -> MorphResult<()> {
         match inst {
             IrInst::BinOp {
-                dest,
-                op,
-                lhs,
-                rhs,
-                ..
+                dest, op, lhs, rhs, ..
             } => {
                 // Load lhs into rax
                 self.emit_load_value(X86Reg::Rax, lhs);
@@ -352,9 +404,7 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
-            IrInst::UnaryOp {
-                dest, op, src, ..
-            } => {
+            IrInst::UnaryOp { dest, op, src, .. } => {
                 self.emit_load_value(X86Reg::Rax, src);
                 match op {
                     IrUnaryOp::Neg => self.emit_neg(X86Reg::Rax),
@@ -370,7 +420,13 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
-            IrInst::Compare { dest, lhs, rhs, kind, .. } => {
+            IrInst::Compare {
+                dest,
+                lhs,
+                rhs,
+                kind,
+                ..
+            } => {
                 self.emit_load_value(X86Reg::Rax, lhs);
                 self.emit_load_value(X86Reg::Rcx, rhs);
                 self.emit_cmp_reg_reg(X86Reg::Rax, X86Reg::Rcx);
@@ -439,11 +495,7 @@ impl CodeGen {
                 }
             }
 
-            IrInst::Syscall {
-                dest,
-                number,
-                args,
-            } => {
+            IrInst::Syscall { dest, number, args } => {
                 // Linux syscall ABI: rax=number, rdi/rsi/rdx/r10/r8/r9=args
                 self.emit_load_value(X86Reg::Rax, number);
                 let arg_regs = [
@@ -464,11 +516,17 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
             }
 
-            IrInst::Call { dest, name, args, .. } => {
+            IrInst::Call {
+                dest, name, args, ..
+            } => {
                 // Load arguments into System V ABI registers
                 let arg_regs = [
-                    X86Reg::Rdi, X86Reg::Rsi, X86Reg::Rdx,
-                    X86Reg::Rcx, X86Reg::R8, X86Reg::R9,
+                    X86Reg::Rdi,
+                    X86Reg::Rsi,
+                    X86Reg::Rdx,
+                    X86Reg::Rcx,
+                    X86Reg::R8,
+                    X86Reg::R9,
                 ];
                 for (i, arg) in args.iter().enumerate() {
                     if i < arg_regs.len() {
@@ -493,16 +551,13 @@ impl CodeGen {
                 self.emit_print_string(*data_offset, *len);
             }
 
-            IrInst::StoreIndexed { base, index, value, ty } => {
-                if self.is_global_vreg(*base) {
-                    // Global array: load base address from .data section
-                    let data_offset = self.global_vregs[base];
-                    self.emit_load_global_addr(data_offset);
-                } else {
-                    // Local array: lea rax, [rbp + base_offset]
-                    let base_offset = self.vreg_offset(*base);
-                    self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
-                }
+            IrInst::StoreIndexed {
+                base,
+                index,
+                value,
+                ty,
+            } => {
+                self.emit_index_base(X86Reg::Rax, *base);
                 // Load index into rcx
                 self.emit_load_value(X86Reg::Rcx, index);
                 // Load value into rdx
@@ -527,16 +582,13 @@ impl CodeGen {
                 }
             }
 
-            IrInst::LoadIndexed { dest, base, index, ty } => {
-                if self.is_global_vreg(*base) {
-                    // Global array: load base address from .data section
-                    let data_offset = self.global_vregs[base];
-                    self.emit_load_global_addr(data_offset);
-                } else {
-                    // Local array: lea rax, [rbp + base_offset]
-                    let base_offset = self.vreg_offset(*base);
-                    self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
-                }
+            IrInst::LoadIndexed {
+                dest,
+                base,
+                index,
+                ty,
+            } => {
+                self.emit_index_base(X86Reg::Rax, *base);
                 // Load index into rcx
                 self.emit_load_value(X86Reg::Rcx, index);
                 if Self::is_byte_type(ty) {
@@ -583,16 +635,7 @@ impl CodeGen {
             }
 
             IrInst::ArrayLoad { dest, base, index } => {
-                // Load base address into rax (lea for stack slots)
-                match base {
-                    IrValue::Reg(vreg) => {
-                        let base_offset = self.vreg_offset(*vreg);
-                        self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
-                    }
-                    _ => {
-                        self.emit_load_value(X86Reg::Rax, base);
-                    }
-                }
+                self.emit_load_indexable_base(X86Reg::Rax, base);
                 // Load index into rcx
                 self.emit_load_value(X86Reg::Rcx, index);
                 // rax = *(rax + rcx * 8): mov rax, [rax + rcx*8]
@@ -607,15 +650,7 @@ impl CodeGen {
                 // Load value into rdx
                 self.emit_load_value(X86Reg::Rdx, value);
                 // Load base address into rax
-                match base {
-                    IrValue::Reg(vreg) => {
-                        let base_offset = self.vreg_offset(*vreg);
-                        self.emit_lea_rbp_offset(X86Reg::Rax, base_offset);
-                    }
-                    _ => {
-                        self.emit_load_value(X86Reg::Rax, base);
-                    }
-                }
+                self.emit_load_indexable_base(X86Reg::Rax, base);
                 // Load index into rcx
                 self.emit_load_value(X86Reg::Rcx, index);
                 // mov [rax + rcx*8], rdx
@@ -633,16 +668,8 @@ impl CodeGen {
             IrInst::HashOp { dest, addr, len } => {
                 // FNV-1a hash: compact inline loop
                 // rsi = base addr, rcx = len, result in eax
-                match addr {
-                    IrValue::Reg(vreg) => {
-                        let base_offset = self.vreg_offset(*vreg);
-                        self.emit_lea_rbp_offset(X86Reg::Rsi, base_offset);
-                    }
-                    _ => {
-                        self.emit_load_value(X86Reg::Rsi, addr);
-                    }
-                }
-                self.emit_load_value(X86Reg::Rcx, len);  // byte count
+                self.emit_load_indexable_base(X86Reg::Rsi, addr);
+                self.emit_load_value(X86Reg::Rcx, len); // byte count
 
                 // Initialize hash = FNV offset basis (2166136261 = 0x811C9DC5)
                 self.emit_mov_reg_imm64(X86Reg::Rax, 0x811C9DC5_i64);
@@ -689,7 +716,11 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, dest_offset);
             }
 
-            IrInst::FileOpen { dest, path_offset, path_len: _ } => {
+            IrInst::FileOpen {
+                dest,
+                path_offset,
+                path_len: _,
+            } => {
                 // syscall open(path, O_RDONLY, 0)
                 // rax = 2 (sys_open), rdi = path addr, rsi = 0 (O_RDONLY), rdx = 0
                 // Path is in .data section at data_vaddr + path_offset
@@ -888,7 +919,11 @@ impl CodeGen {
                 self.fixups.push((patch_offset, label.clone()));
             }
 
-            Terminator::Branch { cond, true_label, false_label } => {
+            Terminator::Branch {
+                cond,
+                true_label,
+                false_label,
+            } => {
                 // Load condition vreg into rax
                 let offset = self.vreg_offset(*cond);
                 self.emit_load_from_rbp_offset(X86Reg::Rax, offset);
@@ -946,53 +981,33 @@ impl CodeGen {
         //   rdi = fd (1 = stdout, set before syscall)
         let print_code: [u8; 78] = [
             // sub rsp, 32
-            0x48, 0x83, 0xEC, 0x20,
-            // mov byte [rsp+31], 0x0A (newline)
+            0x48, 0x83, 0xEC, 0x20, // mov byte [rsp+31], 0x0A (newline)
             0xC6, 0x44, 0x24, 0x1F, 0x0A,
             // lea rsi, [rsp+30] (write pointer = rightmost digit slot)
-            0x48, 0x8D, 0x74, 0x24, 0x1E,
-            // mov ecx, 10 (divisor, zero-extends to rcx)
-            0xB9, 0x0A, 0x00, 0x00, 0x00,
-            // test rax, rax (zero check)
-            0x48, 0x85, 0xC0,
-            // jnz .convert (+8 bytes, skip zero case)
-            0x75, 0x08,
-            // --- zero case ---
+            0x48, 0x8D, 0x74, 0x24, 0x1E, // mov ecx, 10 (divisor, zero-extends to rcx)
+            0xB9, 0x0A, 0x00, 0x00, 0x00, // test rax, rax (zero check)
+            0x48, 0x85, 0xC0, // jnz .convert (+8 bytes, skip zero case)
+            0x75, 0x08, // --- zero case ---
             // mov byte [rsi], 0x30 ('0')
-            0xC6, 0x06, 0x30,
-            // dec rsi
-            0x48, 0xFF, 0xCE,
-            // jmp .write (+0x13 bytes)
+            0xC6, 0x06, 0x30, // dec rsi
+            0x48, 0xFF, 0xCE, // jmp .write (+0x13 bytes)
             0xEB, 0x13,
             // --- .convert (itoa loop) ---
             // xor rdx, rdx (clear for unsigned div)
-            0x48, 0x31, 0xD2,
-            // div rcx (rax = rax/10, rdx = rax%10)
-            0x48, 0xF7, 0xF1,
-            // add dl, 0x30 (remainder -> ASCII digit)
-            0x80, 0xC2, 0x30,
-            // mov [rsi], dl (store digit)
-            0x88, 0x16,
-            // dec rsi (move write pointer left)
-            0x48, 0xFF, 0xCE,
-            // test rax, rax (more digits?)
-            0x48, 0x85, 0xC0,
-            // jnz .convert (-0x13 bytes, back-edge)
-            0x75, 0xED,
-            // --- .write ---
+            0x48, 0x31, 0xD2, // div rcx (rax = rax/10, rdx = rax%10)
+            0x48, 0xF7, 0xF1, // add dl, 0x30 (remainder -> ASCII digit)
+            0x80, 0xC2, 0x30, // mov [rsi], dl (store digit)
+            0x88, 0x16, // dec rsi (move write pointer left)
+            0x48, 0xFF, 0xCE, // test rax, rax (more digits?)
+            0x48, 0x85, 0xC0, // jnz .convert (-0x13 bytes, back-edge)
+            0x75, 0xED, // --- .write ---
             // inc rsi (point to first digit)
-            0x48, 0xFF, 0xC6,
-            // lea rdx, [rsp+32] (end of buffer, past newline)
-            0x48, 0x8D, 0x54, 0x24, 0x20,
-            // sub rdx, rsi (length = end - start)
-            0x48, 0x29, 0xF2,
-            // mov edi, 1 (fd = stdout)
-            0xBF, 0x01, 0x00, 0x00, 0x00,
-            // mov eax, 1 (sys_write)
-            0xB8, 0x01, 0x00, 0x00, 0x00,
-            // syscall
-            0x0F, 0x05,
-            // add rsp, 32 (deallocate buffer)
+            0x48, 0xFF, 0xC6, // lea rdx, [rsp+32] (end of buffer, past newline)
+            0x48, 0x8D, 0x54, 0x24, 0x20, // sub rdx, rsi (length = end - start)
+            0x48, 0x29, 0xF2, // mov edi, 1 (fd = stdout)
+            0xBF, 0x01, 0x00, 0x00, 0x00, // mov eax, 1 (sys_write)
+            0xB8, 0x01, 0x00, 0x00, 0x00, // syscall
+            0x0F, 0x05, // add rsp, 32 (deallocate buffer)
             0x48, 0x83, 0xC4, 0x20,
         ];
         self.text.extend_from_slice(&print_code);
@@ -1029,6 +1044,48 @@ impl CodeGen {
         self.global_vregs.contains_key(&vreg)
     }
 
+    /// Whether a vreg names inline storage directly rather than a slot containing a value.
+    fn is_direct_storage_vreg(&self, vreg: VReg) -> bool {
+        self.direct_storage_vregs.contains(&vreg)
+    }
+
+    /// Whether an instruction reserves inline storage that should be addressed directly.
+    fn instruction_allocates_direct_storage(&self, inst: &IrInst) -> bool {
+        match inst {
+            IrInst::Alloca { size, ty, .. } => *size > ty.size_bytes(),
+            IrInst::ArrayAlloc { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Load a base pointer for indexed or hashing operations.
+    ///
+    /// Direct-storage vregs become their address.
+    /// Pointer/scalar vregs load the value stored in the slot/global.
+    fn emit_index_base(&mut self, dest: X86Reg, base: VReg) {
+        if self.is_direct_storage_vreg(base) {
+            if self.is_global_vreg(base) {
+                let data_offset = self.global_vregs[&base];
+                self.emit_load_global_addr_into(dest, data_offset);
+            } else {
+                let base_offset = self.vreg_offset(base);
+                self.emit_lea_rbp_offset(dest, base_offset);
+            }
+        } else if let Some(&data_offset) = self.global_vregs.get(&base) {
+            self.emit_load_global_into(dest, data_offset);
+        } else {
+            let base_offset = self.vreg_offset(base);
+            self.emit_load_from_rbp_offset(dest, base_offset);
+        }
+    }
+
+    fn emit_load_indexable_base(&mut self, dest: X86Reg, base: &IrValue) {
+        match base {
+            IrValue::Reg(vreg) => self.emit_index_base(dest, *vreg),
+            _ => self.emit_load_value(dest, base),
+        }
+    }
+
     /// Emit: movabs rax, <data_offset>  (absolute address placeholder)
     ///       mov rax, [rax]              (dereference to load the value)
     /// The linker adds data_vaddr to the placeholder.
@@ -1037,7 +1094,8 @@ impl CodeGen {
         self.text.push(0x48); // REX.W
         self.text.push(0xB8); // movabs rax
         let fixup_pos = self.text.len();
-        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.text
+            .extend_from_slice(&(data_offset as u64).to_le_bytes());
         self.data_fixups.push(fixup_pos);
         // mov rax, [rax]
         self.text.push(0x48); // REX.W
@@ -1057,7 +1115,8 @@ impl CodeGen {
         self.text.push(rex);
         self.text.push(0xB8 + dest.encoding()); // movabs dest
         let fixup_pos = self.text.len();
-        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.text
+            .extend_from_slice(&(data_offset as u64).to_le_bytes());
         self.data_fixups.push(fixup_pos);
         // mov dest, [dest] — dereference
         let mut rex2: u8 = 0x48; // REX.W
@@ -1079,7 +1138,8 @@ impl CodeGen {
         self.text.push(0x48); // REX.W
         self.text.push(0xB8); // movabs rax
         let fixup_pos = self.text.len();
-        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.text
+            .extend_from_slice(&(data_offset as u64).to_le_bytes());
         self.data_fixups.push(fixup_pos);
         // mov [rax], rcx
         self.text.push(0x48); // REX.W
@@ -1094,7 +1154,8 @@ impl CodeGen {
         self.text.push(0x48); // REX.W
         self.text.push(0xB8); // movabs rax
         let fixup_pos = self.text.len();
-        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.text
+            .extend_from_slice(&(data_offset as u64).to_le_bytes());
         self.data_fixups.push(fixup_pos);
         // mov byte [rax], cl
         self.text.push(0x88); // MOV r/m8, r8
@@ -1108,7 +1169,8 @@ impl CodeGen {
         self.text.push(0x48); // REX.W
         self.text.push(0xB8); // movabs rax
         let fixup_pos = self.text.len();
-        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.text
+            .extend_from_slice(&(data_offset as u64).to_le_bytes());
         self.data_fixups.push(fixup_pos);
         // movzx rax, byte [rax]
         self.text.push(0x48); // REX.W
@@ -1120,11 +1182,20 @@ impl CodeGen {
     /// Emit: movabs rax, <data_offset>  (absolute address, no dereference)
     /// Used for addressof and as base address for indexed access.
     fn emit_load_global_addr(&mut self, data_offset: usize) {
-        // movabs rax, imm64 (address placeholder)
-        self.text.push(0x48); // REX.W
-        self.text.push(0xB8); // movabs rax
+        self.emit_load_global_addr_into(X86Reg::Rax, data_offset);
+    }
+
+    /// Emit: movabs dest, <data_offset>  (absolute address, no dereference)
+    fn emit_load_global_addr_into(&mut self, dest: X86Reg, data_offset: usize) {
+        let mut rex: u8 = 0x48; // REX.W
+        if dest.needs_rex_ext() {
+            rex |= 0x01; // REX.B
+        }
+        self.text.push(rex);
+        self.text.push(0xB8 + dest.encoding()); // movabs dest
         let fixup_pos = self.text.len();
-        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.text
+            .extend_from_slice(&(data_offset as u64).to_le_bytes());
         self.data_fixups.push(fixup_pos);
     }
 
@@ -1403,7 +1474,8 @@ impl CodeGen {
         self.text.push(0x48); // REX.W
         self.text.push(0xBE); // MOV rsi, imm64
         let fixup_pos = self.text.len();
-        self.text.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.text
+            .extend_from_slice(&(data_offset as u64).to_le_bytes());
         self.data_fixups.push(fixup_pos);
         // mov edx, len
         self.text.push(0xBA); // MOV edx, imm32
@@ -1492,9 +1564,42 @@ impl CodeGen {
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
+/// Write crash report for debugging self-host divergence
+impl CodeGen {
+    fn write_crash_report(
+        text_hash: &blake3::Hash,
+        data_hash: &blake3::Hash,
+        prev: &(blake3::Hash, blake3::Hash),
+        reason: &str,
+    ) {
+        use std::io::Write;
+        let debug_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("debug_logs");
+        let _ = std::fs::create_dir_all(&debug_dir);
+        
+        let report_path = debug_dir.join("jstar2_crash.log");
+        let mut file = std::fs::File::create(&report_path).unwrap();
+        
+        writeln!(file, "JSTAR2 SELF-HOST DIVERGENCE REPORT").unwrap();
+        writeln!(file, "====================================").unwrap();
+        writeln!(file, "Reason: {}", reason).unwrap();
+        writeln!(file, "Current text hash: {}", text_hash).unwrap();
+        writeln!(file, "Current data hash: {}", data_hash).unwrap();
+        writeln!(file, "Previous text hash: {}", prev.0).unwrap();
+        writeln!(file, "Previous data hash: {}", prev.1).unwrap();
+        writeln!(file, "\nThis indicates the self-hosted compiler produced different output").unwrap();
+        writeln!(file, "than the Rust bootstrap compiler.").unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn contains_rbp_disp32_insn(text: &[u8], opcode: u8, offset: i32) -> bool {
+        let mut pattern = vec![0x48, opcode, 0x85];
+        pattern.extend_from_slice(&offset.to_le_bytes());
+        text.windows(pattern.len()).any(|w| w == pattern.as_slice())
+    }
     use super::super::grammar::JStarType;
 
     #[test]
@@ -1507,6 +1612,7 @@ mod tests {
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
+                param_vregs: vec![],
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![],
@@ -1530,6 +1636,7 @@ mod tests {
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
+                param_vregs: vec![],
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![],
@@ -1546,10 +1653,7 @@ mod tests {
         // syscall
         assert!(mc.text.len() > 10, "Should generate meaningful code");
         // Check syscall instruction is present (0x0F 0x05)
-        let has_syscall = mc
-            .text
-            .windows(2)
-            .any(|w| w == [0x0F, 0x05]);
+        let has_syscall = mc.text.windows(2).any(|w| w == [0x0F, 0x05]);
         assert!(has_syscall, "Should contain syscall instruction");
     }
 
@@ -1563,6 +1667,7 @@ mod tests {
             functions: vec![IrFunction {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
+                param_vregs: vec![],
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![IrInst::BinOp {
@@ -1581,6 +1686,136 @@ mod tests {
         let a = generate(&ir).unwrap();
         let b = generate(&ir).unwrap();
         assert_eq!(a.text, b.text, "Codegen must be deterministic");
+    }
+
+    #[test]
+    fn test_load_indexed_uses_lea_for_direct_storage() {
+        let ir = IrProgram {
+            string_data: vec![],
+            global_data: vec![],
+            global_vars: std::collections::HashMap::new(),
+            global_vregs: std::collections::HashMap::new(),
+            functions: vec![IrFunction {
+                name: "_start".to_string(),
+                return_type: JStarType::Int,
+                param_vregs: vec![],
+                param_count: 0,
+                blocks: vec![BasicBlock {
+                    label: "entry".to_string(),
+                    instructions: vec![
+                        IrInst::Alloca {
+                            dest: 0,
+                            size: 16,
+                            ty: JStarType::Byte,
+                        },
+                        IrInst::LoadIndexed {
+                            dest: 1,
+                            base: 0,
+                            index: IrValue::Imm(0),
+                            ty: JStarType::Byte,
+                        },
+                    ],
+                    terminator: Terminator::Return(Some(IrValue::Reg(1))),
+                }],
+                next_vreg: 2,
+            }],
+        };
+
+        let mc = generate(&ir).unwrap();
+        assert!(
+            contains_rbp_disp32_insn(&mc.text, 0x8D, -24),
+            "direct storage base should use lea [rbp+offset]"
+        );
+    }
+
+    #[test]
+    fn test_load_indexed_loads_pointer_value_from_slot() {
+        let ir = IrProgram {
+            string_data: vec![],
+            global_data: vec![],
+            global_vars: std::collections::HashMap::new(),
+            global_vregs: std::collections::HashMap::new(),
+            functions: vec![IrFunction {
+                name: "_start".to_string(),
+                return_type: JStarType::Int,
+                param_vregs: vec![],
+                param_count: 0,
+                blocks: vec![BasicBlock {
+                    label: "entry".to_string(),
+                    instructions: vec![
+                        IrInst::Alloca {
+                            dest: 0,
+                            size: 16,
+                            ty: JStarType::Byte,
+                        },
+                        IrInst::AddressOf { dest: 1, src: 0 },
+                        IrInst::LoadIndexed {
+                            dest: 2,
+                            base: 1,
+                            index: IrValue::Imm(0),
+                            ty: JStarType::Byte,
+                        },
+                    ],
+                    terminator: Terminator::Return(Some(IrValue::Reg(2))),
+                }],
+                next_vreg: 3,
+            }],
+        };
+
+        let mc = generate(&ir).unwrap();
+        assert!(
+            contains_rbp_disp32_insn(&mc.text, 0x8B, -32),
+            "pointer-valued slot should be loaded before indexed access"
+        );
+        assert!(
+            !contains_rbp_disp32_insn(&mc.text, 0x8D, -32),
+            "pointer-valued slot must not be treated as direct storage"
+        );
+    }
+
+    #[test]
+    fn test_store_indexed_loads_pointer_value_from_slot() {
+        let ir = IrProgram {
+            string_data: vec![],
+            global_data: vec![],
+            global_vars: std::collections::HashMap::new(),
+            global_vregs: std::collections::HashMap::new(),
+            functions: vec![IrFunction {
+                name: "_start".to_string(),
+                return_type: JStarType::Int,
+                param_vregs: vec![],
+                param_count: 0,
+                blocks: vec![BasicBlock {
+                    label: "entry".to_string(),
+                    instructions: vec![
+                        IrInst::Alloca {
+                            dest: 0,
+                            size: 16,
+                            ty: JStarType::Byte,
+                        },
+                        IrInst::AddressOf { dest: 1, src: 0 },
+                        IrInst::StoreIndexed {
+                            base: 1,
+                            index: IrValue::Imm(0),
+                            value: IrValue::Imm(7),
+                            ty: JStarType::Byte,
+                        },
+                    ],
+                    terminator: Terminator::Return(Some(IrValue::Imm(0))),
+                }],
+                next_vreg: 2,
+            }],
+        };
+
+        let mc = generate(&ir).unwrap();
+        assert!(
+            contains_rbp_disp32_insn(&mc.text, 0x8B, -32),
+            "indexed store should load pointer-valued base from its stack slot"
+        );
+        assert!(
+            !contains_rbp_disp32_insn(&mc.text, 0x8D, -32),
+            "indexed store must not treat pointer-valued base as direct storage"
+        );
     }
 
     #[test]

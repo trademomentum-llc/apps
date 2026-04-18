@@ -6,9 +6,9 @@
 //!
 //! The shell shares the full JStar compiler pipeline.
 
+pub mod builtins;
 pub mod repl;
 pub mod scripting;
-pub mod builtins;
 pub mod shell;
 
 use crate::types::{MorphResult, MorphlexError};
@@ -41,8 +41,7 @@ pub fn execute_jstar(source: &str) -> MorphResult<ExecutionResult> {
     let hash = hasher.finish();
 
     let dir = std::env::temp_dir().join("jsh_exec");
-    std::fs::create_dir_all(&dir)
-        .map_err(MorphlexError::IoError)?;
+    std::fs::create_dir_all(&dir).map_err(MorphlexError::IoError)?;
     let binary = dir.join(format!("jsh_{:016x}", hash));
 
     // Remove stale binary if it exists

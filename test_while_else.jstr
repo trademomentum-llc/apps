@@ -1,0 +1,9 @@
+global i
+store 0 into i
+while less i 5
+    store i into i
+end
+else
+    store 99 into i
+end
+return i

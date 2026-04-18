@@ -1,0 +1,11 @@
+[Unit]
+Description=Rational Reserve - Daily Maintenance Timer
+Documentation=https://github.com/morphlex/rational-reserve
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

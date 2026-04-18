@@ -7,9 +7,9 @@
 //! Built-in commands are intercepted before the compiler pipeline.
 //! Shell features: $VAR expansion, set/unset/export, >/>>/<, pipes.
 
-use crate::types::MorphResult;
 use super::builtins::{self, BuiltinResult};
 use super::shell::{self, ShellState};
+use crate::types::MorphResult;
 
 /// Run the interactive REPL.
 pub fn run() -> MorphResult<()> {

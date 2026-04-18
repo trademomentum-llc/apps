@@ -3,15 +3,14 @@
 //! Uses the `scraper` crate for DOM parsing. Converts semantic HTML elements
 //! to their markdown equivalents while skipping non-content elements.
 
-use scraper::{Html, Selector, ElementRef};
+use scraper::{ElementRef, Html, Selector};
 use url::Url;
 
 use super::CrawlPage;
 
 /// Tags to skip entirely during markdown conversion.
 const SKIP_TAGS: &[&str] = &[
-    "script", "style", "nav", "footer", "form", "noscript", "iframe",
-    "header", "aside", "svg",
+    "script", "style", "nav", "footer", "form", "noscript", "iframe", "header", "aside", "svg",
 ];
 
 /// Parse an HTML document into a CrawlPage.
@@ -210,9 +209,9 @@ fn walk_element(element: &ElementRef, output: &mut String) {
                 output.push_str(&format!("![{}]({})", alt, src));
             }
         }
-        "table" | "thead" | "tbody" | "tr" | "td" | "th" | "div" | "span"
-        | "section" | "article" | "main" | "dl" | "dt" | "dd"
-        | "figure" | "figcaption" | "details" | "summary" => {
+        "table" | "thead" | "tbody" | "tr" | "td" | "th" | "div" | "span" | "section"
+        | "article" | "main" | "dl" | "dt" | "dd" | "figure" | "figcaption" | "details"
+        | "summary" => {
             walk_children(element, output);
         }
         _ => {
@@ -296,7 +295,8 @@ mod tests {
 
     #[test]
     fn test_extract_title() {
-        let doc = Html::parse_document("<html><head><title>Test Page</title></head><body></body></html>");
+        let doc =
+            Html::parse_document("<html><head><title>Test Page</title></head><body></body></html>");
         assert_eq!(extract_title(&doc), Some("Test Page".to_string()));
     }
 
@@ -323,7 +323,8 @@ mod tests {
 
     #[test]
     fn test_html_to_markdown_list() {
-        let doc = Html::parse_document("<html><body><ul><li>One</li><li>Two</li></ul></body></html>");
+        let doc =
+            Html::parse_document("<html><body><ul><li>One</li><li>Two</li></ul></body></html>");
         let md = html_to_markdown(&doc);
         assert!(md.contains("- One"));
         assert!(md.contains("- Two"));
@@ -331,7 +332,9 @@ mod tests {
 
     #[test]
     fn test_html_to_markdown_bold_italic() {
-        let doc = Html::parse_document("<html><body><p><strong>bold</strong> and <em>italic</em></p></body></html>");
+        let doc = Html::parse_document(
+            "<html><body><p><strong>bold</strong> and <em>italic</em></p></body></html>",
+        );
         let md = html_to_markdown(&doc);
         assert!(md.contains("**bold**"));
         assert!(md.contains("*italic*"));
@@ -339,14 +342,17 @@ mod tests {
 
     #[test]
     fn test_html_to_markdown_link() {
-        let doc = Html::parse_document(r#"<html><body><a href="https://example.com">click</a></body></html>"#);
+        let doc = Html::parse_document(
+            r#"<html><body><a href="https://example.com">click</a></body></html>"#,
+        );
         let md = html_to_markdown(&doc);
         assert!(md.contains("[click](https://example.com)"));
     }
 
     #[test]
     fn test_html_to_markdown_code() {
-        let doc = Html::parse_document("<html><body><p>Use <code>foo()</code> here.</p></body></html>");
+        let doc =
+            Html::parse_document("<html><body><p>Use <code>foo()</code> here.</p></body></html>");
         let md = html_to_markdown(&doc);
         assert!(md.contains("`foo()`"));
     }
@@ -361,7 +367,9 @@ mod tests {
 
     #[test]
     fn test_html_to_markdown_skips_script() {
-        let doc = Html::parse_document("<html><body><p>Visible</p><script>alert(1)</script></body></html>");
+        let doc = Html::parse_document(
+            "<html><body><p>Visible</p><script>alert(1)</script></body></html>",
+        );
         let md = html_to_markdown(&doc);
         assert!(md.contains("Visible"));
         assert!(!md.contains("alert"));
@@ -369,7 +377,9 @@ mod tests {
 
     #[test]
     fn test_extract_links_basic() {
-        let doc = Html::parse_document(r#"<html><body><a href="/page">Link</a><a href="https://other.com/x">Ext</a></body></html>"#);
+        let doc = Html::parse_document(
+            r#"<html><body><a href="/page">Link</a><a href="https://other.com/x">Ext</a></body></html>"#,
+        );
         let base = Url::parse("https://example.com/").unwrap();
         let links = extract_links(&doc, &base);
         assert_eq!(links.len(), 2);
@@ -379,7 +389,9 @@ mod tests {
 
     #[test]
     fn test_extract_links_filters_mailto() {
-        let doc = Html::parse_document(r#"<html><body><a href="mailto:x@y.com">Email</a><a href="javascript:void(0)">JS</a></body></html>"#);
+        let doc = Html::parse_document(
+            r#"<html><body><a href="mailto:x@y.com">Email</a><a href="javascript:void(0)">JS</a></body></html>"#,
+        );
         let base = Url::parse("https://example.com/").unwrap();
         let links = extract_links(&doc, &base);
         assert!(links.is_empty());

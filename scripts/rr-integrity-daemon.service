@@ -1,0 +1,21 @@
+[Unit]
+Description=Rational Reserve - System Integrity Daemon
+Documentation=https://github.com/morphlex/rational-reserve
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/llc/apps/target/release/morphlex daemon integrity --monitor /home/llc/apps
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rr-integrity
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=25%
+
+[Install]
+WantedBy=multi-user.target

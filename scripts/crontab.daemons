@@ -1,0 +1,16 @@
+# Rational Reserve Daemon Crontab
+# Install with: crontab /home/llc/apps/scripts/crontab.daemons
+# View with: crontab -l
+
+# Environment
+SHELL=/bin/bash
+PATH=/home/llc/apps/target/release:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Start daemons at boot (with delay for network)
+@reboot sleep 30 && /home/llc/apps/scripts/start-daemons.sh >> /home/llc/apps/logs/cron-startup.log 2>&1
+
+# Daily maintenance at 4 AM
+0 4 * * * /home/llc/apps/target/release/morphlex daemon maintenance --run >> /home/llc/apps/logs/maintenance.log 2>&1
+
+# Hourly integrity check log
+0 * * * * /home/llc/apps/target/release/morphlex daemon integrity --check-only >> /home/llc/apps/logs/integrity-hourly.log 2>&1 || true

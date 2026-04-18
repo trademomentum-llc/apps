@@ -39,8 +39,6 @@ Thumbs.db
 .vscode/
 *.iml
 
-# JStar self-hosted compiler — IP, not yet public
-jstar/compiler.jstr
 
 # Crawl output
 crawl_data/
@@ -53,3 +51,9 @@ a.out
 # Deep agent config — not part of this project
 agent.py
 .claude/
+*.json
+llm_checkpoints/
+logs/
+rr_db.json
+.qwen/
+.cache_jstar_target/

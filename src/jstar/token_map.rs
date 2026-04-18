@@ -215,9 +215,9 @@ fn keyword_hash(word: &str) -> i32 {
 static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
     let entries: &[(&str, TokenCategory)] = &[
         // ── Operations (verbs) ──
-        ("return",   TokenCategory::Operation(JStarInstruction::Return)),
-        ("add",      TokenCategory::Operation(JStarInstruction::Add)),
-        ("sum",      TokenCategory::Operation(JStarInstruction::Add)),
+        ("return", TokenCategory::Operation(JStarInstruction::Return)),
+        ("add", TokenCategory::Operation(JStarInstruction::Add)),
+        ("sum", TokenCategory::Operation(JStarInstruction::Add)),
         ("subtract", TokenCategory::Operation(JStarInstruction::Sub)),
         ("multiply", TokenCategory::Operation(JStarInstruction::Mul)),
         ("divide",   TokenCategory::Operation(JStarInstruction::Div)),
@@ -261,55 +261,55 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("strcopy",  TokenCategory::Operation(JStarInstruction::StrCopy)),
         ("hash",     TokenCategory::Operation(JStarInstruction::Hash)),
         // ── Scope (explicit keyword — not a determiner) ──
-        ("global",   TokenCategory::Scope(ScopeKind::Global)),
+        ("global", TokenCategory::Scope(ScopeKind::Global)),
         // ── Data (type primitives and common nouns) ──
-        ("integer",   TokenCategory::Data),
-        ("int",       TokenCategory::Data),
-        ("boolean",   TokenCategory::Data),
-        ("bool",      TokenCategory::Data),
+        ("integer", TokenCategory::Data),
+        ("int", TokenCategory::Data),
+        ("boolean", TokenCategory::Data),
+        ("bool", TokenCategory::Data),
         ("character", TokenCategory::Data),
-        ("char",      TokenCategory::Data),
-        ("double",    TokenCategory::Data),
-        ("float",     TokenCategory::Data),
-        ("long",      TokenCategory::Data),
-        ("short",     TokenCategory::Data),
-        ("byte",      TokenCategory::Data),
-        ("void",      TokenCategory::Data),
-        ("number",    TokenCategory::Data),
-        ("count",     TokenCategory::Data),
-        ("counter",   TokenCategory::Data),
-        ("result",    TokenCategory::Data),
-        ("value",     TokenCategory::Data),
-        ("buffer",    TokenCategory::Data),
-        ("array",     TokenCategory::Data),
+        ("char", TokenCategory::Data),
+        ("double", TokenCategory::Data),
+        ("float", TokenCategory::Data),
+        ("long", TokenCategory::Data),
+        ("short", TokenCategory::Data),
+        ("byte", TokenCategory::Data),
+        ("void", TokenCategory::Data),
+        ("number", TokenCategory::Data),
+        ("count", TokenCategory::Data),
+        ("counter", TokenCategory::Data),
+        ("result", TokenCategory::Data),
+        ("value", TokenCategory::Data),
+        ("buffer", TokenCategory::Data),
+        ("array", TokenCategory::Data),
         // ── Determiners (scope) ──
         // Morphlex may misclassify short function words — the hash table
         // catches them by i32 identity, same pattern as "return"/"integer".
-        ("a",    TokenCategory::Scope(ScopeKind::Local)),
-        ("an",   TokenCategory::Scope(ScopeKind::Local)),
-        ("the",  TokenCategory::Scope(ScopeKind::Global)),
+        ("a", TokenCategory::Scope(ScopeKind::Local)),
+        ("an", TokenCategory::Scope(ScopeKind::Local)),
+        ("the", TokenCategory::Scope(ScopeKind::Global)),
         ("this", TokenCategory::Scope(ScopeKind::SelfRef)),
         // ── Prepositions (addressing) ──
-        ("into",    TokenCategory::Addressing(AddrMode::Into)),
-        ("from",    TokenCategory::Addressing(AddrMode::From)),
-        ("to",      TokenCategory::Addressing(AddrMode::Into)),
-        ("at",      TokenCategory::Addressing(AddrMode::At)),
+        ("into", TokenCategory::Addressing(AddrMode::Into)),
+        ("from", TokenCategory::Addressing(AddrMode::From)),
+        ("to", TokenCategory::Addressing(AddrMode::Into)),
+        ("at", TokenCategory::Addressing(AddrMode::At)),
         ("through", TokenCategory::Addressing(AddrMode::Through)),
         // ── Pronouns (register aliases) ──
-        ("it",   TokenCategory::Register(RegAlias::Accumulator)),
+        ("it", TokenCategory::Register(RegAlias::Accumulator)),
         ("that", TokenCategory::Register(RegAlias::LastResult)),
         // ── Control flow (conjunctions) ──
         // Morphlex may classify "if"/"while" as anything — the hash table
         // ensures they always resolve to ControlFlow regardless of POS.
-        ("if",    TokenCategory::ControlFlow(FlowKind::Conditional)),
-        ("else",  TokenCategory::ControlFlow(FlowKind::Branch)),
+        ("if", TokenCategory::ControlFlow(FlowKind::Conditional)),
+        ("else", TokenCategory::ControlFlow(FlowKind::Branch)),
         ("while", TokenCategory::ControlFlow(FlowKind::Loop)),
-        ("for",   TokenCategory::ControlFlow(FlowKind::ForLoop)),
+        ("for", TokenCategory::ControlFlow(FlowKind::ForLoop)),
         // ── Function definition ──
-        ("define",   TokenCategory::FunctionDef),
+        ("define", TokenCategory::FunctionDef),
         ("function", TokenCategory::FunctionDef),
         // ── Addressing (additional) ──
-        ("with",  TokenCategory::Addressing(AddrMode::By)),
+        ("with", TokenCategory::Addressing(AddrMode::By)),
     ];
 
     let mut map = HashMap::with_capacity(entries.len());
@@ -353,7 +353,7 @@ pub fn resolve(tv: &TokenVector, lemma: &str) -> TokenCategory {
         POS_INTERJECTION => TokenCategory::Ignored,
         POS_LITERAL => TokenCategory::Literal,
         POS_STRING => TokenCategory::Literal, // string literals route through Literal
-        _ => TokenCategory::Ignored, // Particle, unknown
+        _ => TokenCategory::Ignored,          // Particle, unknown
     }
 }
 

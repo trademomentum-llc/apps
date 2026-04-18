@@ -80,7 +80,9 @@ impl ShellState {
                     self.vars.get(name).cloned().unwrap_or_default()
                 };
                 // SAFETY: jsh is single-threaded; no concurrent env reads.
-                unsafe { std::env::set_var(name, &value); }
+                unsafe {
+                    std::env::set_var(name, &value);
+                }
                 self.vars.insert(name.to_string(), value);
                 Some(String::new())
             }
@@ -116,7 +118,9 @@ impl ShellState {
                             }
                         }
                         // Look up: shell vars first, then env
-                        let value = self.vars.get(&name)
+                        let value = self
+                            .vars
+                            .get(&name)
                             .cloned()
                             .or_else(|| std::env::var(&name).ok())
                             .unwrap_or_default();
@@ -139,7 +143,8 @@ impl ShellState {
 ///
 /// Splits on `|` first, then parses `>`, `>>`, `<` within each segment.
 pub fn parse_pipeline(input: &str) -> Pipeline {
-    let segments: Vec<Redirect> = input.split('|')
+    let segments: Vec<Redirect> = input
+        .split('|')
         .map(|seg| parse_redirect(seg.trim()))
         .collect();
     Pipeline { segments }
@@ -251,9 +256,13 @@ mod tests {
     #[test]
     fn test_expand_env_var() {
         let state = ShellState::new();
-        unsafe { std::env::set_var("JSH_TEST_VAR", "works"); }
+        unsafe {
+            std::env::set_var("JSH_TEST_VAR", "works");
+        }
         assert_eq!(state.expand_vars("it $JSH_TEST_VAR"), "it works");
-        unsafe { std::env::remove_var("JSH_TEST_VAR"); }
+        unsafe {
+            std::env::remove_var("JSH_TEST_VAR");
+        }
     }
 
     #[test]
@@ -319,7 +328,9 @@ mod tests {
         let mut state = ShellState::new();
         state.try_set_var("export JSH_EXPORT_TEST hello");
         assert_eq!(std::env::var("JSH_EXPORT_TEST").unwrap(), "hello");
-        unsafe { std::env::remove_var("JSH_EXPORT_TEST"); }
+        unsafe {
+            std::env::remove_var("JSH_EXPORT_TEST");
+        }
     }
 
     #[test]

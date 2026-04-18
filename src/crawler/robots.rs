@@ -35,7 +35,10 @@ pub fn parse_robots_txt(content: &str, our_user_agent: &str) -> RobotsRules {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if let Some(agent) = trimmed.strip_prefix("User-agent:").or_else(|| trimmed.strip_prefix("user-agent:")) {
+        if let Some(agent) = trimmed
+            .strip_prefix("User-agent:")
+            .or_else(|| trimmed.strip_prefix("user-agent:"))
+        {
             let agent = agent.trim().to_lowercase();
             if agent == our_agent_lower || our_agent_lower.starts_with(&agent) {
                 found_specific = true;
@@ -65,7 +68,10 @@ pub fn parse_robots_txt(content: &str, our_user_agent: &str) -> RobotsRules {
         let lower = trimmed.to_lowercase();
 
         if lower.starts_with("user-agent:") {
-            let agent = trimmed.split_once(':').map(|(_, v)| v.trim().to_lowercase()).unwrap_or_default();
+            let agent = trimmed
+                .split_once(':')
+                .map(|(_, v)| v.trim().to_lowercase())
+                .unwrap_or_default();
             if agent == "*" {
                 in_wildcard_block = true;
                 in_matching_block = false;
@@ -150,10 +156,10 @@ pub fn is_allowed(rules: &RobotsRules, path: &str) -> bool {
     }
 
     match (best_allow, best_disallow) {
-        (None, None) => true,          // no rules match -> allowed
-        (Some(_), None) => true,       // only allow matches
-        (None, Some(_)) => false,      // only disallow matches
-        (Some(a), Some(d)) => a >= d,  // longest wins; tie -> allow
+        (None, None) => true,         // no rules match -> allowed
+        (Some(_), None) => true,      // only allow matches
+        (None, Some(_)) => false,     // only disallow matches
+        (Some(a), Some(d)) => a >= d, // longest wins; tie -> allow
     }
 }
 
@@ -205,11 +211,7 @@ fn glob_match(path: &str, pattern: &str) -> bool {
         }
     }
 
-    if anchored {
-        pos == path.len()
-    } else {
-        true
-    }
+    if anchored { pos == path.len() } else { true }
 }
 
 #[cfg(test)]
