@@ -231,6 +231,7 @@ mod tests {
             functions: vec![IrFunction {
                 name: "test".to_string(),
                 return_type: JStarType::Long,
+                param_vregs: Vec::new(),
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions,

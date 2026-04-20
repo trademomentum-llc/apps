@@ -1699,6 +1699,7 @@ mod tests {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
                 param_vregs: vec![],
+                param_count: 0,
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![
@@ -1738,6 +1739,7 @@ mod tests {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
                 param_vregs: vec![],
+                param_count: 0,
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![
@@ -1782,6 +1784,7 @@ mod tests {
                 name: "_start".to_string(),
                 return_type: JStarType::Int,
                 param_vregs: vec![],
+                param_count: 0,
                 blocks: vec![BasicBlock {
                     label: "entry".to_string(),
                     instructions: vec![

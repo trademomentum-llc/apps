@@ -8,10 +8,10 @@
 //!
 //! Virtual register IDs are u32 (unlimited supply, allocated by codegen).
 
+use std::collections::HashMap;
+use crate::types::{MorphResult, MorphlexError};
 use super::grammar::*;
 use super::token_map::{AddrMode, FlowKind, JStarInstruction, ScopeKind};
-use crate::types::MorphResult;
-use std::collections::HashMap;
 
 // ─── IR Types ───────────────────────────────────────────────────────────────
 
@@ -319,7 +319,6 @@ impl IrFunction {
     /// before the IR ever reaches codegen. If this passes, apply_fixups
     /// can never encounter a missing label.
     pub fn validate_cfg(&self) -> MorphResult<()> {
-        use crate::types::MorphlexError;
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         for block in &self.blocks {
