@@ -71,8 +71,11 @@ const SCRATCH_REGS: [X86Reg; 7] = [
 pub struct MachineCode {
     /// The .text section (executable code)
     pub text: Vec<u8>,
-    /// The .data section (initialized data)
+    /// The .data section (initialized data — string literals only)
     pub data: Vec<u8>,
+    /// Size of uninitialized global data (BSS). This region follows .data in
+    /// virtual memory but is NOT stored in the file — the kernel zero-fills it.
+    pub bss_size: usize,
     /// Stack frame size for _start
     pub stack_size: usize,
     /// Virtual address of .data section (set by linker, stored for codegen)
@@ -87,14 +90,13 @@ pub struct MachineCode {
 pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
     let mut emitter = CodeGen::new();
 
-    // Copy string literal data to .data section
+    // .data section: only string literals (initialized data that must be in the file).
     emitter.data = program.string_data.clone();
 
-    // Append global data after string_data in .data section.
-    // Global offsets in global_vregs are relative to global_data start,
-    // so we adjust them by string_data.len() to get absolute .data offsets.
+    // BSS: uninitialized global data. Lives after .data in virtual memory but
+    // is NOT written to the file — the kernel zero-fills it via p_memsz > p_filesz.
     let global_base = emitter.data.len();
-    emitter.data.extend_from_slice(&program.global_data);
+    emitter.bss_size = program.global_data.len();
 
     // Build the global_vregs map with adjusted offsets
     for (&vreg, &offset) in &program.global_vregs {
@@ -120,6 +122,7 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
     Ok(MachineCode {
         text: emitter.text,
         data: emitter.data,
+        bss_size: emitter.bss_size,
         stack_size: emitter.stack_size,
         data_vaddr: 0, // set by linker
         data_fixups: emitter.data_fixups,
@@ -129,6 +132,7 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
 struct CodeGen {
     text: Vec<u8>,
     data: Vec<u8>,
+    bss_size: usize,
     stack_size: usize,
     /// Map virtual register -> stack offset from rbp
     vreg_offsets: std::collections::HashMap<VReg, i32>,
@@ -162,6 +166,7 @@ impl CodeGen {
         CodeGen {
             text: Vec::new(),
             data: Vec::new(),
+            bss_size: 0,
             stack_size: 0,
             vreg_offsets: std::collections::HashMap::new(),
             next_stack_offset: -8, // first slot at rbp-8
