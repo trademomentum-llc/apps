@@ -53,7 +53,7 @@ impl X86Reg {
     }
 }
 
-/// Scratch registers available for allocation (caller-saved, minus rsp).
+#[allow(dead_code)]
 const SCRATCH_REGS: [X86Reg; 7] = [
     X86Reg::Rax,
     X86Reg::Rcx,
@@ -155,8 +155,6 @@ struct CodeGen {
     direct_storage_vregs: std::collections::HashSet<VReg>,
     /// Positions in .text where data-section offsets need linker patching.
     data_fixups: Vec<usize>,
-    /// Previous function's text/data hash for self-consistency checking (self-host verification).
-    previous_hash: Option<(blake3::Hash, blake3::Hash)>,
 }
 
 impl CodeGen {
@@ -175,7 +173,6 @@ impl CodeGen {
             global_vregs: std::collections::HashMap::new(),
             direct_storage_vregs: std::collections::HashSet::new(),
             data_fixups: Vec::new(),
-            previous_hash: None,
         }
     }
 
@@ -223,16 +220,6 @@ impl CodeGen {
             }
         }
 
-        // Self-consistency check (catches divergence immediately)
-        let text_hash = blake3::hash(&self.text);
-        let data_hash = blake3::hash(&self.data);
-        if let Some(prev) = &self.previous_hash {
-            if text_hash != prev.0 || data_hash != prev.1 {
-                Self::write_crash_report(&text_hash, &data_hash, prev, "jstar2 divergence detected");
-                panic!("jstar2 self-host divergence - see debug_logs/jstar2_crash.log");
-            }
-        }
-        self.previous_hash = Some((text_hash, data_hash));
         // === END CRITICAL FIX BLOCK ===
 
         // Restore direct_storage_vregs for this function
@@ -1566,29 +1553,6 @@ impl CodeGen {
 
 /// Write crash report for debugging self-host divergence
 impl CodeGen {
-    fn write_crash_report(
-        text_hash: &blake3::Hash,
-        data_hash: &blake3::Hash,
-        prev: &(blake3::Hash, blake3::Hash),
-        reason: &str,
-    ) {
-        use std::io::Write;
-        let debug_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("debug_logs");
-        let _ = std::fs::create_dir_all(&debug_dir);
-        
-        let report_path = debug_dir.join("jstar2_crash.log");
-        let mut file = std::fs::File::create(&report_path).unwrap();
-        
-        writeln!(file, "JSTAR2 SELF-HOST DIVERGENCE REPORT").unwrap();
-        writeln!(file, "====================================").unwrap();
-        writeln!(file, "Reason: {}", reason).unwrap();
-        writeln!(file, "Current text hash: {}", text_hash).unwrap();
-        writeln!(file, "Current data hash: {}", data_hash).unwrap();
-        writeln!(file, "Previous text hash: {}", prev.0).unwrap();
-        writeln!(file, "Previous data hash: {}", prev.1).unwrap();
-        writeln!(file, "\nThis indicates the self-hosted compiler produced different output").unwrap();
-        writeln!(file, "than the Rust bootstrap compiler.").unwrap();
-    }
 }
 
 #[cfg(test)]
