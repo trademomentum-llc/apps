@@ -1693,6 +1693,23 @@ return counter\n";
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn test_selfhost_while_accumulate() {
+        let src = "a counter\na total\n\
+store 4 into counter\n\
+store 0 into total\n\
+while compare counter 0\n\
+add total counter\n\
+store it into total\n\
+subtract counter 1\n\
+store it into counter\n\
+end\n\
+return total\n";
+        let (exit, _) = self_hosted_compile_and_run(src);
+        assert_eq!(exit, 10, "self-hosted: while accumulate 4+3+2+1=10");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn test_e2e_long_array_basic() {
         let exit =
             compile_and_run("a long arr 10\nstore 42 into arr at 0\nload from arr at 0\nreturn it");
