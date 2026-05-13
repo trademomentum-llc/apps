@@ -25,8 +25,8 @@ global input_len
 global byte output 262144
 global output_len
 
-# .text section (machine code)
-global byte text 65536
+# .text section (machine code) — 256KB for self-compilation
+global byte text 262144
 global text_len
 
 # .data section (string literals)
@@ -224,6 +224,9 @@ while equal read_done 0
         store it into input_len
     end
 end
+
+# DEBUG: uncomment to verify input reading
+# return input_len
 
 # ─── Phase 2: Tokenize ───────────────────────────────────────────────────────
 # Split input into tokens by whitespace. Classify each token.
@@ -903,6 +906,7 @@ while compare i tok_count
     store it into i
 end
 # === END DATA COLLECTION ===
+store data_len into string_data_len
 
 # ─── Phase 3: Parse number literals ──────────────────────────────────────────
 # Convert ASCII digit sequences in input to integer values.
@@ -1083,6 +1087,7 @@ add text_len 1
 store it into text_len
 # Record patch position
 global frame_patch_offset
+global string_data_len
 store text_len into frame_patch_offset
 # Emit 4 placeholder bytes for frame_size
 store 0 into text at text_len
@@ -2425,19 +2430,11 @@ while compare tok_idx tok_count
                 store it into tok_idx
             end
 
-            # Allocate variable: global → datasec, local → stack
-            if compare is_global_decl 1
-                # Global variable: allocate in datasec
-                store data_len into var_offset at var_count
-                add data_len temp3
-                store it into data_len
-            else
-                # Local variable: allocate on stack
-                add vreg_total_size temp3
-                store it into vreg_total_size
-                subtract 0 vreg_total_size
-                store it into var_offset at var_count
-            end
+            # Allocate variable on stack (self-hosted codegen uses rbp-relative only)
+            add vreg_total_size temp3
+            store it into vreg_total_size
+            subtract 0 vreg_total_size
+            store it into var_offset at var_count
 
             if equal temp4 53
                 store 1 into var_type at var_count
@@ -3848,36 +3845,13 @@ while compare tok_idx tok_count
             store it into text_len
         end
 
-        # Patch the forward jump: rel32 = text_len - (patch_pos + 4)
-        load from cf_label_end at cf_depth
-        store it into cf_patch
-        subtract text_len cf_patch
-        subtract it 4
-        store it into temp2
-
-        # Write rel32 at the patch position
-        bitand temp2 0xFF
-        store it into text at cf_patch
-        add cf_patch 1
-        store it into cf_patch
-        bitand temp2 0xFF00
-        divide it 256
-        store it into text at cf_patch
-        add cf_patch 1
-        store it into cf_patch
-        bitand temp2 0xFF0000
-        divide it 65536
-        store it into text at cf_patch
-        add cf_patch 1
-        store it into cf_patch
-        bitand temp2 0xFF000000
-        divide it 16777216
-        store it into text at cf_patch
-        
-        # FIX: Also patch else's jmp if it exists (cf_else_jmp != 0)
+        # Check whether this is an if/else or plain if
         load from cf_else_jmp at cf_depth
-        store it into cf_patch
-        if compare cf_patch 0
+        store it into temp4
+        if equal temp4 0
+            # Plain if (no else): patch cf_label_end to jump here
+            load from cf_label_end at cf_depth
+            store it into cf_patch
             subtract text_len cf_patch
             subtract it 4
             store it into temp2
@@ -3898,7 +3872,30 @@ while compare tok_idx tok_count
             bitand temp2 0xFF000000
             divide it 16777216
             store it into text at cf_patch
-            # Clear cf_else_jmp for next use
+        else
+            # If/else: cf_label_end was already patched by the else handler.
+            # Only patch the else's jmp to jump here.
+            store temp4 into cf_patch
+            subtract text_len cf_patch
+            subtract it 4
+            store it into temp2
+            bitand temp2 0xFF
+            store it into text at cf_patch
+            add cf_patch 1
+            store it into cf_patch
+            bitand temp2 0xFF00
+            divide it 256
+            store it into text at cf_patch
+            add cf_patch 1
+            store it into cf_patch
+            bitand temp2 0xFF0000
+            divide it 65536
+            store it into text at cf_patch
+            add cf_patch 1
+            store it into cf_patch
+            bitand temp2 0xFF000000
+            divide it 16777216
+            store it into text at cf_patch
             store 0 into cf_else_jmp at cf_depth
         end
     end
@@ -5708,7 +5705,7 @@ store it into text at frame_patch_offset
 # Then .text, then .data
 
 a total_size
-add text_len data_len
+add text_len string_data_len
 add it 120
 store it into total_size
 
@@ -5718,13 +5715,6 @@ store 0x400000 into vaddr_base
 a entry_point
 add vaddr_base 120
 store it into entry_point
-
-# data_vaddr = vaddr_base + 120 + text_len
-a data_vaddr
-add vaddr_base 120
-add it text_len
-add it data_len
-store it into data_vaddr
 
 # ── Build ELF header in output buffer ──
 store 0 into output_len
@@ -6123,9 +6113,9 @@ while compare j text_len
     store it into j
 end
 
-# ── Append .data section to output ──
+# ── Append .data section to output (only string literals, not BSS) ──
 store 0 into j
-while compare j data_len
+while compare j string_data_len
     load from datasec at j
     store it into output at output_len
     add output_len 1

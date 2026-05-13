@@ -319,6 +319,11 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
     map
 });
 
+/// Check whether an i32 hash corresponds to a known JStar keyword.
+pub fn is_keyword(id: i32) -> bool {
+    KEYWORD_TABLE.contains_key(&id)
+}
+
 // ─── Resolution ─────────────────────────────────────────────────────────────
 
 /// Resolve a morphlex TokenVector into a JStar token category.

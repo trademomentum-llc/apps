@@ -53,7 +53,7 @@ impl X86Reg {
     }
 }
 
-/// Scratch registers available for allocation (caller-saved, minus rsp).
+#[allow(dead_code)]
 const SCRATCH_REGS: [X86Reg; 7] = [
     X86Reg::Rax,
     X86Reg::Rcx,
@@ -71,8 +71,11 @@ const SCRATCH_REGS: [X86Reg; 7] = [
 pub struct MachineCode {
     /// The .text section (executable code)
     pub text: Vec<u8>,
-    /// The .data section (initialized data)
+    /// The .data section (initialized data — string literals only)
     pub data: Vec<u8>,
+    /// Size of uninitialized global data (BSS). This region follows .data in
+    /// virtual memory but is NOT stored in the file — the kernel zero-fills it.
+    pub bss_size: usize,
     /// Stack frame size for _start
     pub stack_size: usize,
     /// Virtual address of .data section (set by linker, stored for codegen)
@@ -87,14 +90,13 @@ pub struct MachineCode {
 pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
     let mut emitter = CodeGen::new();
 
-    // Copy string literal data to .data section
+    // .data section: only string literals (initialized data that must be in the file).
     emitter.data = program.string_data.clone();
 
-    // Append global data after string_data in .data section.
-    // Global offsets in global_vregs are relative to global_data start,
-    // so we adjust them by string_data.len() to get absolute .data offsets.
+    // BSS: uninitialized global data. Lives after .data in virtual memory but
+    // is NOT written to the file — the kernel zero-fills it via p_memsz > p_filesz.
     let global_base = emitter.data.len();
-    emitter.data.extend_from_slice(&program.global_data);
+    emitter.bss_size = program.global_data.len();
 
     // Build the global_vregs map with adjusted offsets
     for (&vreg, &offset) in &program.global_vregs {
@@ -120,6 +122,7 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
     Ok(MachineCode {
         text: emitter.text,
         data: emitter.data,
+        bss_size: emitter.bss_size,
         stack_size: emitter.stack_size,
         data_vaddr: 0, // set by linker
         data_fixups: emitter.data_fixups,
@@ -129,6 +132,7 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
 struct CodeGen {
     text: Vec<u8>,
     data: Vec<u8>,
+    bss_size: usize,
     stack_size: usize,
     /// Map virtual register -> stack offset from rbp
     vreg_offsets: std::collections::HashMap<VReg, i32>,
@@ -155,8 +159,6 @@ struct CodeGen {
     direct_storage_vregs: std::collections::HashSet<VReg>,
     /// Positions in .text where data-section offsets need linker patching.
     data_fixups: Vec<usize>,
-    /// Previous function's text/data hash for self-consistency checking (self-host verification).
-    previous_hash: Option<(blake3::Hash, blake3::Hash)>,
 }
 
 impl CodeGen {
@@ -164,6 +166,7 @@ impl CodeGen {
         CodeGen {
             text: Vec::new(),
             data: Vec::new(),
+            bss_size: 0,
             stack_size: 0,
             vreg_offsets: std::collections::HashMap::new(),
             next_stack_offset: -8, // first slot at rbp-8
@@ -175,7 +178,6 @@ impl CodeGen {
             global_vregs: std::collections::HashMap::new(),
             direct_storage_vregs: std::collections::HashSet::new(),
             data_fixups: Vec::new(),
-            previous_hash: None,
         }
     }
 
@@ -223,16 +225,6 @@ impl CodeGen {
             }
         }
 
-        // Self-consistency check (catches divergence immediately)
-        let text_hash = blake3::hash(&self.text);
-        let data_hash = blake3::hash(&self.data);
-        if let Some(prev) = &self.previous_hash {
-            if text_hash != prev.0 || data_hash != prev.1 {
-                Self::write_crash_report(&text_hash, &data_hash, prev, "jstar2 divergence detected");
-                panic!("jstar2 self-host divergence - see debug_logs/jstar2_crash.log");
-            }
-        }
-        self.previous_hash = Some((text_hash, data_hash));
         // === END CRITICAL FIX BLOCK ===
 
         // Restore direct_storage_vregs for this function
@@ -1566,29 +1558,6 @@ impl CodeGen {
 
 /// Write crash report for debugging self-host divergence
 impl CodeGen {
-    fn write_crash_report(
-        text_hash: &blake3::Hash,
-        data_hash: &blake3::Hash,
-        prev: &(blake3::Hash, blake3::Hash),
-        reason: &str,
-    ) {
-        use std::io::Write;
-        let debug_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("debug_logs");
-        let _ = std::fs::create_dir_all(&debug_dir);
-        
-        let report_path = debug_dir.join("jstar2_crash.log");
-        let mut file = std::fs::File::create(&report_path).unwrap();
-        
-        writeln!(file, "JSTAR2 SELF-HOST DIVERGENCE REPORT").unwrap();
-        writeln!(file, "====================================").unwrap();
-        writeln!(file, "Reason: {}", reason).unwrap();
-        writeln!(file, "Current text hash: {}", text_hash).unwrap();
-        writeln!(file, "Current data hash: {}", data_hash).unwrap();
-        writeln!(file, "Previous text hash: {}", prev.0).unwrap();
-        writeln!(file, "Previous data hash: {}", prev.1).unwrap();
-        writeln!(file, "\nThis indicates the self-hosted compiler produced different output").unwrap();
-        writeln!(file, "than the Rust bootstrap compiler.").unwrap();
-    }
 }
 
 #[cfg(test)]

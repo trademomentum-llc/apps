@@ -111,8 +111,10 @@ fn build_elf(code: &MachineCode) -> MorphResult<Vec<u8>> {
 
     let headers_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE;
 
-    // Total segment size = text + data
+    // File segment = text + initialized data (no BSS)
     let segment_size = text_size + data_size;
+    // Memory segment = file segment + BSS (zero-filled by kernel)
+    let mem_segment_size = segment_size + code.bss_size;
 
     // Entry point = start of .text (right after headers)
     let entry_point = VADDR_BASE + headers_size as u64;
@@ -153,8 +155,9 @@ fn build_elf(code: &MachineCode) -> MorphResult<Vec<u8>> {
     elf.extend_from_slice(&VADDR_BASE.to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&VADDR_BASE.to_le_bytes()); // p_paddr
     let total_file_size = (headers_size + segment_size) as u64;
+    let total_mem_size = (headers_size + mem_segment_size) as u64;
     elf.extend_from_slice(&total_file_size.to_le_bytes()); // p_filesz
-    elf.extend_from_slice(&total_file_size.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&total_mem_size.to_le_bytes()); // p_memsz (includes BSS)
     elf.extend_from_slice(&0x1000u64.to_le_bytes()); // p_align
 
     assert_eq!(elf.len(), headers_size);
@@ -184,6 +187,7 @@ mod tests {
             data_vaddr: 0,
             text: vec![0x90], // nop
             data: vec![],
+            bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
         };
@@ -197,6 +201,7 @@ mod tests {
             data_vaddr: 0,
             text: vec![0x90],
             data: vec![],
+            bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
         };
@@ -210,6 +215,7 @@ mod tests {
             data_vaddr: 0,
             text: vec![0x90],
             data: vec![],
+            bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
         };
@@ -224,6 +230,7 @@ mod tests {
             data_vaddr: 0,
             text: vec![0x90],
             data: vec![],
+            bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
         };
@@ -238,6 +245,7 @@ mod tests {
             data_vaddr: 0,
             text: vec![0x90],
             data: vec![],
+            bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
         };
@@ -253,6 +261,7 @@ mod tests {
             data_vaddr: 0,
             text: vec![0x90],
             data: vec![0x42, 0x43],
+            bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
         };
@@ -270,6 +279,7 @@ mod tests {
             data_vaddr: 0,
             text: vec![0xB8, 0x01, 0x00, 0x00, 0x00], // mov eax, 1
             data: vec![],
+            bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
         };
