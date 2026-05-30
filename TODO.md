@@ -4,47 +4,25 @@
 
 ### T-Diagram Stabilization
 
-#### [DONE] Root Cause Identified (2026-04-01 16:00)
+#### [DONE] Root Cause Identified and Fixed (2026-05-30)
 
-**jstar3 crash cause:** Missing .data section (1.7MB)!
+**Issue:** 1-byte codegen divergence between jstar2 and jstar3 at offset 0x1c8b.
 
-- jstar2 (Rust): 1.8MB with .text + .data
-- jstar3 (jstar2 output): 68KB with .text ONLY
+**Root cause:** `string_data_len` was used before declared in compiler.jstr.
+- Line 909: `store data_len into string_data_len` (use)
+- Line 1090: `global string_data_len` (declaration)
 
-**Missing in compiler.jstr Phase 5:**
-1. String literal emission to `datasec`
-2. Global variable data emission
-3. `data_len` increment logic
+The self-hosted compiler's single-pass lookup failed, reading garbage from
+`var_offset[-1]`. This produced offset 0 in jstar2 and offset 103 in jstar3.
 
-#### [IN PROGRESS] Fix In Progress
+**Fix:** Moved `global string_data_len` to line 35 (before first use).
 
-- [ ] Add string literal data emission (~100 lines)
-  - Copy string bytes from input to datasec at data_len
-  - Increment data_len by string length
-  - Patch token offsets to point to datasec
-  
-- [ ] Add global variable data emission (~100 lines)
-  - Zero-initialize globals in datasec at data_len
-  - Increment data_len by variable size
-  - Track global_vreg → datasec offset mapping
-  
-- [ ] Test with simple program first
-  ```
-  return 42
-  ```
-  
-- [ ] Test with string literal
-  ```
-  print "hello"
-  return 0
-  ```
-  
-- [ ] Full self-host test
-  ```bash
-  cargo run -- jstar compile --input jstar/compiler.jstr --output jstar2.bin
-  ./jstar2.bin < jstar/compiler.jstr > jstar3.bin
-  cmp jstar2.bin jstar3.bin  # Should match!
-  ```
+**Verification:**
+- jstar2 == jstar3 (70,925 bytes, byte-identical)
+- jstar3 == jstar4 (stable fixpoint at generation 2)
+- `test_t_diagram_fixpoint` passes without workaround
+
+---
 
 ## NNOS Ports (Ready for Commit)
 

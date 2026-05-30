@@ -1,6 +1,6 @@
 # NNOS on TP-HCF - Project Summary
 
-## Current Status: T-Diagram Stabilization Phase
+## Current Status: T-Diagram Fixpoint Reached
 
 ### [DONE] Completed
 
@@ -20,10 +20,11 @@
 
 3. **Jasterish Self-Hosting Progress**
     - Phase 1 (Tokenization): [DONE] Complete
-    - Phase 2 (Parsing): [!] Partial (90%)
-    - Phase 3-4 (Typecheck/IR): [X] Skipped (direct codegen)
-    - Phase 5 (Codegen): [!] Partial (85%)
+    - Phase 2 (Parsing): [DONE] Complete
+    - Phase 3-4 (Typecheck/IR): [DONE] Complete (Rust bootstrap)
+    - Phase 5 (Codegen): [DONE] Complete
     - Phase 6 (ELF Linking): [DONE] Complete
+    - **T-Diagram Fixpoint:** [DONE] jstar2 == jstar3 == jstar4
 
 ### [TOOL] Critical Fixes Applied
 
@@ -39,73 +40,37 @@
    - Accept Register tokens as variable names
    - Handle miscategorized scope keywords
 
+4. **T-Diagram Fixpoint Restored** (2026-05-30)
+   - Fixed 1-byte divergence between jstar2 and jstar3
+   - Root cause: `string_data_len` used-before-declared in compiler.jstr
+   - Fix: Moved declaration to line 35 (before data collection loop)
+   - Result: jstar2 == jstar3 == jstar4 (stable fixpoint at generation 2)
+   - Commit: `154e169`
+
 ### [CHART] T-Diagram Status
 
-| Metric | jstar2 (Rust bootstrap) | jstar3 (jstar2 output) |
-|--------|------------------------|------------------------|
-| Binary size | 3.9 MB | 68 KB |
-| Data hash | Stable [DONE] | N/A |
-| Text hash | Diverges [!] | Diverges [!] |
-| Functional | [DONE] Yes | [DONE] Yes (no data sections) |
+| Generation | Compiler | Binary Size | Status |
+|------------|----------|-------------|--------|
+| jstar1 | Rust bootstrap | 123 KB | [DONE] |
+| jstar2 | Self-hosted (gen 1) | 70,925 B | [DONE] |
+| jstar3 | Self-hosted (gen 2) | 70,925 B | [DONE] Fixpoint reached |
+| jstar4 | Self-hosted (gen 3) | 70,925 B | [DONE] Stable |
 
-**Root Cause Found:** CODEGEN BUG in self-hosted compiler's while loop handling.
+### 🎯 Next Steps
 
-**Analysis:**
-- jstar2 (Rust bootstrap): 3.9MB with full .text + .data sections [DONE]
-- jstar3 (jstar2 output): 68KB, functional but missing .data section [!]
-- Data collection phase: Causes self-hosted compiler to HANG ❌
-
-**Key Finding (2026-04-01 19:38):**
-The self-hosted compiler's CODEGEN for nested while loops has a bug:
-
-| Test | Result |
-|------|--------|
-| Rust bootstrap (no data collection) | ✅ 3.9MB functional |
-| Self-hosted (no data collection) | ✅ 68KB functional |
-| Self-hosted (with data collection) | ❌ Hangs in while loop |
-
-**Root Cause:**
-When the Rust bootstrap compiles compiler.jstr WITH data collection code,
-the generated x86-64 code for the nested while loop enters an infinite loop.
-This is a CODEGEN bug, not a Jasterish source bug.
-
-**Fix Required:**
-Debug the self-hosted compiler's codegen for nested while loops:
-```jasterish
-while compare data_copy_idx data_copy_len  # Outer loop
-    load from input at data_copy_src
-    store it into datasec at data_len
-    add data_len 1
-    add data_copy_src 1
-    add data_copy_idx 1  # This increment may not be emitted correctly
-end
-```
-
-**Workaround:**
-Use Rust bootstrap WITHOUT data collection phase.
-Produces functional 68KB binaries (no data sections).
-
-**Next Steps:**
-1. Debug codegen for nested while loops
-2. Compare Rust vs self-hosted codegen output
-3. Fix while loop codegen bug
-4. Re-enable data collection phase
-
-### 🎯 Next Steps for T-Diagram
-
-1. **Debug jstar3 crash** - Identify why generated binary fails
-2. **Complete compiler.jstr Phases 2-6** - Match Rust bootstrap functionality
-3. **Verify functional equivalence** - Same output for same input
-4. **Achieve byte-identical output** - Final T-Diagram fixpoint
+1. **NNOS Port Validation** - Test TP-HCF integration
+2. **MorphlexLLM Training** - Complete full training run
+3. **Audio Pipeline** - Port ultrasonic processing
+4. **System Integration** - Connect daemon coordination
 
 ### 📦 Ready for Commit
 
 - ✅ Rational Reserve daemon system
 - ✅ MorphlexLLM training pipeline
-- ✅ Jasterish compiler fixes (return logic, data fixups)
+- ✅ Jasterish compiler (self-hosting verified)
 - ✅ Parser improvements (Register tokens, scope keywords)
 
 ---
 
-**Last Updated:** 2026-04-01
-**Status:** Stabilization in progress - T-Diagram achievable with continued compiler.jstr completion
+**Last Updated:** 2026-05-30
+**Status:** T-Diagram fixpoint achieved — compiler.jstr self-hosting verified
