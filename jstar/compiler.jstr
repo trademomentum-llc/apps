@@ -32,6 +32,7 @@ global text_len
 # .data section (string literals)
 global byte datasec 2097152
 global data_len
+global string_data_len
 
 # ─── Token arrays ────────────────────────────────────────────────────────────
 # Each token is described by its start offset in input and its length.
@@ -1087,7 +1088,6 @@ add text_len 1
 store it into text_len
 # Record patch position
 global frame_patch_offset
-global string_data_len
 store text_len into frame_patch_offset
 # Emit 4 placeholder bytes for frame_size
 store 0 into text at text_len
