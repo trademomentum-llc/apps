@@ -16,17 +16,16 @@ use std::path::Path;
 /// All remaining lines are collected as JStar source, compiled as a single
 /// program, and executed via the full pipeline (codegen -> ELF -> execute).
 pub fn run_script(path: &Path) -> MorphResult<()> {
-    let content = std::fs::read_to_string(path).map_err(|e| MorphlexError::IoError(e))?;
+    let content = std::fs::read_to_string(path).map_err(MorphlexError::IoError)?;
 
     let mut lines = content.lines().peekable();
     let mut state = ShellState::new();
 
     // Skip shebang line if present
-    if let Some(first) = lines.peek() {
-        if first.starts_with("#!") {
+    if let Some(first) = lines.peek()
+        && first.starts_with("#!") {
             lines.next();
         }
-    }
 
     let mut jstar_lines: Vec<String> = Vec::new();
 
@@ -166,11 +165,10 @@ fn execute_script_pipeline(pipeline: &shell::Pipeline, state: &mut ShellState) {
         match super::execute_jstar(cmd) {
             Ok(result) => {
                 if is_last {
-                    if !result.stdout.is_empty() {
-                        if let Err(e) = shell::write_output(&result.stdout, seg) {
+                    if !result.stdout.is_empty()
+                        && let Err(e) = shell::write_output(&result.stdout, seg) {
                             eprintln!("Redirect error: {}", e);
                         }
-                    }
                     if !result.stderr.is_empty() {
                         eprint!("{}", result.stderr);
                     }

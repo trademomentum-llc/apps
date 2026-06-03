@@ -199,7 +199,7 @@ impl DataLoader {
         let mut samples = Vec::new();
 
         // Read token vectors from database
-        let data = std::fs::read(path).map_err(|e| MorphlexError::IoError(e))?;
+        let data = std::fs::read(path).map_err(MorphlexError::IoError)?;
 
         // Parse token vectors (12 bytes each)
         const VECTOR_SIZE: usize = 12;
@@ -234,13 +234,13 @@ impl DataLoader {
 
     /// Load from text file (one sentence per line)
     pub fn from_text_file(path: &Path, batch_size: usize, shuffle: bool) -> MorphResult<Self> {
-        let file = File::open(path).map_err(|e| MorphlexError::IoError(e))?;
+        let file = File::open(path).map_err(MorphlexError::IoError)?;
         let reader = BufReader::new(file);
 
         let mut samples = Vec::new();
 
         for line in reader.lines() {
-            let line = line.map_err(|e| MorphlexError::IoError(e))?;
+            let line = line.map_err(MorphlexError::IoError)?;
 
             // Process line through morphlex pipeline
             match crate::compile(&line) {
@@ -301,7 +301,7 @@ impl DataLoader {
 
     /// Get number of batches per epoch
     pub fn num_batches(&self) -> usize {
-        (self.samples.len() + self.batch_size - 1) / self.batch_size
+        self.samples.len().div_ceil(self.batch_size)
     }
 
     /// Check if epoch is complete
@@ -368,7 +368,7 @@ impl TrainingLoss {
         let mut role_loss = 0.0;
         let mut count = 0;
 
-        for (sample_idx, sample) in batch.samples.iter().enumerate() {
+        for sample in batch.samples.iter() {
             let enriched = sample.to_enriched(model.config.d_model);
 
             // Forward pass
@@ -376,39 +376,39 @@ impl TrainingLoss {
             let (lemma_logits, pos_logits, role_logits) = model.predict_aux(&enriched);
 
             // Compute cross-entropy losses
-            for (t, &target) in sample.targets.iter().enumerate() {
+            for &target in sample.targets.iter() {
                 if target < 0 {
                     continue; // Skip padding
                 }
 
-                let target_idx = (target.abs() as usize) % logits.len();
+                let target_idx = (target as u32 as usize) % logits.len();
                 lm_loss += -logits[target_idx].ln().max(-100.0); // Clamp for numerical stability
                 count += 1;
             }
 
-            for (t, &target) in sample.lemma_targets.iter().enumerate() {
+            for &target in sample.lemma_targets.iter() {
                 if target < 0 {
                     continue;
                 }
-                let target_idx = (target.abs() as usize) % lemma_logits.len();
+                let target_idx = (target as u32 as usize) % lemma_logits.len();
                 lemma_loss += -lemma_logits[target_idx].ln().max(-100.0);
             }
 
-            for (t, &target) in sample.pos_targets.iter().enumerate() {
+            for &target in sample.pos_targets.iter() {
                 if target < 0 {
                     continue;
                 }
-                let target_idx = target.abs() as usize;
+                let target_idx = target as u32 as usize;
                 if target_idx < pos_logits.len() {
                     pos_loss += -pos_logits[target_idx].ln().max(-100.0);
                 }
             }
 
-            for (t, &target) in sample.role_targets.iter().enumerate() {
+            for &target in sample.role_targets.iter() {
                 if target < 0 {
                     continue;
                 }
-                let target_idx = target.abs() as usize;
+                let target_idx = target as u32 as usize;
                 if target_idx < role_logits.len() {
                     role_loss += -role_logits[target_idx].ln().max(-100.0);
                 }
@@ -486,12 +486,15 @@ impl AdamW {
             states: std::collections::HashMap::new(),
         }
     }
+}
 
-    /// Default AdamW config
-    pub fn default() -> Self {
+impl Default for AdamW {
+    fn default() -> Self {
         Self::new(1e-4, 0.9, 0.999, 1e-8, 0.01)
     }
+}
 
+impl AdamW {
     /// Compute gradients numerically (for demonstration)
     pub fn compute_gradients(
         &self,
@@ -506,7 +509,7 @@ impl AdamW {
     }
 
     /// Update parameters (simplified)
-    pub fn step(&mut self, model: &mut MorphlexLLM, gradients: &[f32]) {
+    pub fn step(&mut self, _model: &mut MorphlexLLM, _gradients: &[f32]) {
         // In production, this would update actual model parameters
         // For now, just increment timestep
         self.states.iter_mut().for_each(|(_, s)| s.t += 1);
@@ -659,7 +662,7 @@ impl Trainer {
             self.stats.tokens_processed += batch.batch_size() as u64 * batch.seq_len() as u64;
 
             // Log progress
-            if self.stats.steps % self.config.log_interval == 0 {
+            if self.stats.steps.is_multiple_of(self.config.log_interval) {
                 eprintln!(
                     "Step {}: loss={:.4}, lm_loss={:.4}, ppl={:.2}",
                     self.stats.steps, loss.total, loss.lm_loss, loss.perplexity
@@ -667,7 +670,7 @@ impl Trainer {
             }
 
             // Save checkpoint
-            if self.stats.steps % self.config.checkpoint_interval == 0 {
+            if self.stats.steps.is_multiple_of(self.config.checkpoint_interval) {
                 self.save_checkpoint()?;
             }
         }
@@ -732,7 +735,7 @@ impl Trainer {
 
     /// Save checkpoint
     pub fn save_checkpoint(&self) -> MorphResult<()> {
-        std::fs::create_dir_all(&self.config.output_dir).map_err(|e| MorphlexError::IoError(e))?;
+        std::fs::create_dir_all(&self.config.output_dir).map_err(MorphlexError::IoError)?;
 
         let checkpoint = Checkpoint {
             epoch: self.stats.epochs,
@@ -747,7 +750,7 @@ impl Trainer {
         );
         let json = serde_json::to_string_pretty(&checkpoint)
             .map_err(|e| MorphlexError::DatabaseError(e.to_string()))?;
-        std::fs::write(&path, json).map_err(|e| MorphlexError::IoError(e))?;
+        std::fs::write(&path, json).map_err(MorphlexError::IoError)?;
 
         // Save model
         let model_path = format!(
@@ -761,7 +764,7 @@ impl Trainer {
 
     /// Load from checkpoint
     pub fn load_checkpoint(path: &Path) -> MorphResult<(Checkpoint, MorphlexLLM)> {
-        let json = std::fs::read_to_string(path).map_err(|e| MorphlexError::IoError(e))?;
+        let json = std::fs::read_to_string(path).map_err(MorphlexError::IoError)?;
         let checkpoint: Checkpoint =
             serde_json::from_str(&json).map_err(|e| MorphlexError::DatabaseError(e.to_string()))?;
 
@@ -912,7 +915,7 @@ mod tests {
 
     #[test]
     fn test_optimizer() {
-        let mut optimizer = AdamW::default();
+        let optimizer = AdamW::default();
         assert_eq!(optimizer.lr, 1e-4);
         assert_eq!(optimizer.beta1, 0.9);
         assert_eq!(optimizer.beta2, 0.999);

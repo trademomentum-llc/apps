@@ -38,7 +38,9 @@ pub enum JStarStatement {
     /// e.g., "a mutable integer counter"
     /// e.g., "a buffer 256" (array of 256 bytes)
     Declare {
+        #[allow(dead_code)]
         scope: ScopeKind,
+        #[allow(dead_code)]
         name: String,
         ty: JStarType,
         size: Option<usize>,
@@ -200,7 +202,9 @@ pub enum TypedStatement {
         result_type: JStarType,
     },
     Declare {
+        #[allow(dead_code)]
         scope: ScopeKind,
+        #[allow(dead_code)]
         name: String,
         ty: JStarType,
         size: Option<usize>,

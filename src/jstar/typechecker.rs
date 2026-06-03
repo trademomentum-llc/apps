@@ -18,8 +18,10 @@ use std::collections::HashMap;
 /// Symbol table entry — tracks declared variables and their types.
 #[derive(Debug, Clone)]
 struct Symbol {
+    #[allow(dead_code)]
     name: String,
     ty: JStarType,
+    #[allow(dead_code)]
     scope: ScopeKind,
 }
 

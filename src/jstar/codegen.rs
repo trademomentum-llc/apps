@@ -183,7 +183,7 @@ impl CodeGen {
 
     /// Allocate a stack slot for a virtual register. Returns offset from rbp.
     fn alloc_stack_slot(&mut self, vreg: VReg, size: usize) -> i32 {
-        let aligned_size = ((size + 7) / 8) * 8; // 8-byte align
+        let aligned_size = size.div_ceil(8) * 8; // 8-byte align
         self.next_stack_offset -= aligned_size as i32;
         let offset = self.next_stack_offset;
         self.vreg_offsets.insert(vreg, offset);
@@ -316,11 +316,10 @@ impl CodeGen {
             let mut param_vregs: Vec<VReg> = Vec::new();
             if let Some(entry_block) = func.blocks.first() {
                 for inst in &entry_block.instructions {
-                    if let IrInst::Alloca { dest, .. } = inst {
-                        if param_vregs.len() < func.param_count {
+                    if let IrInst::Alloca { dest, .. } = inst
+                        && param_vregs.len() < func.param_count {
                             param_vregs.push(*dest);
                         }
-                    }
                 }
             }
             if param_vregs.len() != func.param_count {

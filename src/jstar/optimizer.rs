@@ -117,10 +117,7 @@ fn replace_values_in_terminator(term: &mut Terminator, map: &std::collections::H
 }
 
 fn replace_value(val: &mut IrValue, map: &std::collections::HashMap<VReg, i64>) {
-    match val {
-        IrValue::Reg(r) => { if let Some(&imm) = map.get(r) { *val = IrValue::Imm(imm); } }
-        _ => {}
-    }
+    if let IrValue::Reg(r) = val && let Some(&imm) = map.get(r) { *val = IrValue::Imm(imm); }
 }
 
 fn dead_code_eliminate(func: &mut IrFunction) {
@@ -214,10 +211,7 @@ fn collect_values_in_terminator(term: &Terminator, used: &mut HashSet<VReg>) {
 }
 
 fn collect_vreg(val: &IrValue, used: &mut HashSet<VReg>) {
-    match val {
-        IrValue::Reg(r) => { used.insert(*r); }
-        _ => {}
-    }
+    if let IrValue::Reg(r) = val { used.insert(*r); }
 }
 
 #[cfg(test)]

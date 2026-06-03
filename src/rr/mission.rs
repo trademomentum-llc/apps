@@ -17,8 +17,10 @@ pub type TaskId = String;
 
 /// Mission priority level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Priority {
     /// Routine priority
+    #[default]
     Routine = 0,
     /// Priority mission
     Priority = 1,
@@ -26,11 +28,6 @@ pub enum Priority {
     Urgent = 2,
 }
 
-impl Default for Priority {
-    fn default() -> Self {
-        Priority::Routine
-    }
-}
 
 /// Mission constraints
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

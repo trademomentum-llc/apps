@@ -84,3 +84,7 @@ The self-hosted compiler's single-pass lookup failed, reading garbage from
 ---
 
 **Priority:** T-Diagram stabilization → NNOS ports → Audio pipeline → System integration
+
+**2026-05-31 Compiler Update:** Pulled jstar4 fixpoint. JStar 4 and JStar 5 are now byte-identical (SHA256 d510be40bea44ece8442e66289e39a4f5a89822307316ed80ca84ad969187dc1). Full self-host T-diagram validated through generation 4/5. Critical foundation for sovereign J* work. KDB 2026-05-31-06.
+
+**Architectural Scope (2026-05-31):** Jasterish = sovereign foundation + Neural Engine + proprietary Denominators mechanisms. Not the entire OS. Pragmatic layers allowed in other languages. See KDB 2026-05-31-07.

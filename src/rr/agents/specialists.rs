@@ -779,6 +779,7 @@ pub struct SearchOperation {
 
 /// Search options
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct SearchOptions {
     /// Case sensitive
     pub case_sensitive: bool,
@@ -790,16 +791,6 @@ pub struct SearchOptions {
     pub whole_word: bool,
 }
 
-impl Default for SearchOptions {
-    fn default() -> Self {
-        Self {
-            case_sensitive: false,
-            use_regex: false,
-            multiline: false,
-            whole_word: false,
-        }
-    }
-}
 
 /// Replacement template
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -900,7 +891,7 @@ pub struct Match {
 /// Find matches in text (simplified)
 fn find_matches(text: &str, pattern: &str, options: &SearchOptions) -> Vec<Match> {
     let mut matches = Vec::new();
-    let search_text = if options.case_sensitive {
+    let _search_text = if options.case_sensitive {
         text.to_string()
     } else {
         text.to_lowercase()
@@ -943,13 +934,10 @@ fn replace_all(text: &str, pattern: &str, replacement: &str, options: &SearchOpt
         let pattern_lower = pattern.to_lowercase();
         let mut result = text.to_string();
         let mut lower_result = result.to_lowercase();
-        let mut offset = 0i32;
 
         while let Some(pos) = lower_result.find(&pattern_lower) {
-            let orig = result[pos..pos + pattern.len()].to_string();
             result.replace_range(pos..pos + pattern.len(), replacement);
             lower_result = result.to_lowercase();
-            offset += replacement.len() as i32 - pattern.len() as i32;
         }
 
         result
@@ -1100,30 +1088,27 @@ impl DataManagementAgent {
             if let Some(v) = value {
                 // Type validation (simplified)
                 match &field.field_type {
-                    FieldType::Integer => {
-                        if v.parse::<i64>().is_err() {
+                    FieldType::Integer
+                        if v.parse::<i64>().is_err() => {
                             errors.push(ValidationError {
                                 field: field.name.clone(),
                                 error: "Invalid integer".to_string(),
                             });
                         }
-                    }
-                    FieldType::Float => {
-                        if v.parse::<f64>().is_err() {
+                    FieldType::Float
+                        if v.parse::<f64>().is_err() => {
                             errors.push(ValidationError {
                                 field: field.name.clone(),
                                 error: "Invalid float".to_string(),
                             });
                         }
-                    }
-                    FieldType::Boolean => {
-                        if !["true", "false", "1", "0"].contains(&v.as_str()) {
+                    FieldType::Boolean
+                        if !["true", "false", "1", "0"].contains(&v.as_str()) => {
                             errors.push(ValidationError {
                                 field: field.name.clone(),
                                 error: "Invalid boolean".to_string(),
                             });
                         }
-                    }
                     _ => {}
                 }
             }
@@ -1431,7 +1416,7 @@ mod tests {
 
     #[test]
     fn test_data_filtration() {
-        let mut agent = DataFiltrationAgent::new("filter1".to_string(), "Filter Agent".to_string());
+        let agent = DataFiltrationAgent::new("filter1".to_string(), "Filter Agent".to_string());
         let mut row1 = std::collections::HashMap::new();
         row1.insert("name".to_string(), "Alice".to_string());
         let mut row2 = std::collections::HashMap::new();

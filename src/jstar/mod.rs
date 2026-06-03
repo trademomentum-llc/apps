@@ -139,7 +139,7 @@ pub fn tokenize_jstar(input: &str) -> MorphResult<(Vec<String>, Vec<String>, Vec
 
                 for raw_token in processed.split_whitespace() {
                     let lower = raw_token.to_lowercase();
-                    if raw_token.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                    if raw_token.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                         jstar_tokens.push(JStarToken {
                             original: lower,
                             is_number: true,
@@ -450,9 +450,10 @@ pub fn compile_source(source: &str, output_path: &Path) -> MorphResult<()> {
 mod tests {
     use super::token_map::*;
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
 
     /// Monotonic counter to guarantee unique binary names across parallel tests.
+    #[allow(dead_code)]
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]

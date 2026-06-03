@@ -393,21 +393,18 @@ pub fn search(
         if let Some(posting_list) = index.inverted.get(&lemma_id) {
             for hit in posting_list {
                 // Apply filters
-                if let Some(pos_filter) = config.filter.pos {
-                    if hit.pos != pos_filter {
+                if let Some(pos_filter) = config.filter.pos
+                    && hit.pos != pos_filter {
                         continue;
                     }
-                }
-                if let Some(role_filter) = config.filter.role {
-                    if hit.role != role_filter {
+                if let Some(role_filter) = config.filter.role
+                    && hit.role != role_filter {
                         continue;
                     }
-                }
-                if let Some(morph_mask) = config.filter.morph_mask {
-                    if (hit.morph & morph_mask) != morph_mask {
+                if let Some(morph_mask) = config.filter.morph_mask
+                    && (hit.morph & morph_mask) != morph_mask {
                         continue;
                     }
-                }
                 doc_hits.entry(hit.doc_id).or_default().push(*hit);
             }
         }
