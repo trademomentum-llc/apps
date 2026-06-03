@@ -34,10 +34,8 @@ pub fn execute_jstar(source: &str) -> MorphResult<ExecutionResult> {
     source.hash(&mut hasher);
     std::thread::current().id().hash(&mut hasher);
     // Include timestamp for uniqueness across invocations with same source
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_nanos().hash(&mut hasher));
+    if let Ok(d) = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH) { d.as_nanos().hash(&mut hasher) }
     let hash = hasher.finish();
 
     let dir = std::env::temp_dir().join("jsh_exec");
@@ -69,8 +67,6 @@ pub fn execute_jstar(source: &str) -> MorphResult<ExecutionResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_return() {

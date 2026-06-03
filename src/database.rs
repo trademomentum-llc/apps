@@ -351,8 +351,8 @@ pub fn decrypt(
     };
 
     // Verify signatures
-    if let Some(vk_raw) = vk_bytes {
-        if sig_path.exists() {
+    if let Some(vk_raw) = vk_bytes
+        && sig_path.exists() {
             let sig_bytes = fs::read(&sig_path).map_err(MorphlexError::IoError)?;
 
             if is_v4 {
@@ -437,7 +437,6 @@ pub fn decrypt(
                 })?;
             }
         }
-    }
 
     if data.len() < MLKEM1024_CT_SIZE + 12 {
         return Err(MorphlexError::EncryptionError(
@@ -524,6 +523,7 @@ pub fn read_database(data: &[u8]) -> MorphResult<(Vec<String>, Vec<TokenVector>)
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::all)]
     use super::*;
     use std::fs::OpenOptions;
     use std::io::Write;

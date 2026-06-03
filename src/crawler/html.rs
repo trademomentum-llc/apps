@@ -69,12 +69,11 @@ fn html_to_markdown(document: &Html) -> String {
         None => {
             // No body tag -- walk the entire document
             for node in document.tree.nodes() {
-                if let Some(el) = ElementRef::wrap(node) {
-                    if el.value().name() == "html" {
+                if let Some(el) = ElementRef::wrap(node)
+                    && el.value().name() == "html" {
                         walk_element(&el, &mut output);
                         break;
                     }
-                }
             }
         }
     }

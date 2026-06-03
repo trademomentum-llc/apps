@@ -35,6 +35,12 @@ pub struct Pipeline {
     pub segments: Vec<Redirect>,
 }
 
+impl Default for ShellState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShellState {
     pub fn new() -> Self {
         Self {

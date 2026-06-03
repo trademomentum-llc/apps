@@ -123,12 +123,11 @@ pub fn crawl(config: &CrawlConfig) -> MorphResult<CrawlSummary> {
     // BFS loop
     while let Some(entry) = queue.pop_front() {
         // Check page limit
-        if let Some(max) = config.max_pages {
-            if pages_crawled >= max {
+        if let Some(max) = config.max_pages
+            && pages_crawled >= max {
                 eprintln!("Reached max_pages limit ({})", max);
                 break;
             }
-        }
 
         // Check depth limit
         if entry.depth > config.max_depth {
@@ -158,7 +157,7 @@ pub fn crawl(config: &CrawlConfig) -> MorphResult<CrawlSummary> {
             entry.url.scheme(),
             &config.user_agent,
         );
-        if !robots::is_allowed(&robots_rules, entry.url.path()) {
+        if !robots::is_allowed(robots_rules, entry.url.path()) {
             eprintln!("  [SKIP] robots.txt disallows: {}", entry.url);
             pages_skipped += 1;
             continue;

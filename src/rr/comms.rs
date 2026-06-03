@@ -4,10 +4,8 @@
 //! Rational Reserve agent coordination.
 
 use super::agents::base::AgentStatus;
-use super::hierarchy::*;
 use super::memory::now;
 use super::mission::*;
-use crate::types::MorphResult;
 use serde::{Deserialize, Serialize};
 
 /// Unique communication ID
@@ -351,14 +349,14 @@ pub struct ImpactAssessment {
     /// Timeline impact (delay in seconds)
     pub timeline_delay: u64,
     /// Resource impact (additional resources needed)
-    pub additional_resources: ResourceAllocation,
+    pub additional_resources: ResourceDelta,
     /// Affected tasks
     pub affected_tasks: Vec<String>,
 }
 
-/// Resource allocation (simplified for CASREP)
+/// Resource delta / additional impact (simplified for CASREP)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ResourceAllocation {
+pub struct ResourceDelta {
     /// Additional LLM calls needed
     pub llm_calls: u64,
     /// Additional compute time needed

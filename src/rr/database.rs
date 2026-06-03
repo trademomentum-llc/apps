@@ -9,7 +9,7 @@ use crate::rr::hierarchy::*;
 use crate::rr::memory::now;
 use crate::rr::mission::*;
 use crate::rr::orchestrator::*;
-use crate::types::{MorphResult, MorphlexError as MorphError};
+use crate::types::MorphResult;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -56,7 +56,7 @@ impl RRDatabase {
             return Ok(Self::new());
         }
 
-        let json = std::fs::read_to_string(path).map_err(|e| crate::MorphlexError::IoError(e))?;
+        let json = std::fs::read_to_string(path).map_err(crate::MorphlexError::IoError)?;
 
         serde_json::from_str(&json).map_err(|e| {
             crate::MorphlexError::DatabaseError(format!("Failed to parse database: {}", e))
@@ -69,7 +69,7 @@ impl RRDatabase {
             crate::MorphlexError::DatabaseError(format!("Failed to serialize database: {}", e))
         })?;
 
-        std::fs::write(path, json).map_err(|e| crate::MorphlexError::IoError(e))?;
+        std::fs::write(path, json).map_err(crate::MorphlexError::IoError)?;
 
         Ok(())
     }
@@ -494,7 +494,6 @@ impl std::fmt::Display for DatabaseStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn test_database_creation() {

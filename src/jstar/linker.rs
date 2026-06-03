@@ -60,14 +60,14 @@ pub fn link(code: &MachineCode, output_path: &Path) -> MorphResult<()> {
     patch_data_addresses(&mut code);
     let elf = build_elf(&code)?;
 
-    std::fs::write(output_path, &elf).map_err(|e| MorphlexError::IoError(e))?;
+    std::fs::write(output_path, &elf).map_err(MorphlexError::IoError)?;
 
     // Set executable permission
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(output_path, perms).map_err(|e| MorphlexError::IoError(e))?;
+        std::fs::set_permissions(output_path, perms).map_err(MorphlexError::IoError)?;
     }
 
     Ok(())

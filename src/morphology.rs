@@ -35,7 +35,7 @@ pub fn analyze(tokens: &[Token]) -> MorphResult<Vec<MorphAnalysis>> {
                 TokenKind::Word | TokenKind::Contraction | TokenKind::Hyphenated
             )
         })
-        .map(|token| analyze_token(token))
+        .map(analyze_token)
         .collect()
 }
 

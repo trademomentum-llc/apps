@@ -8,9 +8,8 @@ use crate::rr::comms::*;
 use crate::rr::hierarchy::*;
 use crate::rr::memory::*;
 use crate::rr::mission::*;
-use crate::types::{MorphResult, MorphlexError as MorphError};
+use crate::types::MorphResult;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Unique agent identifier
 pub type AgentId = String;
@@ -289,13 +288,12 @@ impl RRAgentBase {
     /// Default implementation for receiving an order
     pub fn base_receive_order(&mut self, order: &crate::rr::comms::Order) -> MorphResult<()> {
         // Validate chain of command (simplified - in production would verify signature)
-        if let Some(cmdr) = &self.commander {
-            if &order.header.from != cmdr {
+        if let Some(cmdr) = &self.commander
+            && &order.header.from != cmdr {
                 return Err(crate::MorphlexError::DatabaseError(
                     "Order received from non-commanding officer".to_string(),
                 ));
             }
-        }
 
         // Store order in short-term memory
         self.memory.add_short_term(

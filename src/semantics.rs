@@ -41,7 +41,7 @@ fn annotate_sentence(phrases: &[AstNode]) -> MorphResult<Vec<SemanticNode>> {
     let mut noun_phrase_count_before_verb = 0;
 
     // First pass: locate the verb to establish SVO structure
-    let verb_index = phrases.iter().position(|p| is_verb_phrase(p));
+    let verb_index = phrases.iter().position(is_verb_phrase);
 
     for (i, phrase) in phrases.iter().enumerate() {
         let role = match phrase {
@@ -172,9 +172,9 @@ fn infer_isolated_role(node: &AstNode) -> SemanticRole {
 fn extract_first_lemma(node: &AstNode) -> Option<String> {
     match node {
         AstNode::Word(w) => Some(w.analysis.lemma.clone()),
-        AstNode::Phrase(p) => p.children.first().and_then(|c| extract_first_lemma(c)),
-        AstNode::Sentence(s) => s.first().and_then(|c| extract_first_lemma(c)),
-        AstNode::Document(d) => d.first().and_then(|c| extract_first_lemma(c)),
+        AstNode::Phrase(p) => p.children.first().and_then(extract_first_lemma),
+        AstNode::Sentence(s) => s.first().and_then(extract_first_lemma),
+        AstNode::Document(d) => d.first().and_then(extract_first_lemma),
     }
 }
 

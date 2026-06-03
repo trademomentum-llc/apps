@@ -14,7 +14,6 @@ use crate::rr::agents::base::*;
 use crate::rr::comms::*;
 use crate::rr::hierarchy::*;
 use crate::rr::memory::*;
-use crate::rr::mission::*;
 use crate::types::{MorphResult, MorphlexError};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

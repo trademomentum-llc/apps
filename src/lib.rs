@@ -118,7 +118,7 @@ pub fn compile_lexicon(
     let mut seen = std::collections::HashSet::new();
     let mut deduped_vectors = Vec::new();
     let mut deduped_lemmas = Vec::new();
-    for (tv, lemma) in all_vectors.into_iter().zip(all_lemmas.into_iter()) {
+    for (tv, lemma) in all_vectors.into_iter().zip(all_lemmas) {
         if seen.insert(tv.id) {
             deduped_vectors.push(tv);
             deduped_lemmas.push(lemma);
@@ -128,7 +128,7 @@ pub fn compile_lexicon(
     // Sort by id for binary search lookups
     let mut paired: Vec<_> = deduped_vectors
         .into_iter()
-        .zip(deduped_lemmas.into_iter())
+        .zip(deduped_lemmas)
         .collect();
     paired.sort_by_key(|(tv, _)| tv.id);
     let (sorted_vectors, sorted_lemmas): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
