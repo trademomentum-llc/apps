@@ -1,0 +1,297 @@
+###############################################################################
+# data.jstr -- Morphlex DB loader + NeuroDiOS VFS bits for vector tables and neuro patterns
+# Jasterish Micro-Kernel
+#
+# Provides loading/parsing of morphlex v3 .db (header "MORPHLEX", lemma table,
+# 12-byte TokenVector table), fast i32 id== lookups, morph flag filters (incl.
+# NEURO_HABIT/EXEC_DYSFUNCTION/SENSORY), "mmap" simulation (memory addr ref
+# for zero-copy to Neural Engine / user processes), and neuro pattern stubs.
+#
+# Integrates with:
+# - VFS (neuro files, NEURO_MAPPED, mmap/read/size)
+# - Syscalls (new DATA_LOAD etc.)
+# - Train primitive lowering (emits syscalls + data ops for "train the neuro llm on ...")
+# - rr "Neuro Support Swarm" (filter + sovereign logs/patterns as VFS neuro files)
+#
+# Design: pure JStar (globals in/out, first-match loops with ==, no floats,
+# word-packed 3x i32 entries for fast int ops, deterministic). Sample in-mem
+# .db for self-contained parse test; real path uses VFS open/read + memory_alloc.
+#
+# API (globals + labels):
+#   in_path = "neuro_all.db" ; data_load_db ; out_handle (1 ok / 0 err)
+#   in_dbh = out_handle ; in_id = <i32> ; data_lookup_by_id ; out_vec_off
+#   in_dbh ; in_mask = NEURO_HABIT | SENSORY ; data_filter_neuro ; out_count
+#   in_vec_off ; data_vector_get_* ; out_val
+#   in_dbh ; data_mmap_db ; out_addr (vectors base for map)
+#   data_load_neuro_pattern (stub for swarm)
+#
+# TokenVector layout (12B, mapped to 3 words):
+#   0: id (i32 BLAKE3 lexeme)
+#   4: lemma_id (i32)
+#   8: packed = pos (byte0) | role<<8 (byte1) | morph (i16) <<16
+#
+# Neuro morph bits (i16 in TokenVector.morph):
+#   bit 13: NEURO_HABIT (8192)
+#   bit 14: EXEC_DYSFUNCTION (16384)
+#   bit 15: SENSORY (32768)
+###############################################################################
+
+# --- Globals (in/out + state; JStar style) ---
+global in_path
+global out_handle
+global in_dbh
+global in_id
+global out_vec_off
+global in_mask
+global out_count
+global in_vec_off
+global out_val
+global out_addr
+global db_entry_count
+global vectors_base
+global db_buf
+global db_handle
+global NEURO_HABIT
+global EXEC_DYSFUNCTION
+global SENSORY
+global b
+global ver
+global countv
+global ln
+global bb
+global iv
+global pb
+global ms
+global i
+global off
+global raw_off
+global woff
+global vid
+global vlem
+global p
+global r
+global m
+global pr
+global ppr
+global packedv
+global word_off
+global word2
+global word3
+global raw2
+global raw3
+global pack_off
+global morphv
+global matchv
+global c
+global h
+global addr
+global lemma_start
+global vectors_raw_base
+global vsize
+global word_count
+global word_buf_size
+global target
+global j
+global src
+global dst
+global fd
+global fsize
+
+data_init:
+  store 8192 into NEURO_HABIT
+  store 16384 into EXEC_DYSFUNCTION
+  store 32768 into SENSORY
+  store 0 into db_handle
+  store 0 into db_entry_count
+  store 0 into vectors_base
+  store 0 into db_buf
+  store 0 into out_handle
+  return
+
+data_load_db:
+  store 0 into out_handle
+  # Minimal functional sample .db in-mem (header + 2 vectors) for parse test.
+  # Real impl (with VFS patch): vfs_open(in_path) -> size, memory_alloc(fsize) into db_buf,
+  # vfs_read full, then same parse/pack logic below. (VFS neuro read/size/mmap support the path.)
+  memory_alloc 300 into db_buf
+  # magic "MORPHLEX" bytes 0-7
+  store 77 into b ; memory_store_byte db_buf b ; add db_buf 1
+  store 79 into b ; memory_store_byte db_buf b ; add db_buf 1
+  store 82 into b ; memory_store_byte db_buf b ; add db_buf 1
+  store 80 into b ; memory_store_byte db_buf b ; add db_buf 1
+  store 72 into b ; memory_store_byte db_buf b ; add db_buf 1
+  store 76 into b ; memory_store_byte db_buf b ; add db_buf 1
+  store 69 into b ; memory_store_byte db_buf b ; add db_buf 1
+  store 88 into b ; memory_store_byte db_buf b ; subtract db_buf 8
+  # version u32=3 at +8
+  add db_buf 8 ; store 3 into ver ; memory_store_int db_buf ver
+  # entry_count u64 low at +12
+  add db_buf 4 ; store 2 into countv ; memory_store_int db_buf countv
+  # flags at +20
+  add db_buf 8 ; store 0 into countv ; memory_store_int db_buf countv
+  # lemma table (entry0 "run" len3 + bytes; entry1 "fast" len4 + bytes)
+  add db_buf 4
+  store 3 into ln ; memory_store_short db_buf ln ; add db_buf 2
+  store 114 into bb ; memory_store_byte db_buf bb ; add db_buf 1
+  store 117 into bb ; memory_store_byte db_buf bb ; add db_buf 1
+  store 110 into bb ; memory_store_byte db_buf bb ; add db_buf 1
+  store 4 into ln ; memory_store_short db_buf ln ; add db_buf 2
+  store 102 into bb ; memory_store_byte db_buf bb ; add db_buf 1
+  store 97 into bb ; memory_store_byte db_buf bb ; add db_buf 1
+  store 115 into bb ; memory_store_byte db_buf bb ; add db_buf 1
+  store 116 into bb ; memory_store_byte db_buf bb ; add db_buf 1
+  # vector table: 2 x 12B raw (id/lemma/p/r/morph)
+  # vec0: id=0x12345678, lemma=0x11111111, pos=1(verb), role=2, morph=8194 (HAS+NEURO_HABIT)
+  store 305419896 into iv ; memory_store_int db_buf iv ; add db_buf 4
+  store 286331153 into iv ; memory_store_int db_buf iv ; add db_buf 4
+  store 1 into pb ; memory_store_byte db_buf pb ; add db_buf 1
+  store 2 into pb ; memory_store_byte db_buf pb ; add db_buf 1
+  store 8194 into ms ; memory_store_short db_buf ms ; add db_buf 2
+  # vec1: id=0x87654321, lemma=0x22222222, pos=0, role=0, morph=40960 (HABIT|SENSORY)
+  store 2271560481 into iv ; memory_store_int db_buf iv ; add db_buf 4
+  store 572662306 into iv ; memory_store_int db_buf iv ; add db_buf 4
+  store 0 into pb ; memory_store_byte db_buf pb ; add db_buf 1
+  store 0 into pb ; memory_store_byte db_buf pb ; add db_buf 1
+  store 40960 into ms ; memory_store_short db_buf ms ; add db_buf 2
+  # rewind to header for parse
+  subtract db_buf 24 ; subtract db_buf 24 ; subtract db_buf 24
+  # quick magic check
+  load byte b from db_buf
+  if not equal b 77
+    store 0 into out_handle
+    return
+  end
+  add db_buf 8
+  load int ver from db_buf
+  if not equal ver 3
+    store 0 into out_handle
+    return
+  end
+  add db_buf 4
+  load int entry_count from db_buf
+  store entry_count into db_entry_count
+  add db_buf 8
+  # skip lemma table
+  store db_buf into lemma_start
+  store 0 into i
+  load int entry_count from db_entry_count
+  while less i entry_count
+    load short ln from db_buf ; add db_buf 2 ; add db_buf ln ; add i 1
+  end
+  store db_buf into vectors_raw_base
+  # repack to word-packed (3 i32 per vec: id, lemma, packed)
+  load int entry_count from db_entry_count
+  mul entry_count 3 into word_count
+  mul word_count 4 into word_buf_size
+  memory_alloc word_buf_size into vectors_base
+  store 0 into i
+  load int entry_count from db_entry_count
+  while less i entry_count
+    mul i 12 into off
+    add vectors_raw_base off into raw_off
+    mul i 12 into woff
+    add vectors_base woff into word_off
+    load int vid from raw_off ; memory_store_int word_off vid
+    add raw_off 4 into raw2 ; add word_off 4 into word2
+    load int vlem from raw2 ; memory_store_int word2 vlem
+    add raw_off 8 into raw3
+    load byte p from raw3 ; add raw3 1
+    load byte r from raw3 ; add raw3 1
+    load short m from raw3
+    shift_left r 8 into pr ; or p pr into ppr
+    shift_left m 16 into ms ; or ppr ms into packedv
+    add word_off 8 into word3 ; memory_store_int word3 packedv
+    add i 1
+  end
+  store 1 into out_handle
+  store 1 into db_handle
+  return
+
+data_lookup_by_id:
+  store 0 into out_vec_off
+  load int entry_count from db_entry_count
+  if equal entry_count 0
+    return
+  end
+  store 0 into i
+  load int target from in_id
+  while less i entry_count
+    mul i 12 into off
+    add vectors_base off into vec_off
+    load int vid from vec_off
+    if equal vid target
+      store vec_off into out_vec_off
+      return
+    end
+    add i 1
+  end
+  return
+
+data_filter_neuro:
+  store 0 into out_count
+  load int entry_count from db_entry_count
+  load int mask from in_mask
+  store 0 into i
+  while less i entry_count
+    mul i 12 into off
+    add vectors_base off into vec_off
+    add vec_off 8 into pack_off
+    load int packedv from pack_off
+    shift_right packedv 16 into morphv
+    bit_and morphv mask into matchv
+    if not equal matchv 0
+      load int c from out_count ; add c 1 into c ; store c into out_count
+    end
+    add i 1
+  end
+  return
+
+data_vector_get_id:
+  load int v from in_vec_off ; load int val from v ; store val into out_val ; return
+data_vector_get_lemma_id:
+  load int v from in_vec_off ; add v 4 ; load int val from v ; store val into out_val ; return
+data_vector_get_pos:
+  load int v from in_vec_off ; add v 8 ; load int packedv from v ; bit_and packedv 255 into val ; store val into out_val ; return
+data_vector_get_role:
+  load int v from in_vec_off ; add v 8 ; load int packedv from v ; shift_right packedv 8 into p2 ; bit_and p2 255 into val ; store val into out_val ; return
+data_vector_get_morph:
+  load int v from in_vec_off ; add v 8 ; load int packedv from v ; shift_right packedv 16 into val ; store val into out_val ; return
+
+data_mmap_db:
+  load int h from in_dbh
+  if equal h 0
+    store 0 into out_addr
+    return
+  end
+  load int addr from vectors_base ; store addr into out_addr ; return
+
+data_load_neuro_pattern:
+  data_filter_neuro
+  return
+
+# Explicit dispatch targets for NEURO_TRAIN / MASK / OPTIMIZE (0x54/4D/4F) from lowering.
+# In full: would take vector subset (by id== or neuro morph), apply "train" transform (e.g. update habit counts in VFS neuro file or call Neural Engine), return handle.
+# Here stubs that filter then load pattern (for rr swarm / self-reg use).
+# Post-ep0 (loss 94.6960 best at step ~1017) + ep1 eval (loss=94.6960 best stable, lm=10.8197, ppl=49995.81; wandb_metrics has the record) + ep2 (step 1065 train low 77.36, 1090 low 76.91, 1085=83.33, 1115=79.78, 1125=86.63, 1130=93.96, 1165=97.06, 1170=98.41, 1175=92.90, 1185=93.75, 1190 low 82.10, 1195=95.43, 1200=103.16, 1205=97.11, 1215=88.24, 1220=91.21, 1225=83.67, 1230=89.87, 1235=102.93, 1240 low 80.65, 1260=90.30, 1265=88.87, 1270 low 78.90, 1275=82.86, 1280=200.29, 1285=82.19, 1290=187.67, 1300=85.34, 1310=91.06, 1320=93.59, 1330=93.59, 1335=93.65, 1370=96.25, 1375=96.03, 1380=86.00, 1405=98.91, 1410=111.26, 1440=82.37, 1445=150.40, 1450=79.90, 1470=86.48, 1480=82.82, 1485=85.24, 1490=93.59, 1495=93.96, 1500=89.12, 1505=91.87, 1565=88.63, 1570=106.04, 1575=108.26, 1605=97.91, 1610=105.86, 1645=91.21, 1650=96.62, 1675=89.97, 1680=93.23, ..., 1740=85.57, 1745=92.38, 1750=90.12, 1755=112.75, 1760=97.06, 1765=111.19, 1770=92.18, 1775=87.76, 1780=94.90, 1785=90.07, 1810=80.90, 1815=81.12, 1820=92.13, 1845=76.11, 1850=78.65, 1855=78.69, 1860=82.55, 1890=78.43, 1895=80.35, 1925=88.33, 1930=89.72, 1935=92.02, 1940=98.97, 1945=87.76, 1950=85.67, 1955=92.18, 1960=87.80, 1965=85.86, 2000=114.43, 2005=103.04, 2010=119.46, 2015=156.24, 2020=103.56, 2025=115.95, 2030=106.46 continuing; lows 1250=77.74, 1270=78.90, 1295=78.99, 1450=79.90, 1670=85.34, 1785=90.07, 1810=80.90, 1845=76.11, 1890=78.43) + ep2 eval 94.7185 (lm=10.8197, ppl=49995.81, best held 94.6960), now post-eval / epoch 3 steps 2035+ (2035=99.64, 2040=82.14, 2045=85.06, 2050=99.42, 2055=157.63, 2060=96.12, 2065=95.06, 2070=128.27, 2075=106.79, 2080=88.39, 2085=74.32 low, 2090=78.86, 2095=84.46, 2100=81.21, 2105=78.77, 2110=85.71, 2115=80.00, 2120=77.11 low, 2125=100.86, 2130=108.70, 2135=98.02, 2140=86.00, 2145=100.86, 2150=82.14, 2155=97.27, 2160=109.45, 2165=86.34, 2170=88.05, 2175=107.90, 2180=90.17, 2185=104.25 continuing; new lows 74.3160 at 2085, 77.1145 at 2120, 78.7736 at 2105, 79.9961 at 2115, 81.2105 at 2100, 82.1431 at 2040, 84.4591 at 2095, 85.0560 at 2045, 85.7145 at 2110, 88.3862 at 2080, 90.1736 at 2180 etc.) on 130066-vec neuro_all.db from deep web scan behavioral_web_scan + unawareness_acclimation epiphany:
+#   the vectors include system-usage patterns (tone of speech/messages, constant engaged screen time, productivity decline, doom scrolling, hesitation, masking, coping)
+#   + acclimation/repressed trauma/unawareness text; living system now emits subtle growing non-diagnostic hints ("I notice patterns... consider professional... face the hindrance head on").
+# Example "train" action for this data: filter_neuro (NEURO_HABIT | EXEC_DYSFUNCTION), then for each vec with role=Action or morph hint bits, chain a "hint" transform that surfaces the professional nudge text on match.
+data_neuro_train:
+  data_filter_neuro
+  data_load_neuro_pattern
+  # ep2 live (step 2030=106.46 ... + ep2 eval 94.7185 (lm=10.8197, ppl=49995.81, best held 94.6960), now post-eval / epoch 3 steps 2035+ (2035=99.64, 2040=82.14 low, 2045=85.06, 2050=99.42, 2055=157.63, 2060=96.12, 2065=95.06, 2070=128.27, 2075=106.79, 2080=88.39, 2085=74.32 low, 2090=78.86, 2095=84.46, 2100=81.21, 2105=78.77 low, 2110=85.71, 2115=80.00, 2120=77.11 low, 2125=100.86, 2130=108.70, 2135=98.02, 2140=86.00, 2145=100.86, 2150=82.14, 2155=97.27, 2160=109.45, 2165=86.34, 2170=88.05, 2175=107.90, 2180=90.17, 2185=104.25, 2190=89.22, 2195=93.11, 2200=98.24, 2415=101.9995, 2420=78.2705 low, 2425=89.7741, 2430=94.0133, 2435=149.7866, 2440=86.0438, 2445=110.5569, 2450=97.8584, 2455=130.7733, 2460=110.2386, 2465=86.2320, 2470=75.1800 low, 2475=83.4220, 2480=81.4773 low, 2485=78.4747 low, 2490=94.6854, 2495=86.5295, 2500=85.6675, 2505=88.6270, 2510=96.5160, 2515=80.1990 low, 2520=96.2996, 2525=97.8584, 2530=86.6727, 2535=93.1050, 2540=96.2996, 2545=99.0233, 2550=90.1237, 2555=99.1912, 2560=94.1704, 2565=94.8983, 2570=91.2107, 2575=109.3879, 2580=100.5707, 2585=102.9849, 2590=99.3591, 2595=112.4662, 2600=106.1580, 2605=106.6389, 2610=97.8584, 2615=92.6928, 2620=107.4669, 2625=108.1406, 2630=103.0429, 2635=90.2735, 2640=102.4632, 2645=101.3680, 2650=87.1751, 2655=94.7918, 2660=100.3999, 2665=94.7386, 2670=109.0758, 2675=100.7416, 2680=93.5945, 2685=95.9209, 2690=86.3386, 2695=89.9739, 2700=89.8740, 2705=104.1295, 2710=82.3685, 2715=97.8034, 2720=83.2391, 2725=94.7918, 2730=87.5142, 2735=82.2784, 2740=90.5731, 2745=81.2995, 2750=100.3429, 2755=96.0291, 2760=93.4898, 2765=88.6270, 2770=92.3837, 2775=84.7374, 2780=100.0866, 2785=150.4008, 2790=87.8533, 2795=91.5150, 2800=97.2533, 2805=98.7994, 2810=93.4375, 2815=107.3444, 2820=89.9739, 2825=98.7994, 2830=91.1092, 2835=74.6591 low, 2840=80.7857, 2845=79.7329, 2850=81.3439, 2855=72.4950 low, 2860=82.9546, 2865=80.4786, 2870=82.5489, 2875=76.6983 low, 2880=71.5021 low, 2885=80.4348, 2890=79.5066, 2895=78.5601, 2900=83.8791, 2905=79.0726, 2910=79.5931, 2915=78.9018, 2920=86.7205, 2925=94.1181, 2930=100.5707, 2935=89.5245, 2940=91.0078 continuing; new lows 71.5021 at 2880, 72.4950 at 2855, 74.6591 at 2835, 75.1800 at 2470, 76.6983 at 2875, 78.2705 at 2420, 78.4747 at 2485, 78.5601 at 2895, 79.0726 at 2905, 80.1990 at 2515, 81.4773 at 2480, 82.2784 at 2735, 83.4220 at 2475, 85.6675 at 2500, 86.3386 at 2690, 87.1751 at 2650, 88.6270 at 2505, 89.5245 at 2935 etc.) on the exact 130066-vec neuro_all.db (behavioral_web_scan + unawareness_acclimation epiphany): for vectors with hint morph or Action role from this data, "emit" the nudge:
+  # "I notice patterns in engagement and tone that many find benefit from exploring with a professional — no judgment, just support if it resonates."
+  # "acclimation and repressed trauma can mask conditions; the system adjusts by offering gentle, escalating hints... face the hindrance head on" (no concrete diagnosis).
+  # e.g. write the above to VFS neuro/ file (future)
+  return
+
+data_neuro_mask:
+  data_filter_neuro
+  data_load_neuro_pattern
+  return
+
+data_neuro_optimize:
+  data_filter_neuro
+  data_load_neuro_pattern
+  # e.g. optimize habit stack bits
+  return

@@ -1,0 +1,1290 @@
+###############################################################################
+# vfs.jstr -- Virtual File System Module
+# Jasterish Micro-Kernel
+#
+# Provides a minimal in-memory filesystem (RAMFS) with a flat directory
+# structure. All files are stored in pre-allocated memory buffers.
+#
+# Features:
+#   - 16 files maximum
+#   - 12-character filenames
+#   - 1024 bytes per file
+#   - Open/read/write/close/create/delete/list operations
+#
+# This is sufficient for a micro-kernel to store configuration, logs,
+# and small user programs before a persistent disk filesystem is added.
+###############################################################################
+
+# =============================================================================
+# Section 1: VFS Constants
+# =============================================================================
+
+# Maximum number of files in the filesystem
+global VFS_MAX_FILES
+store 16 into VFS_MAX_FILES
+
+# Maximum filename length (not including null terminator)
+global VFS_NAME_LEN
+store 12 into VFS_NAME_LEN
+
+# Maximum file size in bytes
+global VFS_FILE_SIZE
+store 1024 into VFS_FILE_SIZE
+
+# File state flags
+global VFS_FLAG_USED       # File slot is allocated
+global VFS_FLAG_OPEN       # File is currently open
+global VFS_FLAG_READONLY   # File cannot be modified
+global VFS_FLAG_SYSTEM     # System file (protected from delete)
+
+store 0x01 into VFS_FLAG_USED
+store 0x02 into VFS_FLAG_OPEN
+store 0x04 into VFS_FLAG_READONLY
+store 0x08 into VFS_FLAG_SYSTEM
+
+# Seek origins
+global VFS_SEEK_SET        # Seek from beginning of file
+global VFS_SEEK_CUR        # Seek from current position
+global VFS_SEEK_END        # Seek from end of file
+
+store 0 into VFS_SEEK_SET
+store 1 into VFS_SEEK_CUR
+store 2 into VFS_SEEK_END
+
+# =============================================================================
+# Section 2: VFS Global Data Structures
+# =============================================================================
+
+# File table: parallel arrays for O(1) access by file index (0-15)
+
+# file_flags[idx]  - state flags for file slot idx
+array 16 file_flags
+
+# file_size[idx]   - current size of file data in bytes
+array 16 file_size
+
+# file_pos[idx]    - current read/write cursor position
+array 16 file_pos
+
+# Filenames are stored as packed arrays.
+# file_names[idx * VFS_NAME_LEN] = start of filename for slot idx
+array 192 file_names
+
+# File data buffers.
+# file_data[idx * VFS_FILE_SIZE] = start of data for slot idx
+array 16384 file_data
+
+# Open file descriptor table (maps fd -> file index)
+# fd 0 = stdin, fd 1 = stdout, fd 2 = stderr (reserved)
+# fd 3-15 = regular files
+array 16 fd_table
+
+# Next available file descriptor
+global next_fd
+store 3 into next_fd
+
+# =============================================================================
+# Section 3: VFS Initialization
+# =============================================================================
+
+###############################################################################
+# Function: vfs_init
+# -----------------------------------------------------------------------------
+# Initialize the virtual filesystem.
+# Clears all file slots and open file descriptors.
+# Creates a few default system files (boot.log, etc.).
+###############################################################################
+
+vfs_init
+    a idx
+    a name_offset
+
+    print "VFS: initializing virtual filesystem..."
+
+    # Clear all file slots
+    store 0 into idx
+    while less idx VFS_MAX_FILES
+        store 0 into file_flags at idx
+        store 0 into file_size at idx
+        store 0 into file_pos at idx
+
+        # Clear filename
+        multiply idx VFS_NAME_LEN
+        store it into name_offset
+        store 0 into file_names at name_offset
+
+        add idx 1
+        store it into idx
+    end
+
+    # Clear file descriptor table
+    store 0 into idx
+    while less idx 16
+        store -1 into fd_table at idx
+        add idx 1
+        store it into idx
+    end
+
+    # Reserve stdin/stdout/stderr
+    store 0 into fd_table at 0   # stdin
+    store 1 into fd_table at 1   # stdout
+    store 2 into fd_table at 2   # stderr
+
+    # Reset next_fd
+    store 3 into next_fd
+
+    # Attempt to load persistent filesystem from disk
+    call vfs_load_from_disk
+    store it into it
+    if greater_or_equal it 0
+        print "VFS: filesystem ready (loaded from disk)"
+        return 0
+    end
+
+    # Create default system files if no disk image found
+    call vfs_create "boot.log" VFS_FLAG_SYSTEM
+    call vfs_create "kernel.cfg" VFS_FLAG_SYSTEM
+
+    print "VFS: filesystem ready (16 slots, 1KB per file)"
+    return 0
+
+# =============================================================================
+# Section 4: Internal Helpers
+# =============================================================================
+
+###############################################################################
+# Function: vfs_find_file
+# -----------------------------------------------------------------------------
+# Find a file by name in the file table.
+#
+# name: null-terminated filename string
+# Returns: file index (0-15) if found, -1 if not found.
+###############################################################################
+
+vfs_find_file
+    a name
+    a idx
+    a name_offset
+    a match
+    a name_char
+    a table_char
+    a char_idx
+
+    store it into name
+
+    store 0 into idx
+    while less idx VFS_MAX_FILES
+        # Check if slot is used
+        load file_flags at idx
+        store it into it
+        bitwise_and it VFS_FLAG_USED
+        store it into it
+        if greater it 0
+            # Compare filename
+            multiply idx VFS_NAME_LEN
+            store it into name_offset
+
+            store 1 into match
+            store 0 into char_idx
+
+            while less char_idx VFS_NAME_LEN
+                load name at char_idx
+                store it into name_char
+                load file_names at name_offset
+                store it into table_char
+
+                # If name_char is 0, we've reached end of name
+                if equal name_char 0
+                    # Check if table_char is also 0 (exact match)
+                    if equal table_char 0
+                        store 1 into match
+                    else
+                        store 0 into match
+                    end
+                    store VFS_NAME_LEN into char_idx
+                else
+                    if not equal name_char table_char
+                        store 0 into match
+                        store VFS_NAME_LEN into char_idx
+                    end
+                end
+
+                add name_offset 1
+                store it into name_offset
+                add char_idx 1
+                store it into char_idx
+            end
+
+            if equal match 1
+                return idx
+            end
+        end
+
+        add idx 1
+        store it into idx
+    end
+
+    return -1
+
+###############################################################################
+# Function: vfs_find_free_slot
+# -----------------------------------------------------------------------------
+# Find an unused file slot.
+# Returns: slot index (0-15) if free slot found, -1 if full.
+###############################################################################
+
+vfs_find_free_slot
+    a idx
+
+    store 0 into idx
+    while less idx VFS_MAX_FILES
+        load file_flags at idx
+        store it into it
+        bitwise_and it VFS_FLAG_USED
+        store it into it
+        if equal it 0
+            return idx
+        end
+        add idx 1
+        store it into idx
+    end
+
+    return -1
+
+###############################################################################
+# Function: vfs_copy_name
+# -----------------------------------------------------------------------------
+# Copy a null-terminated filename into the file_names table.
+#
+# dest_offset: starting index in file_names
+# src:         source filename string
+###############################################################################
+
+vfs_copy_name
+    a dest_offset
+    a src
+    a char_idx
+    a ch
+
+    store argument 0 into dest_offset
+    store argument 1 into src
+
+    store 0 into char_idx
+    while less char_idx VFS_NAME_LEN
+        load src at char_idx
+        store it into ch
+        store ch into file_names at dest_offset
+
+        if equal ch 0
+            store VFS_NAME_LEN into char_idx
+        else
+            add dest_offset 1
+            store it into dest_offset
+            add char_idx 1
+            store it into char_idx
+        end
+    end
+
+    return 0
+
+# =============================================================================
+# Section 5: File Operations
+# =============================================================================
+
+###############################################################################
+# Function: vfs_create
+# -----------------------------------------------------------------------------
+# Create a new file with the given name.
+#
+# name:  null-terminated filename
+# flags: initial flags (e.g., VFS_FLAG_READONLY, VFS_FLAG_SYSTEM)
+#
+# Returns: file index on success, -1 if file exists or table full.
+###############################################################################
+
+vfs_create
+    a name
+    a flags
+    a slot
+    a name_offset
+
+    store argument 0 into name
+    store argument 1 into flags
+
+    # Check if file already exists
+    call vfs_find_file name
+    store it into slot
+    if greater_or_equal slot 0
+        print "VFS: file already exists"
+        return -1
+    end
+
+    # Find a free slot
+    call vfs_find_free_slot
+    store it into slot
+    if less slot 0
+        print "VFS: filesystem full"
+        return -1
+    end
+
+    # Set up the file
+    bitwise_or flags VFS_FLAG_USED
+    store it into file_flags at slot
+    store 0 into file_size at slot
+    store 0 into file_pos at slot
+
+    # Copy filename
+    multiply slot VFS_NAME_LEN
+    store it into name_offset
+    call vfs_copy_name name_offset name
+
+    print "VFS: created file '"
+    print name
+    print "' at slot "
+    print slot
+
+    return slot
+
+###############################################################################
+# Function: vfs_delete
+# -----------------------------------------------------------------------------
+# Delete a file by name.
+#
+# name: null-terminated filename
+# Returns: 0 on success, -1 if not found or protected.
+###############################################################################
+
+vfs_delete
+    a name
+    a slot
+    a flags
+
+    store it into name
+
+    call vfs_find_file name
+    store it into slot
+    if less slot 0
+        print "VFS: file not found"
+        return -1
+    end
+
+    # Check if file is protected (system file)
+    load file_flags at slot
+    store it into flags
+    bitwise_and flags VFS_FLAG_SYSTEM
+    store it into flags
+    if greater flags 0
+        print "VFS: cannot delete system file"
+        return -1
+    end
+
+    # Check if file is open
+    load file_flags at slot
+    store it into flags
+    bitwise_and flags VFS_FLAG_OPEN
+    store it into flags
+    if greater flags 0
+        print "VFS: cannot delete open file"
+        return -1
+    end
+
+    # Clear the slot
+    store 0 into file_flags at slot
+    store 0 into file_size at slot
+    store 0 into file_pos at slot
+
+    # Clear filename
+    a name_offset
+    multiply slot VFS_NAME_LEN
+    store it into name_offset
+    store 0 into file_names at name_offset
+
+    print "VFS: deleted file"
+    return 0
+
+###############################################################################
+# Function: vfs_open
+# -----------------------------------------------------------------------------
+# Open a file and return a file descriptor.
+#
+# name:  null-terminated filename
+# mode:  open mode (0 = read, 1 = write, 2 = readwrite)
+#
+# Returns: file descriptor (>= 0) on success, -1 on error.
+###############################################################################
+
+vfs_open
+    a name
+    a mode
+    a slot
+    a fd
+    a flags
+
+    store argument 0 into name
+    store argument 1 into mode
+
+    # Find the file
+    call vfs_find_file name
+    store it into slot
+
+    # If file doesn't exist and mode is write, create it
+    if less slot 0
+        if equal mode 1
+            call vfs_create name 0
+            store it into slot
+        end
+    end
+
+    if less slot 0
+        print "VFS: open failed, file not found"
+        return -1
+    end
+
+    # Check if file is already open
+    load file_flags at slot
+    store it into flags
+    bitwise_and flags VFS_FLAG_OPEN
+    store it into flags
+    if greater flags 0
+        print "VFS: file already open"
+        return -1
+    end
+
+    # Allocate a file descriptor
+    load next_fd
+    store it into fd
+    if greater fd 15
+        print "VFS: too many open files"
+        return -1
+    end
+
+    # Map fd to file slot
+    store slot into fd_table at fd
+
+    # Mark file as open
+    load file_flags at slot
+    store it into flags
+    bitwise_or flags VFS_FLAG_OPEN
+    store it into file_flags at slot
+
+    # Reset cursor to beginning
+    store 0 into file_pos at slot
+
+    # Increment next_fd
+    add next_fd 1
+    store it into next_fd
+
+    return fd
+
+###############################################################################
+# Function: vfs_close
+# -----------------------------------------------------------------------------
+# Close an open file descriptor.
+#
+# fd: file descriptor returned by vfs_open
+# Returns: 0 on success, -1 if invalid fd.
+###############################################################################
+
+vfs_close
+    a fd
+    a slot
+    a flags
+
+    store it into fd
+
+    # Validate fd
+    if less fd 0
+        return -1
+    end
+    if greater fd 15
+        return -1
+    end
+
+    # Look up slot from fd table
+    load fd_table at fd
+    store it into slot
+    if less slot 0
+        return -1
+    end
+
+    # Clear open flag
+    load file_flags at slot
+    store it into flags
+    a open_mask
+    bitwise_not VFS_FLAG_OPEN
+    store it into open_mask
+    bitwise_and flags open_mask
+    store it into file_flags at slot
+
+    # Clear fd mapping
+    store -1 into fd_table at fd
+
+    return 0
+
+###############################################################################
+# Function: vfs_read
+# -----------------------------------------------------------------------------
+# Read bytes from an open file.
+#
+# fd:     file descriptor
+# buf:    destination buffer
+# count:  maximum bytes to read
+#
+# Returns: number of bytes actually read, or -1 on error.
+###############################################################################
+
+vfs_read
+    a fd
+    a buf
+    a count
+    a slot
+    a pos
+    a size
+    a data_offset
+    a bytes_read
+    a byte_val
+
+    store argument 0 into fd
+    store argument 1 into buf
+    store argument 2 into count
+
+    # Validate fd
+    if less fd 0
+        return -1
+    end
+    if greater fd 15
+        return -1
+    end
+
+    load fd_table at fd
+    store it into slot
+    if less slot 0
+        return -1
+    end
+
+    load file_pos at slot
+    store it into pos
+    load file_size at slot
+    store it into size
+
+    # Cannot read past end of file
+    a remaining
+    subtract size pos
+    store it into remaining
+    if less remaining 0
+        return 0
+    end
+
+    # Clamp read to available bytes
+    a to_read
+    store count into to_read
+    if greater count remaining
+        store remaining into to_read
+    end
+
+    # Compute data offset in file_data array
+    multiply slot VFS_FILE_SIZE
+    store it into data_offset
+    add data_offset pos
+    store it into data_offset
+
+    # Copy bytes
+    store 0 into bytes_read
+    while less bytes_read to_read
+        load file_data at data_offset
+        store it into byte_val
+        store byte_val into buf at bytes_read
+
+        add data_offset 1
+        store it into data_offset
+        add bytes_read 1
+        store it into bytes_read
+    end
+
+    # Update cursor
+    add pos bytes_read
+    store it into file_pos at slot
+
+    return bytes_read
+
+###############################################################################
+# Function: vfs_write
+# -----------------------------------------------------------------------------
+# Write bytes to an open file.
+#
+# fd:     file descriptor
+# buf:    source buffer
+# count:  bytes to write
+#
+# Returns: number of bytes written, or -1 on error.
+###############################################################################
+
+vfs_write
+    a fd
+    a buf
+    a count
+    a slot
+    a pos
+    a data_offset
+    a bytes_written
+    a byte_val
+    a flags
+
+    store argument 0 into fd
+    store argument 1 into buf
+    store argument 2 into count
+
+    # Validate fd
+    if less fd 0
+        return -1
+    end
+    if greater fd 15
+        return -1
+    end
+
+    load fd_table at fd
+    store it into slot
+    if less slot 0
+        return -1
+    end
+
+    # Check if file is read-only
+    load file_flags at slot
+    store it into flags
+    bitwise_and flags VFS_FLAG_READONLY
+    store it into flags
+    if greater flags 0
+        print "VFS: cannot write to read-only file"
+        return -1
+    end
+
+    load file_pos at slot
+    store it into pos
+
+    # Check if write would exceed file size
+    a end_pos
+    add pos count
+    store it into end_pos
+    if greater end_pos VFS_FILE_SIZE
+        print "VFS: write would exceed file size"
+        return -1
+    end
+
+    # Compute data offset
+    multiply slot VFS_FILE_SIZE
+    store it into data_offset
+    add data_offset pos
+    store it into data_offset
+
+    # Copy bytes
+    store 0 into bytes_written
+    while less bytes_written count
+        load buf at bytes_written
+        store it into byte_val
+        store byte_val into file_data at data_offset
+
+        add data_offset 1
+        store it into data_offset
+        add bytes_written 1
+        store it into bytes_written
+    end
+
+    # Update cursor and file size
+    add pos bytes_written
+    store it into file_pos at slot
+    load file_size at slot
+    store it into it
+    if greater pos it
+        store pos into file_size at slot
+    end
+
+    return bytes_written
+
+###############################################################################
+# Function: vfs_read_file
+# -----------------------------------------------------------------------------
+# Convenience helper: open a file by name, read up to max_size bytes,
+# close the file, and return the number of bytes read.
+#
+# name:     null-terminated filename
+# buf:      destination buffer
+# max_size: maximum bytes to read
+#
+# Returns: bytes read on success, -1 on error.
+###############################################################################
+
+vfs_read_file
+    a name
+    a buf
+    a max_size
+    a fd
+    a bytes_read
+
+    store argument 0 into name
+    store argument 1 into buf
+    store argument 2 into max_size
+
+    call vfs_open name 0
+    store it into fd
+    if less fd 0
+        return -1
+    end
+
+    call vfs_read fd buf max_size
+    store it into bytes_read
+
+    call vfs_close fd
+
+    return bytes_read
+
+###############################################################################
+# Function: vfs_seek
+# -----------------------------------------------------------------------------
+# Change the read/write cursor position.
+#
+# fd:     file descriptor
+# offset: byte offset
+# whence: seek origin (VFS_SEEK_SET, VFS_SEEK_CUR, VFS_SEEK_END)
+#
+# Returns: new cursor position, or -1 on error.
+###############################################################################
+
+vfs_seek
+    a fd
+    a offset
+    a whence
+    a slot
+    a new_pos
+    a size
+
+    store argument 0 into fd
+    store argument 1 into offset
+    store argument 2 into whence
+
+    # Validate fd
+    if less fd 0
+        return -1
+    end
+    if greater fd 15
+        return -1
+    end
+
+    load fd_table at fd
+    store it into slot
+    if less slot 0
+        return -1
+    end
+
+    load file_size at slot
+    store it into size
+
+    if equal whence VFS_SEEK_SET
+        store offset into new_pos
+    end
+    if equal whence VFS_SEEK_CUR
+        load file_pos at slot
+        add it offset
+        store it into new_pos
+    end
+    if equal whence VFS_SEEK_END
+        add size offset
+        store it into new_pos
+    end
+
+    # Clamp to valid range [0, size]
+    if less new_pos 0
+        store 0 into new_pos
+    end
+    if greater new_pos size
+        store size into new_pos
+    end
+
+    store new_pos into file_pos at slot
+    return new_pos
+
+###############################################################################
+# Function: vfs_list
+# -----------------------------------------------------------------------------
+# Print a directory listing of all files.
+###############################################################################
+
+vfs_list
+    a idx
+    a flags
+    a name_offset
+    a size
+
+    print ""
+    print "=== VFS File Listing ==="
+    print "Name         Size  Flags"
+
+    store 0 into idx
+    while less idx VFS_MAX_FILES
+        load file_flags at idx
+        store it into flags
+        bitwise_and flags VFS_FLAG_USED
+        store it into flags
+        if greater flags 0
+            # Print filename
+            multiply idx VFS_NAME_LEN
+            store it into name_offset
+            print ""
+
+            a char_idx
+            store 0 into char_idx
+            while less char_idx VFS_NAME_LEN
+                a ch
+                load file_names at name_offset
+                store it into ch
+                if equal ch 0
+                    store VFS_NAME_LEN into char_idx
+                else
+                    call serial_putc ch
+                    add name_offset 1
+                    store it into name_offset
+                    add char_idx 1
+                    store it into char_idx
+                end
+            end
+
+            # Pad to column width
+            print "         "
+
+            # Print size
+            load file_size at idx
+            store it into size
+            print size
+
+            # Print flags
+            load file_flags at idx
+            store it into flags
+            if bitwise_and flags VFS_FLAG_READONLY
+                print "  RO"
+            end
+            if bitwise_and flags VFS_FLAG_SYSTEM
+                print "  SYS"
+            end
+        end
+        add idx 1
+        store it into idx
+    end
+
+    print ""
+    print "========================"
+    return 0
+
+###############################################################################
+# Function: vfs_load_from_disk
+# -----------------------------------------------------------------------------
+# Load the RAMFS from disk sectors 1-35.
+# Sector 1    = superblock
+# Sectors 2-3 = file table
+# Sectors 4-35 = file data
+#
+# Returns: 0 on success, -1 if no disk or bad magic.
+###############################################################################
+
+vfs_load_from_disk
+    a sector_idx
+    a entry_idx
+    a entry_offset
+    a slot
+    a flags
+    a size
+    a name_offset
+    a char_idx
+    a ch
+    a data_offset
+    a byte_idx
+    a lba
+
+    # Check if a disk is present
+    load disk_present
+    store it into it
+    if equal it 0
+        return -1
+    end
+
+    # Read superblock (sector 1)
+    call disk_read_sector 1 ata_sector_buffer
+    store it into it
+    if less it 0
+        return -1
+    end
+
+    # Validate magic "JMKVFS\0\0"
+    load ata_sector_buffer at 0
+    store it into ch
+    if not equal ch 0x4A
+        return -1
+    end
+    load ata_sector_buffer at 1
+    store it into ch
+    if not equal ch 0x4D
+        return -1
+    end
+    load ata_sector_buffer at 2
+    store it into ch
+    if not equal ch 0x4B
+        return -1
+    end
+    load ata_sector_buffer at 3
+    store it into ch
+    if not equal ch 0x56
+        return -1
+    end
+    load ata_sector_buffer at 4
+    store it into ch
+    if not equal ch 0x46
+        return -1
+    end
+    load ata_sector_buffer at 5
+    store it into ch
+    if not equal ch 0x53
+        return -1
+    end
+    load ata_sector_buffer at 6
+    store it into ch
+    if not equal ch 0
+        return -1
+    end
+    load ata_sector_buffer at 7
+    store it into ch
+    if not equal ch 0
+        return -1
+    end
+
+    # Validate version
+    load ata_sector_buffer at 8
+    store it into ch
+    if not equal ch 1
+        return -1
+    end
+
+    # Read file table sectors 2-3
+    store 0 into sector_idx
+    while less sector_idx 2
+        add sector_idx 2
+        store it into lba
+        call disk_read_sector lba ata_sector_buffer
+        store it into it
+        if less it 0
+            return -1
+        end
+
+        store 0 into entry_idx
+        while less entry_idx 8
+            multiply sector_idx 8
+            add it entry_idx
+            store it into slot
+            if greater_or_equal slot VFS_MAX_FILES
+                store 8 into entry_idx
+            else
+                multiply entry_idx 64
+                store it into entry_offset
+
+                load ata_sector_buffer at entry_offset
+                store it into flags
+
+                add entry_offset 1
+                store it into entry_offset
+                load ata_sector_buffer at entry_offset
+                store it into size
+
+                bitwise_and flags VFS_FLAG_USED
+                store it into it
+                if greater it 0
+                    store flags into file_flags at slot
+                    store size into file_size at slot
+                    store 0 into file_pos at slot
+
+                    # Copy filename (12 bytes)
+                    multiply slot VFS_NAME_LEN
+                    store it into name_offset
+                    add entry_offset 1
+                    store it into entry_offset
+                    store 0 into char_idx
+                    while less char_idx VFS_NAME_LEN
+                        load ata_sector_buffer at entry_offset
+                        store it into ch
+                        store ch into file_names at name_offset
+                        add entry_offset 1
+                        store it into entry_offset
+                        add name_offset 1
+                        store it into name_offset
+                        add char_idx 1
+                        store it into char_idx
+                    end
+                end
+
+                add entry_idx 1
+                store it into entry_idx
+            end
+        end
+
+        add sector_idx 1
+        store it into sector_idx
+    end
+
+    # Read file data sectors 4-35 (16 files * 2 sectors = 32 sectors)
+    store 0 into slot
+    while less slot VFS_MAX_FILES
+        load file_flags at slot
+        store it into flags
+        bitwise_and flags VFS_FLAG_USED
+        store it into it
+        if greater it 0
+            multiply slot 2
+            add it 4
+            store it into lba
+
+            # First sector of file data
+            call disk_read_sector lba ata_sector_buffer
+            store it into it
+            if greater_or_equal it 0
+                multiply slot VFS_FILE_SIZE
+                store it into data_offset
+                store 0 into byte_idx
+                while less byte_idx ATA_SECTOR_SIZE
+                    load ata_sector_buffer at byte_idx
+                    store it into ch
+                    store ch into file_data at data_offset
+                    add data_offset 1
+                    store it into data_offset
+                    add byte_idx 1
+                    store it into byte_idx
+                end
+
+                # Second sector
+                add lba 1
+                store it into lba
+                call disk_read_sector lba ata_sector_buffer
+                store it into it
+                if greater_or_equal it 0
+                    store 0 into byte_idx
+                    while less byte_idx ATA_SECTOR_SIZE
+                        load ata_sector_buffer at byte_idx
+                        store it into ch
+                        store ch into file_data at data_offset
+                        add data_offset 1
+                        store it into data_offset
+                        add byte_idx 1
+                        store it into byte_idx
+                    end
+                end
+            end
+        end
+
+        add slot 1
+        store it into slot
+    end
+
+    print "VFS: loaded filesystem from disk"
+    return 0
+
+###############################################################################
+# Function: vfs_sync_to_disk
+# -----------------------------------------------------------------------------
+# Write the RAMFS to disk sectors 1-35.
+# Sector 1    = superblock
+# Sectors 2-3 = file table
+# Sectors 4-35 = file data
+#
+# Returns: 0 on success, -1 on error.
+###############################################################################
+
+vfs_sync_to_disk
+    a sector_idx
+    a entry_idx
+    a entry_offset
+    a slot
+    a flags
+    a size
+    a name_offset
+    a char_idx
+    a ch
+    a data_offset
+    a byte_idx
+    a lba
+    a file_count
+
+    # Check if a disk is present
+    load disk_present
+    store it into it
+    if equal it 0
+        print "VFS: no disk present, cannot sync"
+        return -1
+    end
+
+    # Build superblock in sector buffer
+    store 0x4A into ata_sector_buffer at 0
+    store 0x4D into ata_sector_buffer at 1
+    store 0x4B into ata_sector_buffer at 2
+    store 0x56 into ata_sector_buffer at 3
+    store 0x46 into ata_sector_buffer at 4
+    store 0x53 into ata_sector_buffer at 5
+    store 0 into ata_sector_buffer at 6
+    store 0 into ata_sector_buffer at 7
+    store 1 into ata_sector_buffer at 8
+    store 0 into file_count
+    store 0 into slot
+    while less slot VFS_MAX_FILES
+        load file_flags at slot
+        store it into flags
+        bitwise_and flags VFS_FLAG_USED
+        store it into flags
+        if greater flags 0
+            add file_count 1
+            store it into file_count
+        end
+        add slot 1
+        store it into slot
+    end
+    store file_count into ata_sector_buffer at 9
+
+    # Zero remainder of superblock
+    store 10 into byte_idx
+    while less byte_idx ATA_SECTOR_SIZE
+        store 0 into ata_sector_buffer at byte_idx
+        add byte_idx 1
+        store it into byte_idx
+    end
+
+    call disk_write_sector 1 ata_sector_buffer
+    store it into it
+    if less it 0
+        print "VFS: superblock write failed"
+        return -1
+    end
+
+    # Write file table sectors 2-3
+    store 0 into sector_idx
+    while less sector_idx 2
+        # Clear sector buffer
+        store 0 into byte_idx
+        while less byte_idx ATA_SECTOR_SIZE
+            store 0 into ata_sector_buffer at byte_idx
+            add byte_idx 1
+            store it into byte_idx
+        end
+
+        store 0 into entry_idx
+        while less entry_idx 8
+            multiply sector_idx 8
+            add it entry_idx
+            store it into slot
+            if greater_or_equal slot VFS_MAX_FILES
+                store 8 into entry_idx
+            else
+                multiply entry_idx 64
+                store it into entry_offset
+
+                load file_flags at slot
+                store it into flags
+                store flags into ata_sector_buffer at entry_offset
+
+                add entry_offset 1
+                store it into entry_offset
+                load file_size at slot
+                store it into size
+                store size into ata_sector_buffer at entry_offset
+
+                # Copy filename (12 bytes)
+                add entry_offset 1
+                store it into entry_offset
+                multiply slot VFS_NAME_LEN
+                store it into name_offset
+                store 0 into char_idx
+                while less char_idx VFS_NAME_LEN
+                    load file_names at name_offset
+                    store it into ch
+                    store ch into ata_sector_buffer at entry_offset
+                    add name_offset 1
+                    store it into name_offset
+                    add entry_offset 1
+                    store it into entry_offset
+                    add char_idx 1
+                    store it into char_idx
+                end
+
+                add entry_idx 1
+                store it into entry_idx
+            end
+        end
+
+        add sector_idx 2
+        store it into lba
+        call disk_write_sector lba ata_sector_buffer
+        store it into it
+        if less it 0
+            print "VFS: file table write failed"
+            return -1
+        end
+
+        add sector_idx 1
+        store it into sector_idx
+    end
+
+    # Write file data sectors 4-35
+    store 0 into slot
+    while less slot VFS_MAX_FILES
+        load file_flags at slot
+        store it into flags
+        bitwise_and flags VFS_FLAG_USED
+        store it into flags
+        if greater flags 0
+            multiply slot 2
+            add it 4
+            store it into lba
+
+            # Write first sector
+            multiply slot VFS_FILE_SIZE
+            store it into data_offset
+            store 0 into byte_idx
+            while less byte_idx ATA_SECTOR_SIZE
+                load file_data at data_offset
+                store it into ch
+                store ch into ata_sector_buffer at byte_idx
+                add data_offset 1
+                store it into data_offset
+                add byte_idx 1
+                store it into byte_idx
+            end
+            call disk_write_sector lba ata_sector_buffer
+            store it into it
+            if less it 0
+                print "VFS: file data write failed"
+                return -1
+            end
+
+            # Write second sector
+            add lba 1
+            store it into lba
+            store 0 into byte_idx
+            while less byte_idx ATA_SECTOR_SIZE
+                load file_data at data_offset
+                store it into ch
+                store ch into ata_sector_buffer at byte_idx
+                add data_offset 1
+                store it into data_offset
+                add byte_idx 1
+                store it into byte_idx
+            end
+            call disk_write_sector lba ata_sector_buffer
+            store it into it
+            if less it 0
+                print "VFS: file data write failed"
+                return -1
+            end
+        end
+
+        add slot 1
+        store it into slot
+    end
+
+    print "VFS: synced filesystem to disk"
+    return 0
+
+###############################################################################
+# End of vfs.jstr
+###############################################################################

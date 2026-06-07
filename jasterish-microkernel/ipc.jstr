@@ -1,0 +1,636 @@
+# =============================================================================
+# ipc.jstr — Inter-Process Communication Module
+# Jasterish Microkernel
+#
+# Provides message-passing primitives for inter-process communication:
+#   ipc_send      — Send a message to a process (async, buffered)
+#   ipc_receive   — Receive a message (blocking)
+#   ipc_try_receive — Receive a message (non-blocking)
+#   ipc_peek      — Check for pending message without consuming it
+#   ipc_notify    — Lightweight wake-up notification (no payload)
+#   ipc_broadcast — Send a message to all eligible processes
+#
+# Message format: 64 bytes total
+#   Bytes  0-15: Header (source PID, dest PID, type, payload size)
+#   Bytes 16-63: Payload (up to 48 bytes of data)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Global IPC state
+# ---------------------------------------------------------------------------
+global ipc_message_pool       array 1024 byte   # 16 message buffers * 64 bytes each
+global ipc_pool_used          array 16 int      # Bitmap: 1 = buffer in use, 0 = free
+global ipc_pool_count         int               # Total number of buffers (16)
+
+# ---------------------------------------------------------------------------
+# ipc_init — Initialize the IPC message subsystem
+#
+# Marks all 16 message buffers as free and prints a status message.
+# Called once during kernel initialization.
+# ---------------------------------------------------------------------------
+function ipc_init:
+    # Set the total number of pre-allocated message buffers
+    store 16 into ipc_pool_count
+
+    # Mark all buffer slots as free (0 = available, 1 = in use)
+    a idx
+    for idx from 0 to 15:
+        store 0 into ipc_pool_used at idx
+    end
+
+    print "IPC: message system initialized"
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# ipc_alloc_buffer — Allocate a message buffer from the pool
+#
+# Scans ipc_pool_used for the first free slot, marks it as used,
+# and returns the address of the corresponding 64-byte buffer.
+#
+# Returns: buffer address in 'it', or 0 if pool exhausted.
+# ---------------------------------------------------------------------------
+function ipc_alloc_buffer:
+    a idx
+    store 0 into idx
+
+    while greater 16 idx:
+        # Check if this buffer slot is free (ipc_pool_used[idx] == 0)
+        load ipc_pool_used at idx
+        if compare it 0:
+            # Found a free buffer — mark it as used
+            store 1 into ipc_pool_used at idx
+
+            # Compute buffer address: ipc_message_pool + (idx * 64)
+            a buf_addr
+            multiply idx 64
+            store it into buf_addr
+            add ipc_message_pool buf_addr
+            store it into buf_addr
+
+            return buf_addr
+        end
+
+        # Advance to next slot in the pool
+        add idx 1
+        store it into idx
+    end
+
+    # No free buffers remaining in the pool
+    print "IPC: warning — message pool exhausted"
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# ipc_free_buffer — Return a message buffer to the pool
+#
+# buf_addr: address of a buffer previously returned by ipc_alloc_buffer
+#
+# Computes the buffer index from its address and marks it free.
+# ---------------------------------------------------------------------------
+function ipc_free_buffer:
+    a buf_addr
+    # buf_addr is passed as the first argument
+    # (In the real ABI this would be in RDI; here we use the parameter name)
+
+    # Compute index = (buf_addr - ipc_message_pool) / 64
+    a buf_offset
+    subtract buf_addr ipc_message_pool
+    store it into buf_offset
+
+    a buf_index
+    divide buf_offset 64
+    store it into buf_index
+
+    # Validate index is within bounds [0, 15]
+    if less buf_index 0:
+        print "IPC: error — attempt to free invalid buffer (below pool)"
+        return
+    end
+    if greater buf_index 15:
+        print "IPC: error — attempt to free invalid buffer (above pool)"
+        return
+    end
+
+    # Mark the buffer slot as free
+    store 0 into ipc_pool_used at buf_index
+    return
+
+
+# ---------------------------------------------------------------------------
+# ipc_send — Send a message to a destination process
+#
+# dest_pid:  PID of the target process
+# payload:   pointer to the data to send (up to 48 bytes)
+# size:      number of bytes to send (0-48)
+#
+# If the destination is BLOCKED waiting for a message, it is woken
+# immediately and the payload is delivered directly.  Otherwise the
+# message is buffered in the destination's proc_msg_buf for later
+# collection via ipc_receive.
+#
+# Returns: 0 on success, -1 on error (invalid destination, oversized payload).
+# ---------------------------------------------------------------------------
+function ipc_send:
+    a dest_pid
+    a payload
+    a size
+    a sender_pid
+
+    # Validate payload size — must be between 0 and 48 bytes inclusive
+    if less size 0:
+        print "IPC: error — negative payload size"
+        return -1
+    end
+    if greater size 48:
+        print "IPC: error — payload exceeds 48-byte limit"
+        return -1
+    end
+
+    # Identify the sender process
+    call get_current_pid
+    store it into sender_pid
+
+    # Locate the destination process in the process table
+    a dest_slot
+    call find_slot_by_pid dest_pid
+    store it into dest_slot
+
+    # Verify destination exists and is not a zombie or unused slot
+    if compare dest_slot -1:
+        print "IPC: error — destination process not found"
+        return -1
+    end
+
+    # Check destination state
+    a dest_state
+    load proc_state at dest_slot
+    store it into dest_state
+
+    if compare dest_state PROC_UNUSED:
+        print "IPC: error — destination process slot unused"
+        return -1
+    end
+
+    if compare dest_state PROC_ZOMBIE:
+        print "IPC: error — destination process is zombie"
+        return -1
+    end
+
+    # -------------------------------------------------------------------
+    # Copy payload into destination's message buffer.
+    # The message buffer layout per process slot:
+    #   offset 0  : source PID (4 bytes)
+  #   offset 4  : destination PID (4 bytes)
+    #   offset 8  : message type (4 bytes)
+    #   offset 12 : payload size (4 bytes)
+    #   offset 16 : payload data (48 bytes)
+    # -------------------------------------------------------------------
+    a msg_base
+    multiply dest_slot MSG_SIZE
+    store it into msg_base
+    add proc_msg_buf msg_base
+    store it into msg_base
+
+    # Write message header fields
+    store sender_pid into msg_base at 0    # source PID
+    store dest_pid   into msg_base at 1    # destination PID
+    store 0          into msg_base at 2    # message type (generic)
+    store size       into msg_base at 3    # payload size
+
+    # Copy payload bytes from caller's buffer into message buffer at offset 16
+    if greater size 0:
+        a copy_idx
+        store 0 into copy_idx
+        while greater size copy_idx:
+            # src byte from payload
+            a src_byte
+            load payload at copy_idx
+            store it into src_byte
+
+            # dest index = 16 + copy_idx (skip 16-byte header)
+            a dest_byte_idx
+            add copy_idx 16
+            store it into dest_byte_idx
+
+            # Store byte into destination message buffer
+            store src_byte into msg_base at dest_byte_idx
+
+            add copy_idx 1
+            store it into copy_idx
+        end
+    end
+
+    # Mark message as pending for this destination
+    store 1          into proc_msg_pending at dest_slot
+    store sender_pid into proc_msg_source  at dest_slot
+    store size       into proc_msg_size    at dest_slot
+
+    # If destination is BLOCKED waiting for a message, wake it immediately
+    if compare dest_state PROC_BLOCKED:
+        # Change state to READY and place on the ready queue
+        store PROC_READY into proc_state at dest_slot
+        call enqueue_ready dest_slot
+
+        print "IPC: async message sent from "
+        print sender_pid
+        print " to "
+        print dest_pid
+        return 0
+    end
+
+    # Destination is not waiting — message remains buffered
+    print "IPC: message buffered for "
+    print dest_pid
+    print " from "
+    print sender_pid
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# ipc_receive — Receive a message (blocking)
+#
+# buf:       caller-provided buffer to receive payload data
+# max_size:  maximum bytes to copy into buf
+#
+# If a message is already pending, copies it immediately and returns
+# the actual payload size.  Otherwise the current process is marked
+# BLOCKED and the scheduler switches to another ready process.  When
+# a sender later delivers a message, the woken process resumes here
+# and returns the received size.
+#
+# Returns: number of payload bytes copied, or -1 on error.
+# ---------------------------------------------------------------------------
+function ipc_receive:
+    a buf
+    a max_size
+    a current_slot
+
+    # Determine which process slot is calling us
+    load current_process
+    store it into current_slot
+
+    # -------------------------------------------------------------------
+    # Check if a message is already pending for this process.
+    # If so, copy it out and return immediately (fast path).
+    # -------------------------------------------------------------------
+    a pending
+    load proc_msg_pending at current_slot
+    store it into pending
+
+    if compare pending 1:
+        # Fast path: message already buffered — copy it out now
+        a actual_size
+        load proc_msg_size at current_slot
+        store it into actual_size
+
+        # Clamp copy to caller's buffer size
+        if greater actual_size max_size:
+            store max_size into actual_size
+        end
+
+        # Compute source address: proc_msg_buf + (slot * MSG_SIZE) + 16 (skip header)
+        a src_base
+        multiply current_slot MSG_SIZE
+        store it into src_base
+        add proc_msg_buf src_base
+        store it into src_base
+        add src_base 16
+        store it into src_base
+
+        # Copy payload from message buffer to caller's buffer
+        if greater actual_size 0:
+            a copy_idx
+            store 0 into copy_idx
+            while greater actual_size copy_idx:
+                a byte_val
+                load src_base at copy_idx
+                store it into byte_val
+                store byte_val into buf at copy_idx
+                add copy_idx 1
+                store it into copy_idx
+            end
+        end
+
+        # Clear the pending flag — message consumed
+        store 0 into proc_msg_pending at current_slot
+        return actual_size
+    end
+
+    # -------------------------------------------------------------------
+    # Slow path: no message pending — block and wait.
+    # Mark current process as BLOCKED waiting for IPC, then yield CPU.
+    # -------------------------------------------------------------------
+    store PROC_BLOCKED into proc_state at current_slot
+
+    print "IPC: process blocking to wait for message"
+
+    # Force a context switch — we will resume when a sender wakes us
+    call schedule_force
+
+    # -------------------------------------------------------------------
+    # Wakeup path: a sender has delivered a message and set our state
+    # back to READY.  Copy the message out and return.
+    # -------------------------------------------------------------------
+    a woke_size
+    load proc_msg_size at current_slot
+    store it into woke_size
+
+    # Clamp to caller's buffer capacity
+    if greater woke_size max_size:
+        store max_size into woke_size
+    end
+
+    # Recompute source base (may have changed after context switch)
+    a src_base
+    multiply current_slot MSG_SIZE
+    store it into src_base
+    add proc_msg_buf src_base
+    store it into src_base
+    add src_base 16
+    store it into src_base
+
+    # Copy the payload delivered by the sender
+    if greater woke_size 0:
+        a copy_idx
+        store 0 into copy_idx
+        while greater woke_size copy_idx:
+            a byte_val
+            load src_base at copy_idx
+            store it into byte_val
+            store byte_val into buf at copy_idx
+            add copy_idx 1
+            store it into copy_idx
+        end
+    end
+
+    # Clear the pending flag now that we've consumed the message
+    store 0 into proc_msg_pending at current_slot
+    return woke_size
+
+
+# ---------------------------------------------------------------------------
+# ipc_try_receive — Try to receive a message (non-blocking)
+#
+# buf:       caller-provided buffer to receive payload data
+# max_size:  maximum bytes to copy into buf
+#
+# Same semantics as ipc_receive, but returns -1 (EAGAIN) immediately
+# if no message is pending instead of blocking.
+#
+# Returns: payload bytes copied, or -1 if no message available.
+# ---------------------------------------------------------------------------
+function ipc_try_receive:
+    a buf
+    a max_size
+    a current_slot
+
+    # Identify calling process
+    load current_process
+    store it into current_slot
+
+    # Check for a pending message
+    a pending
+    load proc_msg_pending at current_slot
+    store it into pending
+
+    # If no message pending, return -1 (EAGAIN) without blocking
+    if compare pending 0:
+        return -1
+    end
+
+    # Message is available — copy it out
+    a actual_size
+    load proc_msg_size at current_slot
+    store it into actual_size
+
+    # Clamp to caller's buffer size
+    if greater actual_size max_size:
+        store max_size into actual_size
+    end
+
+    # Source: proc_msg_buf + (slot * MSG_SIZE) + 16
+    a src_base
+    multiply current_slot MSG_SIZE
+    store it into src_base
+    add proc_msg_buf src_base
+    store it into src_base
+    add src_base 16
+    store it into src_base
+
+    # Copy payload bytes
+    if greater actual_size 0:
+        a copy_idx
+        store 0 into copy_idx
+        while greater actual_size copy_idx:
+            a byte_val
+            load src_base at copy_idx
+            store it into byte_val
+            store byte_val into buf at copy_idx
+            add copy_idx 1
+            store it into copy_idx
+        end
+    end
+
+    # Consume the message
+    store 0 into proc_msg_pending at current_slot
+    return actual_size
+
+
+# ---------------------------------------------------------------------------
+# ipc_peek — Inspect a pending message without consuming it
+#
+# buf:  caller-provided 16-byte buffer to receive message header
+#       (source PID, dest PID, type, size)
+#
+# Returns: payload size if a message is pending, -1 otherwise.
+# ---------------------------------------------------------------------------
+function ipc_peek:
+    a buf
+    a current_slot
+
+    # Identify calling process
+    load current_process
+    store it into current_slot
+
+    # Check for pending message
+    a pending
+    load proc_msg_pending at current_slot
+    store it into pending
+
+    # No message waiting
+    if compare pending 0:
+        return -1
+    end
+
+    # Compute message base address for this process slot
+    a msg_base
+    multiply current_slot MSG_SIZE
+    store it into msg_base
+    add proc_msg_buf msg_base
+    store it into msg_base
+
+    # Copy the 16-byte message header into caller's buffer
+    a hdr_idx
+    store 0 into hdr_idx
+    while greater 16 hdr_idx:
+        a hdr_byte
+        load msg_base at hdr_idx
+        store it into hdr_byte
+        store hdr_byte into buf at hdr_idx
+        add hdr_idx 1
+        store it into hdr_idx
+    end
+
+    # Return the payload size (stored at header offset 12, which is
+    # index 3 in our 4-byte word view)
+    load proc_msg_size at current_slot
+    return it
+
+
+# ---------------------------------------------------------------------------
+# ipc_notify — Send a lightweight notification to a process
+#
+# dest_pid:  PID of the target process
+# event:     event code (not used in current implementation, reserved)
+#
+# Unlike ipc_send, this carries no payload.  It merely wakes the
+# destination if it is BLOCKED waiting for a message.
+#
+# Returns: 0 if delivered, -1 if destination not found.
+# ---------------------------------------------------------------------------
+function ipc_notify:
+    a dest_pid
+    a event
+    a dest_slot
+
+    # Look up the destination process
+    call find_slot_by_pid dest_pid
+    store it into dest_slot
+
+    # Destination does not exist
+    if compare dest_slot -1:
+        return -1
+    end
+
+    # Verify destination is a valid, live process
+    a dest_state
+    load proc_state at dest_slot
+    store it into dest_state
+
+    if compare dest_state PROC_UNUSED:
+        return -1
+    end
+    if compare dest_state PROC_ZOMBIE:
+        return -1
+    end
+
+    # If the destination is blocked waiting for IPC, wake it up.
+    # No payload is delivered — the receiver will see a size of 0.
+    if compare dest_state PROC_BLOCKED:
+        store PROC_READY into proc_state at dest_slot
+        call enqueue_ready dest_slot
+    end
+
+    # Mark a zero-length notification as pending so the receiver knows
+    # something arrived even though there is no payload.
+    a sender_pid
+    call get_current_pid
+    store it into sender_pid
+    store 1          into proc_msg_pending at dest_slot
+    store sender_pid into proc_msg_source  at dest_slot
+    store 0          into proc_msg_size    at dest_slot
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# ipc_broadcast — Send a message to all eligible processes
+#
+# payload:      pointer to data to broadcast
+# size:         number of bytes to send (0-48)
+# exclude_pid:  PID to skip (usually the sender, to avoid self-send)
+#
+# Delivers the message to every process that is in READY, RUNNING,
+# or BLOCKED state, excluding the specified PID and the sender.
+#
+# Returns: count of successful deliveries.
+# ---------------------------------------------------------------------------
+function ipc_broadcast:
+    a payload
+    a size
+    a exclude_pid
+    a sender_pid
+    a delivery_count
+    a slot
+
+    # Initialize delivery counter
+    store 0 into delivery_count
+
+    # Get the sender's PID so we can also skip ourselves
+    call get_current_pid
+    store it into sender_pid
+
+    # Validate payload size
+    if less size 0:
+        return 0
+    end
+    if greater size 48:
+        return 0
+    end
+
+    # Iterate through the entire process table
+    store 0 into slot
+    while greater MAX_PROCS slot:
+        # Read this slot's process state
+        a slot_state
+        load proc_state at slot
+        store it into slot_state
+
+        # Skip UNUSED and ZOMBIE processes — they cannot receive
+        if compare slot_state PROC_UNUSED:
+            # Advance loop counter and continue
+            add slot 1
+            store it into slot
+            continue
+        end
+        if compare slot_state PROC_ZOMBIE:
+            add slot 1
+            store it into slot
+            continue
+        end
+
+        # Get the PID of the process in this slot
+        a slot_pid
+        load proc_pid at slot
+        store it into slot_pid
+
+        # Skip the excluded PID (e.g., original sender)
+        if compare slot_pid exclude_pid:
+            add slot 1
+            store it into slot
+            continue
+        end
+
+        # Skip ourselves (the broadcaster)
+        if compare slot_pid sender_pid:
+            add slot 1
+            store it into slot
+            continue
+        end
+
+        # Valid target — send the message
+        call ipc_send slot_pid payload size
+
+        # ipc_send returns 0 on success, -1 on failure
+        if compare it 0:
+            add delivery_count 1
+            store it into delivery_count
+        end
+
+        # Next slot
+        add slot 1
+        store it into slot
+    end
+
+    return delivery_count

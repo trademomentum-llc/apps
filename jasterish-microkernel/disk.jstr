@@ -1,0 +1,697 @@
+###############################################################################
+# disk.jstr -- ATA PIO Disk Driver Module
+# Jasterish Micro-Kernel
+#
+# Provides block-level read/write access to ATA hard disk drives using
+# the legacy PIO (Programmed I/O) mode. This driver supports:
+#   - Primary ATA bus (0x1F0/0x3F6)
+#   - LBA28 addressing (up to 128 GiB)
+#   - 512-byte sector reads and writes
+#
+# This is a minimal but functional ATA driver suitable for a micro-kernel.
+# It does NOT support:
+#   - LBA48 (48-bit addressing for drives > 128 GiB)
+#   - DMA modes (UDMA, Multiword DMA)
+#   - ATAPI devices (CD/DVD drives)
+#   - Secondary ATA bus (0x170/0x376)
+###############################################################################
+
+# =============================================================================
+# Section 1: ATA Port Constants
+# =============================================================================
+
+# Primary ATA bus I/O ports
+global ATA_PRIMARY_DATA       # 0x1F0 — Data register (read/write)
+global ATA_PRIMARY_ERROR      # 0x1F1 — Error register (read) / Features (write)
+global ATA_PRIMARY_SECT_COUNT # 0x1F2 — Sector count
+global ATA_PRIMARY_LBA_LOW    # 0x1F3 — LBA low byte / CHS sector
+global ATA_PRIMARY_LBA_MID    # 0x1F4 — LBA mid byte / CHS cylinder low
+global ATA_PRIMARY_LBA_HIGH   # 0x1F5 — LBA high byte / CHS cylinder high
+global ATA_PRIMARY_DRIVE_HEAD # 0x1F6 — Drive/head select
+global ATA_PRIMARY_STATUS     # 0x1F7 — Status (read) / Command (write)
+global ATA_PRIMARY_COMMAND    # 0x1F7 — Alias for command register
+global ATA_PRIMARY_ALT_STATUS # 0x3F6 — Alternate status (read) / Control (write)
+
+# ATA command codes
+global ATA_CMD_READ_SECTORS   # 0x20 — Read sectors with retry
+global ATA_CMD_WRITE_SECTORS  # 0x30 — Write sectors with retry
+global ATA_CMD_IDENTIFY       # 0xEC — Identify drive
+global ATA_CMD_CACHE_FLUSH    # 0xE7 — Flush write cache
+
+# ATA status register bits
+global ATA_STATUS_BSY         # 0x80 — Busy
+global ATA_STATUS_DRDY        # 0x40 — Drive ready
+global ATA_STATUS_DF          # 0x20 — Drive fault
+global ATA_STATUS_DSC         # 0x10 — Seek complete
+global ATA_STATUS_DRQ         # 0x08 — Data request ready
+global ATA_STATUS_CORR        # 0x04 — Corrected data
+global ATA_STATUS_IDX         # 0x02 — Index mark
+global ATA_STATUS_ERR         # 0x01 — Error
+
+# ATA error register bits
+global ATA_ERROR_BBK          # 0x80 — Bad block
+global ATA_ERROR_UNC          # 0x40 — Uncorrectable data
+global ATA_ERROR_MC           # 0x20 — Media changed
+global ATA_ERROR_IDNF         # 0x10 — ID mark not found
+global ATA_ERROR_MCR          # 0x08 — Media change request
+global ATA_ERROR_ABRT         # 0x04 — Command aborted
+global ATA_ERROR_TK0NF        # 0x02 — Track 0 not found
+global ATA_ERROR_AMNF         # 0x01 — Address mark not found
+
+# Drive select constants for LBA mode
+global ATA_DRIVE_MASTER       # 0xE0 — Master drive, LBA mode
+global ATA_DRIVE_SLAVE        # 0xF0 — Slave drive, LBA mode
+
+# Sector size in bytes
+global ATA_SECTOR_SIZE
+store 512 into ATA_SECTOR_SIZE
+
+# =============================================================================
+# Section 2: Disk Global State
+# =============================================================================
+
+global disk_present           # Non-zero if a disk is detected
+global disk_sector_count      # Total sectors on the disk (LBA28 max = 268,435,456)
+global disk_current_drive     # Currently selected drive (0 = master, 1 = slave)
+
+# Temporary sector buffer for ATA transfers (1 sector = 512 bytes)
+global ata_sector_buffer
+array 512 ata_sector_buffer
+
+# =============================================================================
+# Section 3: ATA Driver Initialization
+# =============================================================================
+
+###############################################################################
+# Function: disk_init
+# -----------------------------------------------------------------------------
+# Initialize the ATA disk driver.
+#   1. Initialize port constants
+#   2. Select the master drive
+#   3. Send IDENTIFY command to detect presence
+#   4. Parse identify data to get sector count
+#
+# Returns: 0 if disk detected, -1 if no disk present.
+###############################################################################
+
+disk_init
+    a status
+    a identify_ok
+
+    print "DISK: initializing ATA PIO driver..."
+
+    # Initialize port constants
+    store 0x1F0 into ATA_PRIMARY_DATA
+    store 0x1F1 into ATA_PRIMARY_ERROR
+    store 0x1F2 into ATA_PRIMARY_SECT_COUNT
+    store 0x1F3 into ATA_PRIMARY_LBA_LOW
+    store 0x1F4 into ATA_PRIMARY_LBA_MID
+    store 0x1F5 into ATA_PRIMARY_LBA_HIGH
+    store 0x1F6 into ATA_PRIMARY_DRIVE_HEAD
+    store 0x1F7 into ATA_PRIMARY_STATUS
+    store 0x1F7 into ATA_PRIMARY_COMMAND
+    store 0x3F6 into ATA_PRIMARY_ALT_STATUS
+
+    # Initialize command constants
+    store 0x20 into ATA_CMD_READ_SECTORS
+    store 0x30 into ATA_CMD_WRITE_SECTORS
+    store 0xEC into ATA_CMD_IDENTIFY
+    store 0xE7 into ATA_CMD_CACHE_FLUSH
+
+    # Initialize status bit masks
+    store 0x80 into ATA_STATUS_BSY
+    store 0x40 into ATA_STATUS_DRDY
+    store 0x20 into ATA_STATUS_DF
+    store 0x10 into ATA_STATUS_DSC
+    store 0x08 into ATA_STATUS_DRQ
+    store 0x04 into ATA_STATUS_CORR
+    store 0x02 into ATA_STATUS_IDX
+    store 0x01 into ATA_STATUS_ERR
+
+    # Initialize error bit masks
+    store 0x80 into ATA_ERROR_BBK
+    store 0x40 into ATA_ERROR_UNC
+    store 0x20 into ATA_ERROR_MC
+    store 0x10 into ATA_ERROR_IDNF
+    store 0x08 into ATA_ERROR_MCR
+    store 0x04 into ATA_ERROR_ABRT
+    store 0x02 into ATA_ERROR_TK0NF
+    store 0x01 into ATA_ERROR_AMNF
+
+    # Initialize drive select constants
+    store 0xE0 into ATA_DRIVE_MASTER
+    store 0xF0 into ATA_DRIVE_SLAVE
+
+    # Default to no disk detected
+    store 0 into disk_present
+    store 0 into disk_sector_count
+    store 0 into disk_current_drive
+
+    # Select master drive
+    call disk_select_drive 0
+
+    # Send IDENTIFY command
+    call disk_identify
+    store it into identify_ok
+
+    if greater identify_ok 0
+        store 1 into disk_present
+        print "DISK: ATA drive detected, sectors="
+        print disk_sector_count
+    else
+        print "DISK: no ATA drive detected on primary bus"
+    end
+
+    return identify_ok
+
+###############################################################################
+# Function: disk_select_drive
+# -----------------------------------------------------------------------------
+# Select the master or slave drive on the primary bus.
+# drive: 0 = master, 1 = slave
+###############################################################################
+
+disk_select_drive
+    a drive
+    a drive_head
+
+    store it into drive
+
+    if equal drive 0
+        store ATA_DRIVE_MASTER into drive_head
+    else
+        store ATA_DRIVE_SLAVE into drive_head
+    end
+
+    store drive_head into port ATA_PRIMARY_DRIVE_HEAD
+    store drive into disk_current_drive
+
+    # Small delay to let the drive select settle
+    call disk_io_delay
+
+    return 0
+
+###############################################################################
+# Function: disk_io_delay
+# -----------------------------------------------------------------------------
+# Insert a short delay by reading the alternate status port 4 times.
+# Required by ATA spec between certain register writes.
+###############################################################################
+
+disk_io_delay
+    a delay_val
+    load from port ATA_PRIMARY_ALT_STATUS
+    store it into delay_val
+    load from port ATA_PRIMARY_ALT_STATUS
+    store it into delay_val
+    load from port ATA_PRIMARY_ALT_STATUS
+    store it into delay_val
+    load from port ATA_PRIMARY_ALT_STATUS
+    store it into delay_val
+    return 0
+
+###############################################################################
+# Function: disk_wait_bsy
+# -----------------------------------------------------------------------------
+# Poll the status register until the BSY (busy) bit clears.
+# Returns the final status byte, or 0 if timeout.
+###############################################################################
+
+disk_wait_bsy
+    a timeout
+    a status
+
+    store 100000 into timeout
+
+_disk_wait_bsy_loop
+    load from port ATA_PRIMARY_STATUS
+    store it into status
+
+    bitwise_and status ATA_STATUS_BSY
+    store it into it
+    if equal it 0
+        return status
+    end
+
+    subtract timeout 1
+    store it into timeout
+    if equal timeout 0
+        print "DISK: timeout waiting for BSY to clear"
+        return 0
+    end
+
+    jump _disk_wait_bsy_loop
+
+###############################################################################
+# Function: disk_wait_drq
+# -----------------------------------------------------------------------------
+# Poll the status register until the DRQ (data request) bit is set.
+# This indicates the drive is ready to transfer data.
+# Returns the final status byte, or 0 if timeout/error.
+###############################################################################
+
+disk_wait_drq
+    a timeout
+    a status
+
+    store 100000 into timeout
+
+_disk_wait_drq_loop
+    load from port ATA_PRIMARY_STATUS
+    store it into status
+
+    # Check for error
+    bitwise_and status ATA_STATUS_ERR
+    store it into it
+    if greater it 0
+        print "DISK: error during wait for DRQ"
+        return 0
+    end
+
+    # Check if DRQ is set
+    bitwise_and status ATA_STATUS_DRQ
+    store it into it
+    if greater it 0
+        return status
+    end
+
+    subtract timeout 1
+    store it into timeout
+    if equal timeout 0
+        print "DISK: timeout waiting for DRQ"
+        return 0
+    end
+
+    jump _disk_wait_drq_loop
+
+###############################################################################
+# Function: disk_identify
+# -----------------------------------------------------------------------------
+# Send the ATA IDENTIFY command to the selected drive.
+# If successful, reads 256 words of identify data and extracts
+# the total sector count (LBA28 capacity at words 60-61).
+#
+# Returns: 1 if identify succeeded, 0 if failed.
+###############################################################################
+
+disk_identify
+    a status
+    a word_idx
+    a data_word
+    a lba28_low
+    a lba28_high
+
+    # Wait for drive to be ready
+    call disk_wait_bsy
+    store it into status
+    if equal status 0
+        return 0
+    end
+
+    # Send IDENTIFY command
+    store ATA_CMD_IDENTIFY into port ATA_PRIMARY_COMMAND
+
+    # Wait for DRQ or ERR
+    call disk_wait_drq
+    store it into status
+    if equal status 0
+        return 0
+    end
+
+    # Read 256 words (512 bytes) of identify data into sector buffer
+    store 0 into word_idx
+    while less word_idx 256
+        load from port ATA_PRIMARY_DATA
+        store it into data_word
+
+        # Store low byte
+        bitwise_and data_word 0xFF
+        store it into ata_sector_buffer at word_idx
+
+        # Store high byte
+        shift_right data_word 8
+        store it into ata_sector_buffer at word_idx
+
+        add word_idx 1
+        store it into word_idx
+    end
+
+    # Extract LBA28 sector count from words 60-61
+    # Word 60 = low 16 bits, Word 61 = high 16 bits
+    load ata_sector_buffer at 60
+    store it into lba28_low
+    load ata_sector_buffer at 61
+    store it into lba28_high
+
+    # Combine: sector_count = (lba28_high << 16) | lba28_low
+    shift_left lba28_high 16
+    store it into disk_sector_count
+    bitwise_or disk_sector_count lba28_low
+    store it into disk_sector_count
+
+    if greater disk_sector_count 0
+        return 1
+    end
+
+    return 0
+
+# =============================================================================
+# Section 4: Sector Read/Write
+# =============================================================================
+
+###############################################################################
+# Function: disk_read_sector
+# -----------------------------------------------------------------------------
+# Read a single 512-byte sector from the disk using LBA28 addressing.
+#
+# lba:    logical block address (sector number, 0-based)
+# buffer: destination buffer address (must be at least 512 bytes)
+#
+# Returns: 0 on success, -1 on error.
+###############################################################################
+
+disk_read_sector
+    a lba
+    a buffer
+    a status
+    a word_idx
+    a data_word
+    a lba_low
+    a lba_mid
+    a lba_high
+    a drive_head
+
+    store argument 0 into lba
+    store argument 1 into buffer
+
+    # Validate LBA is within LBA28 range
+    if greater lba 0x0FFFFFFF
+        print "DISK: LBA out of range for LBA28"
+        return -1
+    end
+
+    # Wait for drive to be ready
+    call disk_wait_bsy
+    store it into status
+    if equal status 0
+        return -1
+    end
+
+    # Extract LBA bytes
+    bitwise_and lba 0xFF
+    store it into lba_low
+
+    shift_right lba 8
+    store it into lba_mid
+    bitwise_and lba_mid 0xFF
+    store it into lba_mid
+
+    shift_right lba 16
+    store it into lba_high
+    bitwise_and lba_high 0xFF
+    store it into lba_high
+
+    # Set drive/head register with LBA mode and top 4 bits of LBA
+    # drive_head = 0xE0 | ((lba >> 24) & 0x0F)
+    shift_right lba 24
+    store it into drive_head
+    bitwise_and drive_head 0x0F
+    store it into drive_head
+    bitwise_or drive_head ATA_DRIVE_MASTER
+    store it into drive_head
+    store drive_head into port ATA_PRIMARY_DRIVE_HEAD
+
+    # Set sector count = 1
+    store 1 into port ATA_PRIMARY_SECT_COUNT
+
+    # Set LBA bytes
+    store lba_low into port ATA_PRIMARY_LBA_LOW
+    store lba_mid into port ATA_PRIMARY_LBA_MID
+    store lba_high into port ATA_PRIMARY_LBA_HIGH
+
+    # Send READ SECTORS command
+    store ATA_CMD_READ_SECTORS into port ATA_PRIMARY_COMMAND
+
+    # Wait for data ready
+    call disk_wait_drq
+    store it into status
+    if equal status 0
+        return -1
+    end
+
+    # Read 256 words = 512 bytes
+    store 0 into word_idx
+    while less word_idx 256
+        load from port ATA_PRIMARY_DATA
+        store it into data_word
+
+        # Store low byte at buffer[word_idx * 2]
+        a buf_idx_low
+        multiply word_idx 2
+        store it into buf_idx_low
+        bitwise_and data_word 0xFF
+        store it into buffer at buf_idx_low
+
+        # Store high byte at buffer[word_idx * 2 + 1]
+        a buf_idx_high
+        add buf_idx_low 1
+        store it into buf_idx_high
+        shift_right data_word 8
+        store it into buffer at buf_idx_high
+
+        add word_idx 1
+        store it into word_idx
+    end
+
+    # Wait for BSY to clear after transfer
+    call disk_wait_bsy
+
+    return 0
+
+###############################################################################
+# Function: disk_write_sector
+# -----------------------------------------------------------------------------
+# Write a single 512-byte sector to the disk using LBA28 addressing.
+#
+# lba:    logical block address (sector number, 0-based)
+# buffer: source buffer address (must contain 512 bytes)
+#
+# Returns: 0 on success, -1 on error.
+###############################################################################
+
+disk_write_sector
+    a lba
+    a buffer
+    a status
+    a word_idx
+    a data_word
+    a lba_low
+    a lba_mid
+    a lba_high
+    a drive_head
+    a low_byte
+    a high_byte
+
+    store argument 0 into lba
+    store argument 1 into buffer
+
+    # Validate LBA is within LBA28 range
+    if greater lba 0x0FFFFFFF
+        print "DISK: LBA out of range for LBA28"
+        return -1
+    end
+
+    # Wait for drive to be ready
+    call disk_wait_bsy
+    store it into status
+    if equal status 0
+        return -1
+    end
+
+    # Extract LBA bytes
+    bitwise_and lba 0xFF
+    store it into lba_low
+
+    shift_right lba 8
+    store it into lba_mid
+    bitwise_and lba_mid 0xFF
+    store it into lba_mid
+
+    shift_right lba 16
+    store it into lba_high
+    bitwise_and lba_high 0xFF
+    store it into lba_high
+
+    # Set drive/head register
+    shift_right lba 24
+    store it into drive_head
+    bitwise_and drive_head 0x0F
+    store it into drive_head
+    bitwise_or drive_head ATA_DRIVE_MASTER
+    store it into drive_head
+    store drive_head into port ATA_PRIMARY_DRIVE_HEAD
+
+    # Set sector count = 1
+    store 1 into port ATA_PRIMARY_SECT_COUNT
+
+    # Set LBA bytes
+    store lba_low into port ATA_PRIMARY_LBA_LOW
+    store lba_mid into port ATA_PRIMARY_LBA_MID
+    store lba_high into port ATA_PRIMARY_LBA_HIGH
+
+    # Send WRITE SECTORS command
+    store ATA_CMD_WRITE_SECTORS into port ATA_PRIMARY_COMMAND
+
+    # Wait for data ready
+    call disk_wait_drq
+    store it into status
+    if equal status 0
+        return -1
+    end
+
+    # Write 256 words = 512 bytes
+    store 0 into word_idx
+    while less word_idx 256
+        # Read low and high bytes from buffer
+        a buf_idx_low
+        multiply word_idx 2
+        store it into buf_idx_low
+        load buffer at buf_idx_low
+        store it into low_byte
+
+        a buf_idx_high
+        add buf_idx_low 1
+        store it into buf_idx_high
+        load buffer at buf_idx_high
+        store it into high_byte
+
+        # Combine into word: (high_byte << 8) | low_byte
+        shift_left high_byte 8
+        store it into data_word
+        bitwise_or data_word low_byte
+        store it into data_word
+
+        store data_word into port ATA_PRIMARY_DATA
+
+        add word_idx 1
+        store it into word_idx
+    end
+
+    # Wait for BSY to clear after transfer
+    call disk_wait_bsy
+
+    # Flush cache to ensure data is written to disk
+    store ATA_CMD_CACHE_FLUSH into port ATA_PRIMARY_COMMAND
+    call disk_wait_bsy
+
+    return 0
+
+###############################################################################
+# Function: disk_read_sectors
+# -----------------------------------------------------------------------------
+# Read multiple contiguous sectors from the disk.
+#
+# lba:    starting sector number
+# count:  number of sectors to read
+# buffer: destination buffer (must be count * 512 bytes)
+#
+# Returns: 0 on success, -1 on error.
+###############################################################################
+
+disk_read_sectors
+    a lba
+    a count
+    a buffer
+    a idx
+    a result
+
+    store argument 0 into lba
+    store argument 1 into count
+    store argument 2 into buffer
+
+    if less_or_equal count 0
+        return 0
+    end
+
+    store 0 into idx
+    while less idx count
+        call disk_read_sector lba buffer
+        store it into result
+        if less result 0
+            print "DISK: read failed at LBA "
+            print lba
+            return -1
+        end
+
+        add lba 1
+        store it into lba
+        add buffer ATA_SECTOR_SIZE
+        store it into buffer
+        add idx 1
+        store it into idx
+    end
+
+    return 0
+
+###############################################################################
+# Function: disk_write_sectors
+# -----------------------------------------------------------------------------
+# Write multiple contiguous sectors to the disk.
+#
+# lba:    starting sector number
+# count:  number of sectors to write
+# buffer: source buffer (must contain count * 512 bytes)
+#
+# Returns: 0 on success, -1 on error.
+###############################################################################
+
+disk_write_sectors
+    a lba
+    a count
+    a buffer
+    a idx
+    a result
+
+    store argument 0 into lba
+    store argument 1 into count
+    store argument 2 into buffer
+
+    if less_or_equal count 0
+        return 0
+    end
+
+    store 0 into idx
+    while less idx count
+        call disk_write_sector lba buffer
+        store it into result
+        if less result 0
+            print "DISK: write failed at LBA "
+            print lba
+            return -1
+        end
+
+        add lba 1
+        store it into lba
+        add buffer ATA_SECTOR_SIZE
+        store it into buffer
+        add idx 1
+        store it into idx
+    end
+
+    return 0
+
+###############################################################################
+# Function: disk_get_size
+# -----------------------------------------------------------------------------
+# Return the total number of sectors on the disk.
+#
+# Returns: sector count, or 0 if no disk.
+###############################################################################
+
+disk_get_size
+    load disk_sector_count
+    return it
+
+###############################################################################
+# End of disk.jstr
+###############################################################################

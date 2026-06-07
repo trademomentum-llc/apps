@@ -1,0 +1,68 @@
+# Weights & Biases (W&B) - Experiment Tracking, Logging, Artifacts, Sweeps Best Practices (Foundation Knowledge)
+
+W&B is the system of record for ML experiment tracking. It logs metrics, hyperparameters, configs, git commits, seeds, system metrics (CPU/GPU), and enables reproducibility, visualization, HPO via sweeps, and artifact versioning for datasets, models, checkpoints, and weights. Integrates with Transformers, PEFT, Lightning, PyTorch, etc. Critical for reliable LLM fine-tuning and eval.
+
+## Experiment Tracking
+- Start run early: import wandb; with wandb.init(project="neuro-llm-finetune", name="llama-lora-v1", config=config_dict) as run:
+- Config at init: config = {"model": "mistral-7b", "lr": 2e-4, "batch_size": 4, "epochs": 3, "seed": 42, "dataset": "neuro_all.db"}
+- Auto-captures: git commit + diff (if code saving enabled), requirements, stdout/stderr, system metrics (GPU util, temp, power via nvidia-smi).
+- HF Transformers: training_args = TrainingArguments(..., report_to="wandb"); trainer = Trainer(...); trainer.train()  # auto logs metrics, config
+- PyTorch Lightning: wandb_logger = WandbLogger(project="llama-finetune"); trainer = Trainer(logger=wandb_logger); trainer.fit(...)
+- Add to any lib: call wandb.init as early as possible inside context manager; use run.finish() if not using with.
+- Live streaming: metrics update in dashboard for real-time debugging of training curves (loss, ppl).
+
+## Logging Weights & Biases
+- Watch model for histograms: run.watch(model, log="gradients", log_freq=100)  # or "parameters" or "all"; criterion optional
+- In HF env: export WANDB_WATCH=all before training to log weights + grads automatically.
+- Log scalars with prefixes: run.log({"train/loss": loss, "train/lm_loss": lm_loss, "train/ppl": ppl, "eval/loss": eval_loss, "eval/ppl": eval_ppl})
+- Group metrics: use train/ val/ prefixes so UI sections separate training vs eval.
+- Custom x-axis: after init, run.define_metric("*", step_metric="global_step"); then log({"global_step": step, "train/loss": 0.1})
+- Log tables for preds/eval: table = wandb.Table(columns=["prompt", "pred", "target"]); table.add_data(...); run.log({"eval_samples": table})
+- Frequency: log every N steps or epoch; avoid logging too often to not bloat.
+- Media: log sample generations, loss curves via built-in plots.
+
+## Fine-Tuning & Eval Datasets
+- Always version train/eval sets as artifacts before fine-tune (see Artifacts).
+- For causal LM / SFT: log "train/loss", "eval/loss", "perplexity" (or ppl), token accuracy if available.
+- HF + PEFT/LoRA fine-tunes: Trainer + report_to="wandb" logs steps, learning_rate schedule, eval_strategy results automatically.
+- Multi-task / custom Morphlex trainer: explicitly log lm_loss, morph_loss, role_loss components + combined if using.
+- Eval handling: pass eval_dataset to Trainer; log separate val/ metrics; use evaluation_strategy="epoch" or steps.
+- Track fine-tune specifics: lora_r, lora_alpha, target_modules, 4bit base, gradient_accumulation_steps, fp16/bf16.
+- Monitor for overfitting: watch divergence between train_loss and eval_loss; log early-stopping metric.
+- LLM eval: log MT-Bench style or custom neuro-task metrics (e.g. pattern_match_accuracy on held-out instructions).
+
+## Artifacts & Versioning
+- Create: artifact = wandb.Artifact(name="neuro_train_v1", type="dataset"); artifact.add_file("datasets/neurodivergence/compiled/shards/neuro_all.db"); artifact.add_dir("raw/foundation/")
+- Metadata: artifact = wandb.Artifact(..., metadata={"total_vectors": 2634, "categories": ["foundation_wandb", ...], "pipeline": "morphlex", "license": "project-internal"})
+- Log output: run.log_artifact(artifact, aliases=["latest", "train-v1"])
+- Input: dataset_artifact = run.use_artifact("entity/project/neuro_train_v1:latest"); local_path = dataset_artifact.download()
+- Model checkpoints: log as type="model" with aliases=["best", "epoch-3"]; use for resume or registry.
+- Lineage graph: auto-tracks dataset -> training run -> produced model/checkpoint.
+- Reference artifacts: for large external data (S3 etc.) without copying: use references so files stay local.
+- Best practices: put schema + license + description in metadata/artifact; use clear aliases (raw, clean, foundation, neuro_finetune_v2); version everything consumed/produced.
+- For eval: log separate eval_artifact; link in run so comparison is auditable.
+
+## Sweeps/HPO
+- Sweep config (YAML or dict): method: "bayes" (or grid/random); metric: {name: "eval/ppl", goal: "minimize"}; parameters: {learning_rate: {min: 1e-5, max: 1e-3, distribution: "log_uniform"}, lora_r: {values: [8,16,32]}, batch_size: {values: [2,4,8]}}
+- CLI: wandb sweep sweep_config.yaml --project neuro-llm
+- Run agent: wandb agent <sweep_id>  # can launch multiple in parallel on different machines/GPUs
+- In code: inside training, use wandb.config.lr etc (config injected by sweep agent).
+- HF integration: sweeps work by varying TrainingArguments or script args.
+- Visualization: parallel coordinates, hyperparam importance, best runs table in W&B UI.
+- For neuro fine-tunes: sweep over adapter ranks, learning rates, epochs on the morphlex-compiled shards to find stable low-ppl configs.
+
+## Reproducibility
+- Log everything deterministic: full config dict at init (includes seeds, data versions via artifact refs, git sha auto), random seeds (torch, numpy, python), exact dataset artifact used.
+- Resume: wandb.init(project=..., resume="must", id=previous_run_id) to continue interrupted runs.
+- Code saving: enable in settings so uncommitted diffs + full script are saved per run.
+- Compare: use W&B dashboard tables, reports, or API to diff runs (metrics, configs, artifacts).
+- Tables for audit: log eval predictions table per run for later inspection of failure modes without re-running.
+- System + env: auto system metrics + logged config make hardware/software context explicit.
+- Artifact lineage + git + seeds = full provenance: "which exact data + code + hyperparams produced this checkpoint".
+- Offline mode: export WANDB_MODE=offline then sync later; still captures all for local reproducibility.
+- In sovereign/Mac-isolated: use W&B local server or just the SDK for logging + later export artifacts; combine with morphlex deterministic vectors for bit-identical pipeline stages.
+
+## Integration with Neurodivergence LLM Pipeline
+Apply these W&B patterns when using `cargo run -- llm train` or custom fine-tunes on morphlex::compile'd shards (neuro_all.db mixing foundation_* + neuro categories). Log the compile step outputs (vector counts per category like foundation_wandb), Trainer losses (lm_loss, ppl from the multi-task objective), config (d_model, layers, use_morph_gates etc), and the exact .db + instructions artifacts. Enables tried-and-tested, auditable, reproducible base training before JStar/NeuroDiOS specialization or NINL fusion. Combine with PEFT/Transformers/Alpaca foundation knowledge already translated via the deterministic morphlex pipeline. Always prioritize local/privacy-respecting logging when possible; use for sovereign self-hosting experiments.
+
+This enriches the foundation layer for robust LLM training data in the Morphlex/Jasterish stack.

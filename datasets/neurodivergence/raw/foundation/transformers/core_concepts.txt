@@ -1,0 +1,41 @@
+# Hugging Face Transformers - Core Concepts and Best Practices (Foundation Knowledge)
+
+Transformers is the leading library for state-of-the-art NLP, vision, and audio models. It provides a unified API for thousands of pretrained models.
+
+## Key Components
+- Auto classes: AutoModelForSequenceClassification, AutoTokenizer, AutoModelForCausalLM. Use these for automatic model selection from checkpoints.
+- Pipeline API: from transformers import pipeline; classifier = pipeline("sentiment-analysis"); results = classifier("I love neurodiversity!")
+- Tokenizers: Fast tokenizers are preferred. tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased"); inputs = tokenizer(text, padding=True, truncation=True, return_tensors="pt")
+- Model loading: model = AutoModel.from_pretrained("bert-base-uncased"); model = model.to("cuda") for GPU.
+
+## Fine-tuning Recipes (Tried and Tested)
+1. Use Trainer API for simplicity:
+   from transformers import Trainer, TrainingArguments
+   training_args = TrainingArguments(output_dir="./results", num_train_epochs=3, per_device_train_batch_size=16, evaluation_strategy="epoch")
+   trainer = Trainer(model=model, args=training_args, train_dataset=dataset, eval_dataset=eval_dataset)
+   trainer.train()
+
+2. Data collators for dynamic padding: from transformers import DataCollatorWithPadding
+3. For causal LM (like GPT-style for chat): use DataCollatorForLanguageModeling with mlm=False.
+4. Mixed precision: fp16=True or bf16=True in TrainingArguments for speed on modern GPUs.
+5. Gradient accumulation for large effective batch sizes: gradient_accumulation_steps=4
+
+## Common Checkpoints for Base Models
+- BERT family for understanding: bert-base-uncased, roberta-base
+- GPT-style for generation: gpt2, gpt-neo, Llama-2-7b (via trust_remote_code if needed)
+- For instruction: use models fine-tuned on Alpaca, Dolly, or OpenOrca.
+
+## Optimization Tips
+- Use torch.compile(model) for PyTorch 2.0+ speedups.
+- Quantization with bitsandbytes for 8-bit/4-bit loading: model = AutoModelForCausalLM.from_pretrained(..., load_in_4bit=True, device_map="auto")
+- Evaluation: use evaluate library or built-in metrics in Trainer.
+- Saving: model.save_pretrained("./my-neuro-model"); tokenizer.save_pretrained("./my-neuro-model")
+
+## Neurodivergence-Relevant Applications
+When building support tools:
+- Fine-tune on conversational data for empathetic responses to ADHD/autism experiences.
+- Use for classification of sensory overload descriptions or executive function challenges.
+- Sequence-to-sequence for rephrasing masking experiences into affirming language.
+- Always respect privacy: use local models where possible, anonymize data.
+
+This knowledge forms the base for efficient, production-grade LLM development. Combine with PEFT for parameter-efficient adaptation on consumer hardware.

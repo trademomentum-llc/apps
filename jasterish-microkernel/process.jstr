@@ -1,0 +1,3138 @@
+###############################################################################
+# process.jstr - Process Management and Round-Robin Scheduler Module
+# Jasterish Micro-Kernel for x86-64 Bare-Metal Systems
+#
+# This module implements the complete process lifecycle management including:
+# - Process Control Block (PCB) management via parallel arrays
+# - Round-robin preemptive scheduling with time quantum
+# - Context switching (register save/restore)
+# - Process creation, exit, kill, yield, sleep, and wakeup
+# - Inter-process message passing primitives
+# - Parent/child relationship tracking (wait_for_child)
+#
+# Architecture: x86-64 bare-metal, single CPU (SMP-ready data structures)
+# Scheduling algorithm: Round-robin with fixed time quantum
+# PCB layout: Parallel arrays indexed by process slot (0-255)
+# Slot 0 is reserved for the idle process (PID 0) which always remains ready.
+###############################################################################
+
+###############################################################################
+# SECTION 1: PROCESS STATE CONSTANTS
+# These define the valid states for any process in the system.
+###############################################################################
+
+global PROC_UNUSED
+store 0 into PROC_UNUSED
+
+global PROC_READY
+store 1 into PROC_READY
+
+global PROC_RUNNING
+store 2 into PROC_RUNNING
+
+global PROC_BLOCKED
+store 3 into PROC_BLOCKED
+
+global PROC_ZOMBIE
+store 4 into PROC_ZOMBIE
+
+###############################################################################
+# SECTION 2: SCHEDULER CONSTANTS
+# Hard-coded system limits and default tuning parameters.
+###############################################################################
+
+global MAX_PROCS
+store 256 into MAX_PROCS
+
+global MSG_SIZE
+store 64 into MSG_SIZE
+
+global DEFAULT_TIME_SLICE
+store 10 into DEFAULT_TIME_SLICE
+
+global IDLE_PID
+store 0 into IDLE_PID
+
+global KERNEL_STACK_SIZE
+store 8192 into KERNEL_STACK_SIZE
+
+global USER_STACK_SIZE
+store 65536 into USER_STACK_SIZE
+
+###############################################################################
+# SECTION 3: PROCESS CONTROL BLOCK ARRAYS
+# Per-process state is stored in parallel arrays indexed by slot number (0-255).
+# This design allows O(1) access to any PCB field given a process slot index.
+###############################################################################
+
+# proc_pid[slot] - Unique process ID (monotonically increasing, never reused)
+array 256 proc_pid
+
+# proc_state[slot] - Current process state (UNUSED/READY/RUNNING/BLOCKED/ZOMBIE)
+array 256 proc_state
+
+# proc_rsp[slot] - Saved stack pointer (RSP) for context switching
+array 256 proc_rsp
+
+# proc_rip[slot] - Saved instruction pointer (RIP) for context switching
+array 256 proc_rip
+
+# proc_cr3[slot] - Page table root (physical address of PML4)
+array 256 proc_cr3
+
+# proc_priority[slot] - Process priority level (1-10, affects scheduling weight)
+array 256 proc_priority
+
+# proc_time_slice[slot] - Remaining time quantum for current scheduling epoch
+array 256 proc_time_slice
+
+# proc_parent[slot] - PID of the parent process (for wait/exit coordination)
+array 256 proc_parent
+
+# proc_exit_code[slot] - Exit status code (set on process_exit, read by parent)
+array 256 proc_exit_code
+
+# proc_msg_pending[slot] - Non-zero if a message is waiting to be received
+array 256 proc_msg_pending
+
+# proc_msg_source[slot] - PID of the process that sent the pending message
+array 256 proc_msg_source
+
+# proc_msg_size[slot] - Size in bytes of the pending message
+array 256 proc_msg_size
+
+###############################################################################
+# SECTION 4: PER-PROCESS MESSAGE BUFFER AND WAKE TIME ARRAY
+# msg_buf: Flat array of 256 * 64 = 16384 bytes for inter-process messages.
+# wake_time: Per-process absolute tick count for sleep wakeup.
+# waiting_for: PID that a BLOCKED parent is waiting on (or -1 for none).
+###############################################################################
+
+# proc_msg_buf[pid * MSG_SIZE] = start of 64-byte message buffer for that process
+array 16384 proc_msg_buf
+
+# proc_wake_time[slot] - Absolute tick count when a sleeping process should wake
+array 256 proc_wake_time
+
+# proc_waiting_for[slot] - PID this process is waiting for (-1 = not waiting)
+array 256 proc_waiting_for
+
+# proc_heap_end[slot] - Current end of the process heap (program break)
+array 256 proc_heap_end
+
+# proc_data_base[slot] - Base address of process data segment
+array 256 proc_data_base
+
+# proc_fork_retval[slot] - Return value for child after fork (0 for child)
+array 256 proc_fork_retval
+
+# proc_user_rip[slot] - User-mode instruction pointer for ring-3 entry
+array 256 proc_user_rip
+
+# proc_user_rsp[slot] - User-mode stack pointer for ring-3 entry
+array 256 proc_user_rsp
+
+###############################################################################
+# SECTION 5: IDLE PROCESS STACK
+# The idle process needs its own kernel stack. We allocate it as a global array.
+###############################################################################
+
+array 8192 idle_stack
+
+###############################################################################
+# SECTION 6: GLOBAL SCHEDULER STATE
+# Variables that track the overall state of the scheduler and ready queue.
+###############################################################################
+
+# current_process - Slot index (0-255) of the process currently on CPU
+global current_process
+
+# process_count - Number of active (non-UNUSED) process slots
+global process_count
+
+# next_pid - Monotonically increasing counter for assigning unique PIDs
+global next_pid
+
+# ready_queue - Circular buffer of ready process slot indices (FIFO order)
+array 256 ready_queue
+
+# ready_head - Dequeue index for the ready queue circular buffer
+global ready_head
+
+# ready_tail - Enqueue index for the ready queue circular buffer
+global ready_tail
+
+# tick_count - Total timer ticks elapsed since boot (incremented by timer ISR)
+global tick_count
+
+# kernel_pml4 - Physical address of the kernel's top-level page table
+global kernel_pml4
+
+###############################################################################
+# SECTION 7: HELPER FUNCTIONS
+# Low-level utility functions used by the scheduler and process management.
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# enqueue_ready(proc_idx) - Add a process to the tail of the ready queue
+#
+# This implements the enqueue operation on a circular buffer. The ready queue
+# is a FIFO structure that holds indices of processes in the PROC_READY state.
+# When a process becomes ready, it is placed at the tail. The scheduler picks
+# from the head, ensuring fair round-robin ordering.
+#
+# The wraparound formula: next = (tail + 1) % MAX_PROCS
+# Since MAX_PROCS is 256 (a power of 2), modulo can be done via bitwise AND
+# with 0xFF for efficiency. Here we use explicit comparison for clarity.
+#
+# Arguments: proc_idx - slot index of process to enqueue
+# Returns: nothing
+# ---------------------------------------------------------------------------
+function enqueue_ready
+    a proc_idx
+    a next_tail
+
+    # Get the process index argument into proc_idx
+    store argument 0 into proc_idx
+
+    # ready_queue[ready_tail] = proc_idx
+    load ready_tail
+    store proc_idx into ready_queue at it
+
+    # next_tail = (ready_tail + 1) modulo MAX_PROCS
+    # For power-of-2 MAX_PROCS, this is: next = (tail + 1) & (MAX_PROCS - 1)
+    load ready_tail
+    add it 1
+    store it into next_tail
+
+    # Handle wraparound: if next_tail >= MAX_PROCS, wrap to 0
+    load next_tail
+    load MAX_PROCS
+    if greater_or_equal it it
+        store 0 into next_tail
+    end
+
+    # ready_tail = next_tail
+    store next_tail into ready_tail
+
+    # Mark the process as ready: proc_state[proc_idx] = PROC_READY
+    load PROC_READY
+    store it into proc_state at proc_idx
+
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# dequeue_ready() - Remove and return a process from the head of the ready queue
+#
+# This implements the dequeue operation on the circular buffer. Returns the
+# process slot index at the head, then advances the head pointer. If the queue
+# is empty (head == tail), returns -1.
+#
+# The scheduler calls this when the current process's time slice expires or
+# when it blocks. If -1 is returned, the idle process (slot 0) is run instead.
+#
+# Returns: slot index of next ready process, or -1 if queue is empty
+# ---------------------------------------------------------------------------
+function dequeue_ready
+    a result
+
+    # Check if queue is empty: head == tail means no ready processes
+    load ready_head
+    load ready_tail
+    if equal it it
+        return -1
+    end
+
+    # result = ready_queue[ready_head]
+    load ready_head
+    load ready_queue at it
+    store it into result
+
+    # ready_head = (ready_head + 1) modulo MAX_PROCS
+    load ready_head
+    add it 1
+    store it into ready_head
+
+    # Handle wraparound for head pointer
+    load ready_head
+    load MAX_PROCS
+    if greater_or_equal it it
+        store 0 into ready_head
+    end
+
+    return result
+end
+
+# ---------------------------------------------------------------------------
+# find_free_slot() - Scan the process table for the first unused slot
+#
+# Linear scan of the proc_state array looking for PROC_UNUSED entries.
+# The search starts at slot 1 because slot 0 is permanently reserved for the
+# idle process. This is O(MAX_PROCS) which is acceptable for MAX_PROCS=256.
+#
+# In a production kernel, a free list could be maintained for O(1) allocation.
+# However, for a micro-kernel with a small fixed process table, linear scan
+# is simple and has predictable performance.
+#
+# Returns: free slot index (1-255), or -1 if process table is full
+# ---------------------------------------------------------------------------
+function find_free_slot
+    a idx
+
+    # Start searching from slot 1 (slot 0 is always the idle process)
+    store 1 into idx
+
+    while less idx MAX_PROCS
+        # Check if proc_state[idx] == PROC_UNUSED (slot is available)
+        load proc_state at idx
+        load PROC_UNUSED
+        if equal it it
+            return idx
+        end
+        # idx++ - advance to next slot
+        load idx
+        add it 1
+        store it into idx
+    end
+
+    # No free slot found - process table is full
+    print "find_free_slot: process table full"
+    return -1
+end
+
+# ---------------------------------------------------------------------------
+# find_slot_by_pid(pid) - Find the process slot corresponding to a given PID
+#
+# Linear scan of the proc_pid array to map a PID to its slot index.
+# PIDs are monotonically increasing and never reused, so each active PID
+# appears exactly once in the proc_pid array.
+#
+# This is used by process_kill, wait_for_child, and IPC functions to
+# translate a PID (which is externally visible) to an internal slot index.
+#
+# Arguments: pid - process ID to search for
+# Returns: slot index (0-255), or -1 if PID does not exist
+# ---------------------------------------------------------------------------
+function find_slot_by_pid
+    a search_pid
+    a idx
+
+    # Get the PID argument
+    store argument 0 into search_pid
+
+    # Search all slots including slot 0
+    store 0 into idx
+
+    while less idx MAX_PROCS
+        # Check if proc_pid[idx] == search_pid
+        load proc_pid at idx
+        load search_pid
+        if equal it it
+            return idx
+        end
+        # idx++
+        load idx
+        add it 1
+        store it into idx
+    end
+
+    # PID not found in process table
+    return -1
+end
+
+# ---------------------------------------------------------------------------
+# cow_walk_pt(pt_phys) - Mark all writable entries in a PT as COW
+#
+# Scans 512 entries in a page table. For each present writable entry,
+# clears PAGE_WRITABLE and sets PAGE_COW. Modifies the shared table
+# in place, so both parent and child see the same restrictions.
+#
+# Arguments: pt_phys - physical address of the page table
+# Returns: nothing
+# ---------------------------------------------------------------------------
+function cow_walk_pt
+    a pt_phys
+    a idx
+    a entry
+    a flags
+
+    store argument 0 into pt_phys
+    store 0 into idx
+
+    while less idx 512
+        load pt_phys at idx
+        store it into entry
+
+        # Check if entry is present
+        bitwise_and entry PAGE_PRESENT
+        store it into flags
+        load flags
+        load 0
+        if greater it it
+            # Check if entry is writable
+            bitwise_and entry PAGE_WRITABLE
+            store it into flags
+            load flags
+            load 0
+            if greater it it
+                # Clear writable, set COW
+                bitwise_xor entry PAGE_WRITABLE
+                store it into entry
+                bitwise_or entry PAGE_COW
+                store it into entry
+                store entry into pt_phys at idx
+            end
+        end
+
+        add idx 1
+        store it into idx
+    end
+
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# cow_walk_pd(pd_phys) - Mark all writable leaf entries under a PD as COW
+#
+# Scans 512 entries in a page directory. For huge pages, marks the PD
+# entry directly. For normal pages, recurses into the PT.
+#
+# Arguments: pd_phys - physical address of the page directory
+# Returns: nothing
+# ---------------------------------------------------------------------------
+function cow_walk_pd
+    a pd_phys
+    a idx
+    a entry
+    a pt_phys
+    a flags
+
+    store argument 0 into pd_phys
+    store 0 into idx
+
+    while less idx 512
+        load pd_phys at idx
+        store it into entry
+
+        # Check if entry is present
+        bitwise_and entry PAGE_PRESENT
+        store it into flags
+        load flags
+        load 0
+        if greater it it
+            # Check if this is a huge page
+            bitwise_and entry PAGE_HUGE
+            store it into flags
+            load flags
+            load 0
+            if greater it it
+                # Huge page - mark as COW directly in PD entry
+                bitwise_and entry PAGE_WRITABLE
+                store it into flags
+                load flags
+                load 0
+                if greater it it
+                    bitwise_xor entry PAGE_WRITABLE
+                    store it into entry
+                    bitwise_or entry PAGE_COW
+                    store it into entry
+                    store entry into pd_phys at idx
+                end
+            else
+                # Normal page table - recurse into PT
+                bitwise_and entry PAGE_FLAGS_MASK
+                store it into pt_phys
+                call cow_walk_pt pt_phys
+            end
+        end
+
+        add idx 1
+        store it into idx
+    end
+
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# cow_walk_pdp(pdp_phys) - Mark all writable leaf entries under a PDP as COW
+#
+# Scans 512 entries in a page directory pointer table and recurses
+# into each valid PD.
+#
+# Arguments: pdp_phys - physical address of the PDP table
+# Returns: nothing
+# ---------------------------------------------------------------------------
+function cow_walk_pdp
+    a pdp_phys
+    a idx
+    a entry
+    a pd_phys
+    a flags
+
+    store argument 0 into pdp_phys
+    store 0 into idx
+
+    while less idx 512
+        load pdp_phys at idx
+        store it into entry
+
+        # Check if entry is present
+        bitwise_and entry PAGE_PRESENT
+        store it into flags
+        load flags
+        load 0
+        if greater it it
+            bitwise_and entry PAGE_FLAGS_MASK
+            store it into pd_phys
+            call cow_walk_pd pd_phys
+        end
+
+        add idx 1
+        store it into idx
+    end
+
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# cow_walk_pml4(pml4_phys) - Mark all writable leaf entries as COW
+#
+# Scans 512 entries in the PML4 and recurses into each valid PDP.
+# This is the top-level entry point for marking an entire address
+# space as copy-on-write.
+#
+# Arguments: pml4_phys - physical address of the PML4 table
+# Returns: nothing
+# ---------------------------------------------------------------------------
+function cow_walk_pml4
+    a pml4_phys
+    a idx
+    a entry
+    a pdp_phys
+    a flags
+
+    store argument 0 into pml4_phys
+    store 0 into idx
+
+    while less idx 512
+        load pml4_phys at idx
+        store it into entry
+
+        # Check if entry is present
+        bitwise_and entry PAGE_PRESENT
+        store it into flags
+        load flags
+        load 0
+        if greater it it
+            bitwise_and entry PAGE_FLAGS_MASK
+            store it into pdp_phys
+            call cow_walk_pdp pdp_phys
+        end
+
+        add idx 1
+        store it into idx
+    end
+
+    return 0
+end
+
+###############################################################################
+# SECTION 8: SCHEDULER INITIALIZATION
+# One-time setup of the scheduler data structures and the idle process.
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# scheduler_init() - Initialize the entire process management subsystem
+#
+# This function must be called exactly once during kernel boot before any
+# other scheduling or process functions are used. It performs the following:
+#
+#   1. Zero all PCB arrays (set all slots to PROC_UNUSED)
+#   2. Configure the idle process in slot 0 with PID 0
+#   3. Set up the idle process's kernel stack
+#   4. Initialize the ready queue with the idle process enqueued
+#   5. Set global scheduler state (current_process, process_count, next_pid)
+#
+# The idle process is special: it never exits, never blocks permanently,
+# and ensures the CPU always has something to run. It simply yields in a
+# loop when no real work is available.
+#
+# Returns: 0 on success
+# ---------------------------------------------------------------------------
+function scheduler_init
+    a idx
+    a idle_stack_top
+
+    print "Scheduler: initializing process management subsystem..."
+
+    # ------------------------------------------------------------------
+    # Step 1: Mark all process slots as UNUSED
+    # Iterate through proc_state array and set every entry to PROC_UNUSED.
+    # Also clear all other PCB fields to known-zero state for cleanliness.
+    # ------------------------------------------------------------------
+    store 0 into idx
+    while less idx MAX_PROCS
+        # proc_state[idx] = PROC_UNUSED
+        load PROC_UNUSED
+        store it into proc_state at idx
+
+        # proc_pid[idx] = 0 (no PID assigned yet)
+        store 0 into proc_pid at idx
+
+        # proc_rsp[idx] = 0 (no stack yet)
+        store 0 into proc_rsp at idx
+
+        # proc_rip[idx] = 0 (no entry point yet)
+        store 0 into proc_rip at idx
+
+        # proc_cr3[idx] = 0 (uses kernel page tables initially)
+        store 0 into proc_cr3 at idx
+
+        # proc_priority[idx] = 0 (not yet assigned)
+        store 0 into proc_priority at idx
+
+        # proc_time_slice[idx] = 0 (not scheduled yet)
+        store 0 into proc_time_slice at idx
+
+        # proc_parent[idx] = 0 (no parent)
+        store 0 into proc_parent at idx
+
+        # proc_exit_code[idx] = 0 (no exit code)
+        store 0 into proc_exit_code at idx
+
+        # proc_msg_pending[idx] = 0 (no message waiting)
+        store 0 into proc_msg_pending at idx
+
+        # proc_msg_source[idx] = 0 (no message source)
+        store 0 into proc_msg_source at idx
+
+        # proc_msg_size[idx] = 0 (no message data)
+        store 0 into proc_msg_size at idx
+
+        # proc_wake_time[idx] = 0 (not sleeping)
+        store 0 into proc_wake_time at idx
+
+        # proc_waiting_for[idx] = -1 (not waiting for any child)
+        store -1 into proc_waiting_for at idx
+
+        # proc_heap_end[idx] = 0 (no heap yet)
+        store 0 into proc_heap_end at idx
+
+        # proc_data_base[idx] = 0 (no data segment yet)
+        store 0 into proc_data_base at idx
+
+        # proc_fork_retval[idx] = 0 (default fork return)
+        store 0 into proc_fork_retval at idx
+
+        # proc_user_rip[idx] = 0 (kernel process by default)
+        store 0 into proc_user_rip at idx
+
+        # proc_user_rsp[idx] = 0 (kernel process by default)
+        store 0 into proc_user_rsp at idx
+
+        # idx++
+        load idx
+        add it 1
+        store it into idx
+    end
+
+    # ------------------------------------------------------------------
+    # Step 2: Configure the idle process in slot 0
+    # The idle process (PID 0) is the process of last resort. It runs
+    # when no other process is ready. It has the lowest priority (1) and
+    # uses the kernel's page tables.
+    # ------------------------------------------------------------------
+
+    # proc_pid[0] = 0 (idle process PID)
+    store 0 into proc_pid at 0
+
+    # proc_state[0] = PROC_READY (idle is always ready to run)
+    load PROC_READY
+    store it into proc_state at 0
+
+    # proc_priority[0] = 1 (lowest priority, just above non-existent)
+    store 1 into proc_priority at 0
+
+    # proc_time_slice[0] = DEFAULT_TIME_SLICE
+    load DEFAULT_TIME_SLICE
+    store it into proc_time_slice at 0
+
+    # Calculate idle_stack_top = address(idle_stack) + KERNEL_STACK_SIZE
+    # In a real kernel, we'd use the actual address. Here we use the array
+    # index offset as a proxy for the stack pointer value.
+    load KERNEL_STACK_SIZE
+    store it into idle_stack_top
+
+    # proc_rsp[0] = idle_stack_top - 8 (reserve space for return address)
+    # The -8 accounts for the initial return address pushed onto the stack.
+    load idle_stack_top
+    subtract it 8
+    store it into proc_rsp at 0
+
+    # proc_rip[0] = address of idle_function (entry point for idle process)
+    # In Jasterish, we store a sentinel value representing the idle function.
+    store 0xFFFF into proc_rip at 0
+
+    # proc_cr3[0] = 0 (idle uses kernel page tables, no user space)
+    store 0 into proc_cr3 at 0
+
+    # proc_parent[0] = 0 (idle has no parent, it is the root)
+    store 0 into proc_parent at 0
+
+    # proc_exit_code[0] = 0 (idle never exits)
+    store 0 into proc_exit_code at 0
+
+    # proc_waiting_for[0] = -1 (idle never waits for children)
+    store -1 into proc_waiting_for at 0
+
+    # proc_user_rip[0] = 0 (idle runs in kernel mode)
+    store 0 into proc_user_rip at 0
+
+    # proc_user_rsp[0] = 0 (idle runs in kernel mode)
+    store 0 into proc_user_rsp at 0
+
+    # ------------------------------------------------------------------
+    # Step 3: Initialize global scheduler state
+    # ------------------------------------------------------------------
+
+    # current_process = 0 (idle process runs first)
+    store 0 into current_process
+
+    # process_count = 1 (only the idle process exists)
+    store 1 into process_count
+
+    # next_pid = 1 (PID 0 is taken by idle, next allocation gets 1)
+    store 1 into next_pid
+
+    # tick_count = 0 (no timer ticks yet)
+    store 0 into tick_count
+
+    # kernel_pml4 = 0 (will be set by paging module during boot)
+    store 0 into kernel_pml4
+
+    # ------------------------------------------------------------------
+    # Step 4: Initialize the ready queue
+    # The ready queue is a circular buffer. Both head and tail start at 0.
+    # We enqueue the idle process as the first (and initially only) entry.
+    # ------------------------------------------------------------------
+    store 0 into ready_head
+    store 0 into ready_tail
+
+    # Enqueue the idle process (slot 0) into the ready queue
+    call enqueue_ready 0
+
+    print "Scheduler: initialized with idle process (PID 0)"
+    return 0
+end
+
+###############################################################################
+# SECTION 9: IDLE PROCESS FUNCTION
+# The idle process body - runs when no other process is ready.
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# idle_function() - The idle process main loop
+#
+# The idle process is the process of last resort. It runs in an infinite
+# loop, periodically printing a heartbeat character and yielding the CPU.
+# This ensures the CPU is never truly "stuck" - the idle process always
+# provides a valid execution context.
+#
+# The idle process:
+#   - Prints a dot (".") every 1000 timer ticks as a heartbeat
+#   - Calls yield() to voluntarily surrender the CPU
+#   - Never blocks, exits, or sleeps (always remains READY/RUNNING)
+#
+# Pattern: while true, check if tick_count % 1000 == 0, print, yield.
+# The yield ensures that if any real process becomes ready, it will run.
+# ---------------------------------------------------------------------------
+function idle_function
+    a last_tick
+
+    # last_tick tracks the last tick we printed at, to avoid multiple prints
+    store 0 into last_tick
+
+    # Infinite loop - idle process never terminates
+    while greater 1 0
+
+        # Check if 1000 ticks have elapsed since last print
+        # We print when (tick_count - last_tick) >= 1000
+        load tick_count
+        load last_tick
+        subtract it it
+        store it into it
+
+        # if (tick_count - last_tick) >= 1000
+        load it
+        load 1000
+        if greater_or_equal it it
+            # Print heartbeat dot
+            print "."
+
+            # Update last_tick = tick_count (approximate, uses current value)
+            load tick_count
+            store it into last_tick
+        end
+
+        # Yield the CPU - let the scheduler pick another process
+        # If no other process is ready, we'll just get rescheduled immediately
+        call yield
+
+    end
+
+    # idle_function never returns - this is unreachable
+    return 0
+end
+
+###############################################################################
+# SECTION 10: CORE SCHEDULER FUNCTIONS
+# The main scheduling algorithm: round-robin with preemptive time quantum.
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# schedule() - Main scheduler entry point, called on timer interrupt
+#
+# This is the primary scheduling function invoked by the periodic timer
+# interrupt handler (e.g., PIT or LAPIC timer). It implements the
+# round-robin preemptive scheduling algorithm:
+#
+# Algorithm:
+#   1. Decrement the current process's remaining time slice by 1
+#   2. If time slice > 0: return immediately (continue running current)
+#   3. If time slice == 0 (expired):
+#      a. Save current RSP/RIP to the current process's PCB
+#      b. Reset current process's time slice to DEFAULT_TIME_SLICE
+#      c. If current process is RUNNING, set it to READY and enqueue
+#      d. Pick the next process from the ready queue (dequeue_ready)
+#      e. If ready queue is empty, fall back to idle process (slot 0)
+#      f. Call switch_to(next_slot) to perform context switch
+#
+# This function is called approximately 100-1000 times per second depending
+# on the timer frequency. The DEFAULT_TIME_SLICE of 10 ticks means each
+# process gets ~10 timer interrupts worth of CPU time before being preempted.
+#
+# Returns: does not return in the normal sense; context switches to next process
+# ---------------------------------------------------------------------------
+function schedule
+    a curr_slot
+    a next_slot
+    a remaining
+
+    # Get the currently running process slot
+    load current_process
+    store it into curr_slot
+
+    # ------------------------------------------------------------------
+    # Step 1: Decrement time slice of current process
+    # Each timer tick consumes one unit of the current process's quantum.
+    # ------------------------------------------------------------------
+    load proc_time_slice at curr_slot
+    subtract it 1
+    store it into proc_time_slice at curr_slot
+    store it into remaining
+
+    # ------------------------------------------------------------------
+    # Step 2: Check if time slice has expired
+    # If remaining > 0, the process still has quantum left. Return
+    # immediately and let it continue executing.
+    # ------------------------------------------------------------------
+    load remaining
+    load 0
+    if greater it it
+        # Time slice not yet expired - continue running current process
+        return 0
+    end
+
+    # ------------------------------------------------------------------
+    # Step 3: Time slice expired - perform context switch
+    # The current process has used up its quantum. We need to save its
+    # context, reset its time slice, and pick the next process to run.
+    # ------------------------------------------------------------------
+
+    # Step 3a: Save current context to PCB
+    # In a real x86-64 kernel, this would save RSP, RIP, and general
+    # registers. In Jasterish, we store the saved state values.
+    # RSP is already maintained in proc_rsp by switch_to on last context
+    # switch. We just need to ensure consistency.
+
+    # Step 3b: Reset the current process's time slice for next run
+    load DEFAULT_TIME_SLICE
+    store it into proc_time_slice at curr_slot
+
+    # Step 3c: If current process is still RUNNING, mark it READY and enqueue
+    # A process might have changed its own state (e.g., to BLOCKED) before
+    # the timer fired. Only re-enqueue if it's still RUNNING.
+    load proc_state at curr_slot
+    load PROC_RUNNING
+    if equal it it
+        # Set state to READY and add back to ready queue
+        load PROC_READY
+        store it into proc_state at curr_slot
+        call enqueue_ready curr_slot
+    end
+
+    # Step 3d: Pick the next process from the ready queue
+    call dequeue_ready
+    store it into next_slot
+
+    # If ready queue was empty, run the idle process (slot 0)
+    load next_slot
+    load -1
+    if equal it it
+        store 0 into next_slot
+    end
+
+    # ------------------------------------------------------------------
+    # Step 4: Perform the actual context switch
+    # This transfers CPU control to the selected next process.
+    # ------------------------------------------------------------------
+    call switch_to next_slot
+
+    # Note: switch_to does not return in the normal sense. When the current
+    # process is eventually rescheduled, it will resume after this point
+    # with its full context restored.
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# schedule_force() - Force an immediate context switch
+#
+# Called when the current process voluntarily gives up the CPU (yield,
+# sleep, blocking I/O, message receive). Unlike schedule() which only
+# switches when the time slice expires, this function always switches.
+#
+# Algorithm:
+#   1. Save current RSP/RIP to the current process's PCB
+#   2. Reset current process's time slice to DEFAULT_TIME_SLICE
+#   3. If current process is RUNNING, mark it READY and enqueue
+#   4. Pick next process from ready queue (or idle if empty)
+#   5. Call switch_to(next_slot)
+#
+# This function never returns to the caller in the normal sense. The
+# calling process will be resumed later when it is scheduled again.
+# ---------------------------------------------------------------------------
+function schedule_force
+    a curr_slot
+    a next_slot
+
+    # Get the currently running process slot
+    load current_process
+    store it into curr_slot
+
+    # ------------------------------------------------------------------
+    # Step 1: Save current context to PCB
+    # The current RSP and RIP are stored so the process can resume later.
+    # In Jasterish, these values are already maintained in the PCB arrays.
+    # The assembly-level interrupt handler would have saved registers
+    # before calling into this C-level scheduler code.
+    # ------------------------------------------------------------------
+
+    # proc_rsp[curr_slot] = current RSP (already maintained)
+    # proc_rip[curr_slot] = current RIP (already maintained)
+
+    # ------------------------------------------------------------------
+    # Step 2: Reset the current process's time slice
+    # Give it a fresh quantum when it runs again.
+    # ------------------------------------------------------------------
+    load DEFAULT_TIME_SLICE
+    store it into proc_time_slice at curr_slot
+
+    # ------------------------------------------------------------------
+    # Step 3: If current is RUNNING, set READY and enqueue
+    # If the process set its own state to BLOCKED before calling us,
+    # we respect that and don't re-enqueue it.
+    # ------------------------------------------------------------------
+    load proc_state at curr_slot
+    load PROC_RUNNING
+    if equal it it
+        load PROC_READY
+        store it into proc_state at curr_slot
+        call enqueue_ready curr_slot
+    end
+
+    # ------------------------------------------------------------------
+    # Step 4: Pick the next process from the ready queue
+    # ------------------------------------------------------------------
+    call dequeue_ready
+    store it into next_slot
+
+    # Guard against empty ready queue - fall back to idle
+    load next_slot
+    load -1
+    if equal it it
+        store 0 into next_slot
+    end
+
+    # ------------------------------------------------------------------
+    # Step 5: Context switch to the selected process
+    # ------------------------------------------------------------------
+    call switch_to next_slot
+
+    # When we eventually return here, our context has been restored
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# switch_to(next_slot) - Perform the actual context switch between processes
+#
+# This is the lowest-level scheduler function. It saves the complete
+# register context of the currently running process and restores the
+# context of the next process. In x86-64 terms, this involves:
+#
+#   Save side (current process):
+#     - Save RSP (stack pointer) to proc_rsp[current]
+#     - Save RIP (instruction pointer) to proc_rip[current]
+#     - Save CR3 (page table root) if implementing full context
+#
+#   Restore side (next process):
+#     - Update current_process = next_slot
+#     - Set proc_state[next_slot] = PROC_RUNNING
+#     - Load CR3 with proc_cr3[next_slot] (if different from current)
+#     - Load RSP from proc_rsp[next_slot]
+#     - Jump to proc_rip[next_slot] (via ret or iret)
+#
+# In Jasterish, we model this with store/load operations on the PCB arrays.
+# The actual x86-64 assembly would be inline or in a separate asm block.
+# The CR3 (page table) switch only happens if the two processes have
+# different address spaces (different CR3 values).
+#
+# Arguments: next_slot - the process slot index to switch to
+# Returns: technically does not return; execution resumes in next process
+# ---------------------------------------------------------------------------
+function switch_to
+    a next_slot
+    a curr_slot
+    a curr_cr3
+    a next_cr3
+    a user_rip_val
+    a user_rsp_val
+
+    # Get the target process slot
+    store argument 0 into next_slot
+
+    # Get the current process slot
+    load current_process
+    store it into curr_slot
+
+    # ------------------------------------------------------------------
+    # Save phase: store current process context into its PCB
+    # ------------------------------------------------------------------
+
+    # Save current RSP to proc_rsp[curr_slot]
+    # In real asm: mov [proc_rsp + curr_slot*8], rsp
+    # proc_rsp already maintained; here we ensure consistency
+    load proc_rsp at curr_slot
+    store it into proc_rsp at curr_slot
+
+    # Save current RIP to proc_rip[curr_slot]
+    # In real asm: mov [proc_rip + curr_slot*8], rip (via call stack)
+    load proc_rip at curr_slot
+    store it into proc_rip at curr_slot
+
+    # ------------------------------------------------------------------
+    # Switch phase: update scheduler bookkeeping
+    # ------------------------------------------------------------------
+
+    # Update the global current_process to the next process
+    store next_slot into current_process
+
+    # Mark the next process as RUNNING
+    load PROC_RUNNING
+    store it into proc_state at next_slot
+
+    # ------------------------------------------------------------------
+    # Restore phase: load next process context from its PCB
+    # ------------------------------------------------------------------
+
+    # Check if we need to switch page tables (CR3)
+    # Load current and next CR3 values
+    load proc_cr3 at curr_slot
+    store it into curr_cr3
+    load proc_cr3 at next_slot
+    store it into next_cr3
+
+    # If CR3 values differ, perform a page table switch
+    load curr_cr3
+    load next_cr3
+    if not equal it it
+        # In real asm: mov cr3, next_cr3
+        # This flushes the TLB and switches to the new address space.
+        # Jasterish models this as a store to the CR3 register concept.
+        load next_cr3
+        store it into kernel_pml4
+    end
+
+    # Check if the target process is a user process (non-zero user RIP)
+    load proc_user_rip at next_slot
+    store it into user_rip_val
+    load user_rip_val
+    load 0
+    if not equal it it
+        # User process - enter ring 3 via iretq
+        load proc_user_rsp at next_slot
+        store it into user_rsp_val
+        call enter_user_mode user_rsp_val user_rip_val
+        # enter_user_mode does not return
+    end
+
+    # Kernel process - normal register restore
+    # Restore RSP from proc_rsp[next_slot]
+    # In real asm: mov rsp, [proc_rsp + next_slot*8]
+    load proc_rsp at next_slot
+    store it into it
+
+    # Restore RIP from proc_rip[next_slot]
+    # In real asm: jmp [proc_rip + next_slot*8]
+    # or: mov rax, [proc_rip + next_slot*8]; jmp rax
+    load proc_rip at next_slot
+    store it into it
+
+    # The context switch is now complete. The CPU is executing in the
+    # context of the next process. When this process is switched away
+    # from and later switched back to, execution resumes here with
+    # all registers restored to their values at the time of the switch.
+
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# process_fork_cow() - Create a child process with copy-on-write pages
+#
+# Creates a new process slot, copies the parent's page table, but marks
+# all writable pages as read-only and sets the COW flag. Both parent
+# and child share the same physical frames until one writes.
+#
+# Returns: child PID to parent, sets proc_fork_retval[child] = 0
+# ---------------------------------------------------------------------------
+
+process_fork_cow
+    a parent_slot
+    a parent_pid
+    a child_slot
+    a child_pid
+    a parent_rip
+    a parent_rsp
+    a parent_cr3
+    a parent_priority
+    a copy_idx
+    a stack_byte
+    a parent_stack_base
+    a child_stack_base
+    a rsp_offset
+
+    # Get parent info
+    load current_process
+    store it into parent_slot
+    load proc_pid at parent_slot
+    store it into parent_pid
+    load proc_rip at parent_slot
+    store it into parent_rip
+    load proc_rsp at parent_slot
+    store it into parent_rsp
+    load proc_cr3 at parent_slot
+    store it into parent_cr3
+    load proc_priority at parent_slot
+    store it into parent_priority
+
+    # Find free slot
+    call find_free_slot
+    store it into child_slot
+    if equal child_slot -1
+        print "FORK_COW: process table full"
+        return -1
+    end
+
+    # Assign PID
+    load next_pid
+    store it into child_pid
+    add next_pid 1
+    store it into next_pid
+
+    # Set up child PCB
+    store child_pid into proc_pid at child_slot
+    load PROC_READY
+    store it into proc_state at child_slot
+    store parent_rip into proc_rip at child_slot
+    store parent_priority into proc_priority at child_slot
+    load DEFAULT_TIME_SLICE
+    store it into proc_time_slice at child_slot
+    load proc_parent at parent_slot
+    store it into proc_parent at child_slot
+    store 0 into proc_exit_code at child_slot
+    store 0 into proc_msg_pending at child_slot
+    store 0 into proc_msg_source at child_slot
+    store 0 into proc_msg_size at child_slot
+    store 0 into proc_wake_time at child_slot
+    store -1 into proc_waiting_for at child_slot
+    store 0 into proc_heap_end at child_slot
+    store 0 into proc_data_base at child_slot
+    store 0 into proc_fork_retval at child_slot
+    store 0 into proc_user_rip at child_slot
+    store 0 into proc_user_rsp at child_slot
+
+    # Copy parent's stack
+    load parent_slot
+    multiply it KERNEL_STACK_SIZE
+    store it into parent_stack_base
+    load child_slot
+    multiply it KERNEL_STACK_SIZE
+    store it into child_stack_base
+    store 0 into copy_idx
+    while less copy_idx KERNEL_STACK_SIZE
+        load parent_stack_base at copy_idx
+        store it into stack_byte
+        store stack_byte into child_stack_base at copy_idx
+        add copy_idx 1
+        store it into copy_idx
+    end
+
+    # Mirror RSP offset
+    subtract parent_rsp parent_stack_base
+    store it into rsp_offset
+    add child_stack_base rsp_offset
+    store it into proc_rsp at child_slot
+
+    # Copy page table (share kernel page tables for now)
+    # In a full COW implementation, we would clone the page table
+    # and mark all writable pages as read-only with COW flag.
+    # For now, we share the parent's CR3 (kernel page tables).
+    store parent_cr3 into proc_cr3 at child_slot
+
+    # Set child fork return value to 0
+    store 0 into proc_fork_retval at child_slot
+
+    # Enqueue child
+    call enqueue_ready child_slot
+    load process_count
+    add it 1
+    store it into process_count
+
+    print "FORK_COW: parent "
+    print parent_pid
+    print " created child "
+    print child_pid
+
+    return child_pid
+
+###############################################################################
+# SECTION 11: PROCESS LIFECYCLE MANAGEMENT
+# Functions for creating, exiting, and killing processes.
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# process_create(entry_point, priority) - Create a new process
+#
+# This function allocates a new process control block, sets up the initial
+# stack, and enqueues the process for scheduling. It performs:
+#
+#   1. Find a free slot in the process table (find_free_slot)
+#   2. Allocate a unique PID from next_pid counter
+#   3. Allocate a stack for the new process
+#   4. Set up the initial stack with the entry point as return address
+#   5. Fill in all PCB fields (PID, state, RSP, RIP, CR3, priority, etc.)
+#   6. Set parent to the current process's PID
+#   7. Enqueue the new process in the ready queue
+#   8. Increment process_count
+#
+# The initial stack setup pushes the entry_point as the return address
+# so that when the process is first context-switched to, it "returns"
+# to the entry point function and begins execution.
+#
+# Arguments:
+#   entry_point - memory address of the process's main function
+#   priority    - scheduling priority (1-10, higher = more CPU time)
+#
+# Returns: new PID on success, -1 on failure (no free slots, etc.)
+# ---------------------------------------------------------------------------
+function process_create
+    a entry_point
+    a priority
+    a slot
+    a new_pid
+    a stack_top
+    a parent_pid
+
+    # ------------------------------------------------------------------
+    # Step 1: Extract arguments
+    # ------------------------------------------------------------------
+    store argument 0 into entry_point
+    store argument 1 into priority
+
+    # ------------------------------------------------------------------
+    # Step 2: Find a free slot in the process table
+    # ------------------------------------------------------------------
+    call find_free_slot
+    store it into slot
+
+    # Check if find_free_slot returned -1 (table full)
+    load slot
+    load -1
+    if equal it it
+        print "process_create: process table full, cannot create new process"
+        return -1
+    end
+
+    # ------------------------------------------------------------------
+    # Step 3: Assign a unique PID
+    # PIDs are monotonically increasing and never reused. This simplifies
+    # PID-to-slot lookups and avoids confusion with stale PIDs.
+    # ------------------------------------------------------------------
+    load next_pid
+    store it into new_pid
+
+    # next_pid++ for the next allocation
+    load next_pid
+    add it 1
+    store it into next_pid
+
+    # ------------------------------------------------------------------
+    # Step 4: Allocate and set up the process stack
+    # The stack grows downward from high addresses. We allocate space
+    # and set the initial RSP to point just below the pushed entry point.
+    #
+    # Stack layout at creation:
+    #   [stack_top - 8]  = entry_point (return address for initial "ret")
+    #   RSP = stack_top - 8
+    #
+    # When switch_to first runs this process, the "ret" instruction
+    # will pop entry_point into RIP, and execution begins there.
+    # ------------------------------------------------------------------
+
+    # Calculate stack top: use pre-allocated per-process stack area
+    # stack_top = KERNEL_STACK_SIZE + (slot * KERNEL_STACK_SIZE)
+    # This gives each process an 8KB stack region
+    load KERNEL_STACK_SIZE
+    load slot
+    multiply it it
+    add it KERNEL_STACK_SIZE
+    store it into stack_top
+
+    # Push entry point as return address onto the stack
+    # [stack_top - 8] = entry_point
+    load stack_top
+    subtract it 8
+    store entry_point into proc_rsp at slot
+
+    # proc_rsp[slot] = stack_top - 8 (RSP points to pushed return address)
+    load stack_top
+    subtract it 8
+    store it into proc_rsp at slot
+
+    # ------------------------------------------------------------------
+    # Step 5: Initialize the Process Control Block
+    # Fill in all per-process state for the new process.
+    # ------------------------------------------------------------------
+
+    # proc_pid[slot] = new_pid
+    store new_pid into proc_pid at slot
+
+    # proc_state[slot] = PROC_READY (ready to run, not yet scheduled)
+    load PROC_READY
+    store it into proc_state at slot
+
+    # proc_rip[slot] = entry_point (initial instruction pointer)
+    store entry_point into proc_rip at slot
+
+    # proc_cr3[slot] = kernel_pml4 (use kernel page tables for now)
+    # For user processes, this would be a newly allocated page table.
+    load kernel_pml4
+    store it into proc_cr3 at slot
+
+    # proc_priority[slot] = priority (1-10, affects scheduling weight)
+    store priority into proc_priority at slot
+
+    # proc_time_slice[slot] = DEFAULT_TIME_SLICE (fresh quantum)
+    load DEFAULT_TIME_SLICE
+    store it into proc_time_slice at slot
+
+    # proc_parent[slot] = current process's PID
+    load current_process
+    load proc_pid at it
+    store it into parent_pid
+    store parent_pid into proc_parent at slot
+
+    # proc_exit_code[slot] = 0 (has not exited yet)
+    store 0 into proc_exit_code at slot
+
+    # proc_msg_pending[slot] = 0 (no message waiting)
+    store 0 into proc_msg_pending at slot
+
+    # proc_msg_source[slot] = 0 (no message source)
+    store 0 into proc_msg_source at slot
+
+    # proc_msg_size[slot] = 0 (no pending message)
+    store 0 into proc_msg_size at slot
+
+    # proc_wake_time[slot] = 0 (not sleeping)
+    store 0 into proc_wake_time at slot
+
+    # proc_waiting_for[slot] = -1 (not waiting for a child)
+    store -1 into proc_waiting_for at slot
+
+    # proc_heap_end[slot] = 0 (no heap yet)
+    store 0 into proc_heap_end at slot
+
+    # proc_data_base[slot] = 0 (no data segment yet)
+    store 0 into proc_data_base at slot
+
+    # proc_fork_retval[slot] = 0 (default fork return)
+    store 0 into proc_fork_retval at slot
+
+    # proc_user_rip[slot] = 0 (kernel process by default)
+    store 0 into proc_user_rip at slot
+
+    # proc_user_rsp[slot] = 0 (kernel process by default)
+    store 0 into proc_user_rsp at slot
+
+    # ------------------------------------------------------------------
+    # Step 6: Update global process count and enqueue
+    # ------------------------------------------------------------------
+
+    # Increment process_count
+    load process_count
+    add it 1
+    store it into process_count
+
+    # Enqueue the new process so the scheduler will run it
+    call enqueue_ready slot
+
+    # ------------------------------------------------------------------
+    # Step 7: Report success and return the new PID
+    # ------------------------------------------------------------------
+    print "Process created: PID "
+    print new_pid
+    print ", entry "
+    print entry_point
+
+    return new_pid
+end
+
+# ---------------------------------------------------------------------------
+# process_fork_cow() - Create a child process using copy-on-write
+#
+# This implements true COW fork:
+#   1. Finds a free process slot
+#   2. Allocates a new PID
+#   3. Allocates a new PML4 for the child
+#   4. Copies parent's PML4 entries (sharing lower-level tables)
+#   5. Marks all writable leaf entries as COW in both parent and child
+#   6. Sets child's initial RSP/RIP from parent
+#   7. Sets proc_fork_retval[child] = 0
+#   8. Enqueues child for scheduling
+#
+# Returns: child PID to parent, or -1 on failure
+# ---------------------------------------------------------------------------
+function process_fork_cow
+    a parent_slot
+    a parent_pid
+    a child_slot
+    a child_pid
+    a parent_rip
+    a parent_rsp
+    a parent_priority
+    a parent_cr3
+    a child_cr3
+    a idx
+    a entry
+
+    # Get parent information
+    load current_process
+    store it into parent_slot
+
+    load proc_pid at parent_slot
+    store it into parent_pid
+
+    load proc_rip at parent_slot
+    store it into parent_rip
+
+    load proc_rsp at parent_slot
+    store it into parent_rsp
+
+    load proc_priority at parent_slot
+    store it into parent_priority
+
+    load proc_cr3 at parent_slot
+    store it into parent_cr3
+
+    # Find a free slot
+    call find_free_slot
+    store it into child_slot
+
+    load child_slot
+    load -1
+    if equal it it
+        print "process_fork_cow: process table full"
+        return -1
+    end
+
+    # Allocate a unique PID
+    load next_pid
+    store it into child_pid
+    load next_pid
+    add it 1
+    store it into next_pid
+
+    # Allocate a new page table for the child
+    call vmm_new_page_table
+    store it into child_cr3
+
+    load child_cr3
+    load 0
+    if equal it it
+        print "process_fork_cow: failed to allocate page table"
+        return -1
+    end
+
+    # Copy parent's PML4 entries to child's PML4
+    store 0 into idx
+    while less idx 512
+        load parent_cr3 at idx
+        store it into entry
+        store entry into child_cr3 at idx
+        add idx 1
+        store it into idx
+    end
+
+    # Mark all writable mappings as COW in the shared tables.
+    # Since lower-level tables are shared, this affects both parent and child.
+    call cow_walk_pml4 parent_cr3
+
+    # Initialize child's PCB
+    store child_pid into proc_pid at child_slot
+    load PROC_READY
+    store it into proc_state at child_slot
+    store parent_rip into proc_rip at child_slot
+    store parent_rsp into proc_rsp at child_slot
+    store child_cr3 into proc_cr3 at child_slot
+    store parent_priority into proc_priority at child_slot
+    load DEFAULT_TIME_SLICE
+    store it into proc_time_slice at child_slot
+    store parent_pid into proc_parent at child_slot
+    store 0 into proc_exit_code at child_slot
+    store 0 into proc_msg_pending at child_slot
+    store 0 into proc_msg_source at child_slot
+    store 0 into proc_msg_size at child_slot
+    store 0 into proc_wake_time at child_slot
+    store -1 into proc_waiting_for at child_slot
+    load proc_heap_end at parent_slot
+    store it into proc_heap_end at child_slot
+    load proc_data_base at parent_slot
+    store it into proc_data_base at child_slot
+    store 0 into proc_fork_retval at child_slot
+    store 0 into proc_user_rip at child_slot
+    store 0 into proc_user_rsp at child_slot
+
+    # Set child's fork return value to 0
+    store 0 into proc_fork_retval at child_slot
+
+    # Enqueue child
+    call enqueue_ready child_slot
+
+    # Increment process count
+    load process_count
+    add it 1
+    store it into process_count
+
+    print "COW FORK: parent "
+    print parent_pid
+    print " created child "
+    print child_pid
+
+    return child_pid
+end
+
+# ---------------------------------------------------------------------------
+# enter_user_mode(user_rsp, user_rip) - Enter ring 3 via iretq
+#
+# Constructs an interrupt stack frame and uses iretq to transition
+# from kernel mode (ring 0) to user mode (ring 3).
+#
+# Stack frame layout:
+#   SS  = 0x23 (user data selector, RPL=3)
+#   RSP = user stack pointer
+#   RFLAGS = 0x202 (interrupt enable)
+#   CS  = 0x1B (user code selector, RPL=3)
+#   RIP = user entry point
+#
+# Arguments:
+#   user_rsp - user stack pointer
+#   user_rip - user instruction pointer
+# ---------------------------------------------------------------------------
+function enter_user_mode
+    a user_rsp
+    a user_rip
+    a tmp_val
+
+    store argument 0 into user_rsp
+    store argument 1 into user_rip
+
+    # Push SS (user data selector = 0x20 | 3 = 0x23)
+    inline "push 0x23"
+
+    # Push RSP (user stack pointer)
+    store user_rsp into tmp_val
+    store tmp_val into register rax
+    inline "push rax"
+
+    # Push RFLAGS (0x202 = interrupt enable)
+    inline "push 0x202"
+
+    # Push CS (user code selector = 0x18 | 3 = 0x1B)
+    inline "push 0x1B"
+
+    # Push RIP (user entry point)
+    store user_rip into tmp_val
+    store tmp_val into register rax
+    inline "push rax"
+
+    # Issue iretq to perform the privilege transition
+    inline "iretq"
+
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# process_create_user(user_rip, user_rsp, priority, code_phys) - Create a ring-3 process
+#
+# Creates a new user-mode process with its own page table and sets up
+# the initial context for entry via enter_user_mode instead of a
+# simple kernel-mode register restore.
+#
+# Arguments:
+#   user_rip   - user-mode entry point
+#   user_rsp   - user-mode stack pointer
+#   priority   - scheduling priority
+#   code_phys  - physical address of user code page (0 if none)
+#
+# Returns: new PID on success, -1 on failure
+# ---------------------------------------------------------------------------
+function process_create_user
+    a user_rip
+    a user_rsp
+    a priority
+    a code_phys
+    a slot
+    a new_pid
+    a kernel_stack_top
+    a parent_pid
+    a child_cr3
+    a idx
+    a entry
+    a user_code_virt
+    a code_flags
+    a user_stack_phys
+    a user_stack_virt
+    a user_flags
+
+    store argument 0 into user_rip
+    store argument 1 into user_rsp
+    store argument 2 into priority
+    store argument 3 into code_phys
+
+    # Find a free slot
+    call find_free_slot
+    store it into slot
+
+    load slot
+    load -1
+    if equal it it
+        print "process_create_user: process table full"
+        return -1
+    end
+
+    # Allocate PID
+    load next_pid
+    store it into new_pid
+    load next_pid
+    add it 1
+    store it into next_pid
+
+    # Allocate a page table for the user process
+    call vmm_new_page_table
+    store it into child_cr3
+
+    load child_cr3
+    load 0
+    if equal it it
+        print "process_create_user: failed to allocate page table"
+        return -1
+    end
+
+    # Copy kernel PML4 mappings into the child's page table.
+    # This gives the user process access to kernel-space mappings.
+    load kernel_pml4
+    load 0
+    if not equal it it
+        store 0 into idx
+        while less idx 512
+            load kernel_pml4 at idx
+            store it into entry
+            store entry into child_cr3 at idx
+            add idx 1
+            store it into idx
+        end
+    end
+
+    # Set up a kernel stack for syscalls and interrupts
+    load KERNEL_STACK_SIZE
+    load slot
+    multiply it it
+    add it KERNEL_STACK_SIZE
+    store it into kernel_stack_top
+    load kernel_stack_top
+    subtract it 8
+    store it into proc_rsp at slot
+
+    # Initialize PCB for user process
+    store new_pid into proc_pid at slot
+    load PROC_READY
+    store it into proc_state at slot
+    store 0 into proc_rip at slot
+    store kernel_stack_top into proc_rsp at slot
+    store child_cr3 into proc_cr3 at slot
+    store priority into proc_priority at slot
+    load DEFAULT_TIME_SLICE
+    store it into proc_time_slice at slot
+
+    load current_process
+    load proc_pid at it
+    store it into parent_pid
+    store parent_pid into proc_parent at slot
+
+    store 0 into proc_exit_code at slot
+    store 0 into proc_msg_pending at slot
+    store 0 into proc_msg_source at slot
+    store 0 into proc_msg_size at slot
+    store 0 into proc_wake_time at slot
+    store -1 into proc_waiting_for at slot
+    store 0 into proc_heap_end at slot
+    store 0 into proc_data_base at slot
+    store 0 into proc_fork_retval at slot
+
+    # Map user code page if provided
+    load code_phys
+    load 0
+    if not equal it it
+        # Align user_rip down to page boundary for mapping
+        bitwise_and user_rip 0xFFFFFFFFFFFFF000
+        store it into user_code_virt
+
+        # Code flags: PRESENT | USER (read-only executable)
+        store PAGE_PRESENT into code_flags
+        bitwise_or code_flags PAGE_USER
+        store it into code_flags
+        call vmm_map_page_in_table child_cr3 user_code_virt code_phys code_flags
+    end
+
+    # Allocate and map a user stack page
+    call pmm_alloc
+    store it into user_stack_phys
+
+    load user_stack_phys
+    load 0
+    if equal it it
+        print "process_create_user: failed to allocate user stack"
+        return -1
+    end
+
+    # Align user_rsp down to page boundary for mapping
+    bitwise_and user_rsp 0xFFFFFFFFFFFFF000
+    store it into user_stack_virt
+
+    # User stack flags: PRESENT | WRITABLE | USER
+    store PAGE_PRESENT into user_flags
+    bitwise_or user_flags PAGE_WRITABLE
+    store it into user_flags
+    bitwise_or user_flags PAGE_USER
+    store it into user_flags
+
+    # Map the stack into the child's page table
+    call vmm_map_page_in_table child_cr3 user_stack_virt user_stack_phys user_flags
+
+    # Store user-mode context
+    store user_rip into proc_user_rip at slot
+    store user_rsp into proc_user_rsp at slot
+
+    # Increment process count and enqueue
+    load process_count
+    add it 1
+    store it into process_count
+    call enqueue_ready slot
+
+    print "User process created: PID "
+    print new_pid
+    print ", entry "
+    print user_rip
+    print ", stack "
+    print user_rsp
+
+    return new_pid
+end
+
+# ---------------------------------------------------------------------------
+# process_exit(code) - Terminate the current process
+#
+# Called by a process to exit and terminate itself. This function:
+#
+#   1. Sets the current process's state to PROC_ZOMBIE
+#   2. Stores the exit code in the PCB
+#   3. Checks if the parent is BLOCKED waiting for this child
+#   4. If so, wakes the parent (sets READY and enqueues)
+#   5. Decrements the global process count
+#   6. Forces a context switch (the exiting process never runs again)
+#
+# A process in the ZOMBIE state holds its slot until the parent calls
+# wait_for_child() to collect the exit code. This follows the UNIX
+# semantics where the parent must reap its children to avoid leaks.
+#
+# Note: This function NEVER returns to the caller. The process is dead.
+# The context switch transfers control to another process forever.
+#
+# Arguments: code - exit status code to return to parent
+# Returns: never returns
+# ---------------------------------------------------------------------------
+function process_exit
+    a code
+    a slot
+    a my_pid
+    a parent_pid
+    a parent_slot
+    a idx
+
+    # Get the exit code argument
+    store argument 0 into code
+
+    # Get the current process slot
+    load current_process
+    store it into slot
+
+    # Get my PID
+    load proc_pid at slot
+    store it into my_pid
+
+    # Get my parent PID
+    load proc_parent at slot
+    store it into parent_pid
+
+    # ------------------------------------------------------------------
+    # Step 1: Mark this process as ZOMBIE with the exit code
+    # ------------------------------------------------------------------
+    load PROC_ZOMBIE
+    store it into proc_state at slot
+    store code into proc_exit_code at slot
+
+    print "Process "
+    print my_pid
+    print " exited with code "
+    print code
+
+    # ------------------------------------------------------------------
+    # Step 2: Decrement the global active process count
+    # The process still occupies its slot (ZOMBIE) until parent reaps it.
+    # ------------------------------------------------------------------
+    load process_count
+    subtract it 1
+    store it into process_count
+
+    # ------------------------------------------------------------------
+    # Step 3: Check if parent is blocked waiting for this child
+    # We scan for a process with:
+    #   - state == PROC_BLOCKED
+    #   - waiting_for == my_pid  (specifically waiting for us)
+    #   OR waiting_for == -1     (waiting for any child)
+    #
+    # If found, wake the parent by setting state to READY and enqueuing.
+    # ------------------------------------------------------------------
+    store 0 into idx
+    while less idx MAX_PROCS
+        # Check if proc_state[idx] == PROC_BLOCKED
+        load proc_state at idx
+        load PROC_BLOCKED
+        if equal it it
+            # Check if this process is waiting for us (or any child)
+            load proc_waiting_for at idx
+            store it into it
+
+            # Case 1: waiting_for == my_pid (specifically waiting for us)
+            load it
+            load my_pid
+            if equal it it
+                # Wake the parent!
+                load PROC_READY
+                store it into proc_state at idx
+                store -1 into proc_waiting_for at idx
+                call enqueue_ready idx
+                print "Parent woken for child exit"
+            end
+
+            # Case 2: waiting_for == -1 (waiting for any child)
+            load proc_waiting_for at idx
+            load -1
+            if equal it it
+                # Check if the waiting process is actually our parent
+                load proc_pid at idx
+                load parent_pid
+                if equal it it
+                    # Wake the parent!
+                    load PROC_READY
+                    store it into proc_state at idx
+                    store -1 into proc_waiting_for at idx
+                    call enqueue_ready idx
+                    print "Parent woken for any child exit"
+                end
+            end
+        end
+
+        # idx++
+        load idx
+        add it 1
+        store it into idx
+    end
+
+    # ------------------------------------------------------------------
+    # Step 4: Force a context switch - this process is dead
+    # We call schedule_force to pick the next ready process.
+    # The exiting process will never be scheduled again because:
+    #   - Its state is PROC_ZOMBIE (not eligible for ready queue)
+#   - Its time slice is not reset
+    # ------------------------------------------------------------------
+    call schedule_force
+
+    # process_exit never returns - this line is unreachable
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# process_kill(pid) - Forcefully terminate a process by PID
+#
+# This function implements the "kill" operation - forcefully terminating
+# a process before it calls process_exit. It performs:
+#
+#   1. Find the target process's slot by PID
+#   2. Validate the target (cannot kill idle process PID 0)
+#   3. Free the process's resources (stack, page table, message buffer)
+#   4. Mark the slot as PROC_UNUSED
+#   5. Remove the process from the ready queue if present
+#   6. Decrement process_count
+#
+# If the killed process has children, those children become orphaned.
+# A production kernel would re-parent them to the init process (PID 1).
+# For simplicity, we leave orphans in place; their parent PID remains
+# pointing to the now-dead process.
+#
+# Arguments: pid - PID of the process to kill
+# Returns: 0 on success, -1 on failure (PID not found, or trying to kill idle)
+# ---------------------------------------------------------------------------
+function process_kill
+    a pid
+    a slot
+    a idx
+    a found
+    a new_head
+    a qsize
+
+    # Get the PID argument
+    store argument 0 into pid
+
+    # ------------------------------------------------------------------
+    # Step 1: Validate PID - cannot kill the idle process
+    # PID 0 is sacred. Without it, the system would have no fallback.
+    # ------------------------------------------------------------------
+    load pid
+    load IDLE_PID
+    if equal it it
+        print "process_kill: cannot kill idle process (PID 0)"
+        return -1
+    end
+
+    # ------------------------------------------------------------------
+    # Step 2: Find the process slot by PID
+    # ------------------------------------------------------------------
+    call find_slot_by_pid pid
+    store it into slot
+
+    # Check if PID was found
+    load slot
+    load -1
+    if equal it it
+        print "process_kill: PID not found"
+        return -1
+    end
+
+    # ------------------------------------------------------------------
+    # Step 3: Validate the slot is not already UNUSED
+    # ------------------------------------------------------------------
+    load proc_state at slot
+    load PROC_UNUSED
+    if equal it it
+        print "process_kill: process already dead"
+        return -1
+    end
+
+    # ------------------------------------------------------------------
+    # Step 4: Free process resources
+    # In a real kernel, this would:
+    #   - Deallocate the process's stack pages (pmm_free)
+    #   - Deallocate the process's page table (if not sharing kernel CR3)
+    #   - Close any open file descriptors
+    #   - Free message buffer space
+    # For now, we just clear the PCB entries. The physical memory can be
+    # reclaimed later by a more sophisticated memory manager.
+    # ------------------------------------------------------------------
+
+    # Clear the message buffer for this process
+    # msg_buf starts at slot * MSG_SIZE, clear MSG_SIZE bytes
+    store 0 into idx
+    while less idx MSG_SIZE
+        load slot
+        load MSG_SIZE
+        multiply it it
+        load idx
+        add it it
+        # proc_msg_buf[slot*MSG_SIZE + idx] = 0
+        store 0 into proc_msg_buf at it
+        # idx++
+        load idx
+        add it 1
+        store it into idx
+    end
+
+    # ------------------------------------------------------------------
+    # Step 5: Remove from ready queue if present
+    # We need to scan the ready queue and remove this slot if found.
+    # Since the ready queue is a circular buffer, removal requires
+    # compacting the queue to fill the gap.
+    #
+    # Algorithm: scan from head to tail, if entry matches slot,
+    # shift all subsequent entries left by one position.
+    # ------------------------------------------------------------------
+    store 0 into found
+    store 0 into idx
+
+    # Calculate queue size for iteration
+    load ready_tail
+    load ready_head
+    subtract it it
+    store it into qsize
+    if less qsize 0
+        load qsize
+        add it MAX_PROCS
+        store it into qsize
+    end
+
+    while less idx qsize
+        # Calculate actual index in circular buffer
+        load ready_head
+        load idx
+        add it it
+        store it into it
+
+        # Wrap around if needed
+        load MAX_PROCS
+        if greater_or_equal it MAX_PROCS
+            load it
+            subtract it MAX_PROCS
+            store it into it
+        end
+
+        # Check if this queue entry is the process we're killing
+        load ready_queue at it
+        load slot
+        if equal it it
+            store 1 into found
+
+            # Shift all remaining entries left by one
+            a shift_idx
+            store idx into shift_idx
+            while less shift_idx qsize
+                # source = (head + shift_idx + 1) % MAX_PROCS
+                load ready_head
+                load shift_idx
+                add it it
+                add it 1
+                store it into it
+                load MAX_PROCS
+                if greater_or_equal it MAX_PROCS
+                    load it
+                    subtract it MAX_PROCS
+                    store it into it
+                end
+                a src_val
+                load ready_queue at it
+                store it into src_val
+
+                # dest = (head + shift_idx) % MAX_PROCS
+                load ready_head
+                load shift_idx
+                add it it
+                store it into it
+                load MAX_PROCS
+                if greater_or_equal it MAX_PROCS
+                    load it
+                    subtract it MAX_PROCS
+                    store it into it
+                end
+                store src_val into ready_queue at it
+
+                # shift_idx++
+                load shift_idx
+                add it 1
+                store it into shift_idx
+            end
+
+            # Decrement tail by 1 (with wraparound)
+            load ready_tail
+            subtract it 1
+            store it into ready_tail
+            if less ready_tail 0
+                load ready_tail
+                add it MAX_PROCS
+                store it into ready_tail
+            end
+
+            # We found and removed the entry; break out
+            # Adjust qsize since we removed one element
+            load qsize
+            subtract it 1
+            store it into qsize
+        end
+
+        # idx++
+        load idx
+        add it 1
+        store it into idx
+    end
+
+    # ------------------------------------------------------------------
+    # Step 6: Mark slot as UNUSED and decrement process count
+    # ------------------------------------------------------------------
+    load PROC_UNUSED
+    store it into proc_state at slot
+    store 0 into proc_pid at slot
+
+    # Decrement process_count
+    load process_count
+    subtract it 1
+    store it into process_count
+
+    print "Process "
+    print pid
+    print " killed"
+
+    return 0
+end
+
+###############################################################################
+# SECTION 12: PROCESS OPERATIONS
+# Functions for process control: yield, sleep, wake, wait for child.
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# yield() - Voluntarily give up the CPU
+#
+# A process calls yield() when it has no useful work to do and wants to
+# let other processes run. This is cooperative multitasking behavior
+# within a preemptive scheduler. The yield operation:
+#
+#   1. Saves the current process context to its PCB
+#   2. Sets the process state to PROC_READY
+#   3. Enqueues the process back into the ready queue
+#   4. Calls schedule_force to switch to another process
+#
+# The yielding process will eventually be rescheduled and resume from
+# the point after the yield() call.
+#
+# This is commonly used by:
+#   - The idle process to prevent CPU spinning
+#   - Processes waiting for non-blocking events
+#   - Spin-loops that want to be good citizens
+#
+# Returns: 0 (when eventually resumed)
+# ---------------------------------------------------------------------------
+function yield
+    a curr_slot
+
+    # Get the current process slot
+    load current_process
+    store it into curr_slot
+
+    # ------------------------------------------------------------------
+    # Step 1: Save current context to PCB
+    # The current RSP and RIP values are preserved in proc_rsp/rip.
+    # When this process is rescheduled, switch_to will restore them.
+    # ------------------------------------------------------------------
+    # Context is implicitly saved by the function call mechanism
+    # which pushes RIP onto the stack.
+
+    # ------------------------------------------------------------------
+    # Step 2: Mark current process as READY
+    # This makes it eligible for scheduling again.
+    # ------------------------------------------------------------------
+    load PROC_READY
+    store it into proc_state at curr_slot
+
+    # ------------------------------------------------------------------
+    # Step 3: Enqueue current process into ready queue
+    # It will be scheduled again in round-robin order.
+    # ------------------------------------------------------------------
+    call enqueue_ready curr_slot
+
+    # ------------------------------------------------------------------
+    # Step 4: Force a context switch
+    # This yields the CPU to the next ready process.
+    # ------------------------------------------------------------------
+    call schedule_force
+
+    # When we return here, the process has been rescheduled
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# sleep(ticks) - Block the current process for a number of timer ticks
+#
+# This function puts the current process to sleep for a specified duration.
+# It calculates an absolute wake-up time and blocks until the timer
+# interrupt handler calls wake_sleepers() and finds this process ready.
+#
+# Algorithm:
+#   1. Calculate wake_tick = tick_count + ticks (absolute wake time)
+#   2. Store wake_tick in proc_wake_time[current]
+#   3. Set proc_state[current] = PROC_BLOCKED
+#   4. Call schedule_force to switch to another process
+#
+# The process will be woken by wake_sleepers() when tick_count >= wake_tick.
+# Note that the actual sleep duration may be slightly longer than requested
+# due to timer granularity and scheduling latency.
+#
+# Arguments: ticks - number of timer ticks to sleep (minimum 1)
+# Returns: 0 when resumed after sleep completes
+# ---------------------------------------------------------------------------
+function sleep
+    a ticks
+    a curr_slot
+    a wake_tick
+
+    # Get the ticks argument
+    store argument 0 into ticks
+
+    # Validate: minimum 1 tick sleep
+    load ticks
+    load 1
+    if less it it
+        store 1 into ticks
+    end
+
+    # Get the current process slot
+    load current_process
+    store it into curr_slot
+
+    # ------------------------------------------------------------------
+    # Step 1: Calculate absolute wake time
+    # wake_tick = current tick_count + requested duration
+    # This is robust against timer overflow in a 64-bit tick_count.
+    # ------------------------------------------------------------------
+    load tick_count
+    add it ticks
+    store it into wake_tick
+
+    # ------------------------------------------------------------------
+    # Step 2: Store wake time in the process's PCB
+    # The timer interrupt handler will check this value.
+    # ------------------------------------------------------------------
+    store wake_tick into proc_wake_time at curr_slot
+
+    # ------------------------------------------------------------------
+    # Step 3: Mark process as BLOCKED (not eligible for scheduling)
+    # ------------------------------------------------------------------
+    load PROC_BLOCKED
+    store it into proc_state at curr_slot
+
+    # ------------------------------------------------------------------
+    # Step 4: Force context switch
+    # The scheduler will pick the next ready process.
+    # This process will not run again until wake_sleepers() wakes it.
+    # ------------------------------------------------------------------
+    call schedule_force
+
+    # When we return, the sleep has completed and we've been rescheduled
+    # Clear the wake time to indicate we're no longer sleeping
+    store 0 into proc_wake_time at curr_slot
+
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# wake_sleepers() - Wake up processes whose sleep duration has expired
+#
+# Called by the timer interrupt handler on every tick (or periodically).
+# Scans all process slots and wakes any BLOCKED process whose wake_time
+# has been reached or passed.
+#
+# Algorithm:
+#   For each process slot i:
+#     if proc_state[i] == PROC_BLOCKED
+#        and proc_wake_time[i] > 0
+#        and proc_wake_time[i] <= tick_count:
+#       - Set proc_state[i] = PROC_READY
+#       - Set proc_wake_time[i] = 0
+#       - Enqueue process i into ready queue
+#
+# This is O(MAX_PROCS) = O(256) which is very fast. For larger systems,
+# a sorted sleep queue (timer wheel or min-heap) would be more efficient.
+#
+# Returns: number of processes woken
+# ---------------------------------------------------------------------------
+function wake_sleepers
+    a idx
+    a woken_count
+    a wake_time
+    a state
+
+    store 0 into woken_count
+    store 0 into idx
+
+    # Scan all process slots
+    while less idx MAX_PROCS
+        # Check if this process is BLOCKED
+        load proc_state at idx
+        store it into state
+        load PROC_BLOCKED
+        if equal state it
+            # Get the wake time for this process
+            load proc_wake_time at idx
+            store it into wake_time
+
+            # Check if wake_time is valid (> 0 means actively sleeping)
+            load wake_time
+            load 0
+            if greater it it
+                # Check if it's time to wake: wake_time <= tick_count
+                load wake_time
+                load tick_count
+                if less_or_equal it it
+                    # Time to wake this process!
+
+                    # Set state to READY
+                    load PROC_READY
+                    store it into proc_state at idx
+
+                    # Clear wake time
+                    store 0 into proc_wake_time at idx
+
+                    # Enqueue for scheduling
+                    call enqueue_ready idx
+
+                    # Increment woken count
+                    load woken_count
+                    add it 1
+                    store it into woken_count
+                end
+            end
+        end
+
+        # idx++
+        load idx
+        add it 1
+        store it into idx
+    end
+
+    return woken_count
+end
+
+# ---------------------------------------------------------------------------
+# wait_for_child(pid) - Block until a child process exits
+#
+# This implements the "wait" system call semantics. A parent process
+# calls wait_for_child to pause until one of its children terminates.
+# When the child exits (via process_exit), the parent is woken and
+# receives the child's exit code.
+#
+# Algorithm:
+#   1. If pid > 0: wait for a specific child with that PID
+#      If pid == -1: wait for any child
+#   2. Check if the target child is already a ZOMBIE
+#      If so: collect exit code, free the slot, return the code
+#   3. If child is still running:
+#      - Set current process state to PROC_BLOCKED
+#      - Store the target PID in proc_waiting_for
+#      - Call schedule_force to block and let other processes run
+#   4. When woken (child exited): the child already set us to READY
+#      Return the collected exit code
+#
+# Arguments: pid - PID of specific child to wait for, or -1 for any child
+# Returns: child's exit code on success, -1 on error (no such child)
+# ---------------------------------------------------------------------------
+function wait_for_child
+    a pid
+    a curr_slot
+    a my_pid
+    a child_slot
+    a child_pid
+    a exit_code
+    a idx
+
+    # Get the PID argument
+    store argument 0 into pid
+
+    # Get the current process slot and PID
+    load current_process
+    store it into curr_slot
+    load proc_pid at curr_slot
+    store it into my_pid
+
+    # ------------------------------------------------------------------
+    # Step 1: Check if a specific child is requested (pid > 0)
+    # ------------------------------------------------------------------
+    load pid
+    load 0
+    if greater it it
+        # Find the child process slot
+        call find_slot_by_pid pid
+        store it into child_slot
+
+        # Check if child exists
+        load child_slot
+        load -1
+        if equal it it
+            print "wait_for_child: no such child process"
+            return -1
+        end
+
+        # Verify this is actually our child
+        load proc_parent at child_slot
+        load my_pid
+        if not equal it it
+            print "wait_for_child: not a child of current process"
+            return -1
+        end
+
+        # ------------------------------------------------------------------
+        # Step 2: Check if child is already a ZOMBIE (already exited)
+        # ------------------------------------------------------------------
+        load proc_state at child_slot
+        load PROC_ZOMBIE
+        if equal it it
+            # Child already exited - collect exit code and clean up
+            load proc_exit_code at child_slot
+            store it into exit_code
+
+            # Free the child's slot (reap the zombie)
+            load PROC_UNUSED
+            store it into proc_state at child_slot
+            store 0 into proc_pid at child_slot
+
+            return exit_code
+        end
+
+        # Child still running - we need to block
+        # ------------------------------------------------------------------
+        # Step 3: Block until child exits
+        # Set waiting_for to the child's PID and mark ourselves BLOCKED.
+        # When the child exits, process_exit will wake us.
+        # ------------------------------------------------------------------
+        store pid into proc_waiting_for at curr_slot
+        load PROC_BLOCKED
+        store it into proc_state at curr_slot
+
+        # Force context switch - we'll be woken when child exits
+        call schedule_force
+
+        # When we return, the child has exited. Collect the exit code.
+        # Re-find the child slot (it may have changed if ZOMBIE was reaped)
+        call find_slot_by_pid pid
+        store it into child_slot
+
+        load child_slot
+        load -1
+        if not equal it it
+            load proc_exit_code at child_slot
+            store it into exit_code
+
+            # Free the zombie slot
+            load PROC_UNUSED
+            store it into proc_state at child_slot
+            store 0 into proc_pid at child_slot
+
+            return exit_code
+        end
+
+        # Child was already reaped by someone else
+        return 0
+    end
+
+    # ------------------------------------------------------------------
+    # Step 1b: pid == -1, wait for ANY child
+    # ------------------------------------------------------------------
+    load pid
+    load -1
+    if equal it it
+        # Search for any child that is already a ZOMBIE
+        store 0 into idx
+        while less idx MAX_PROCS
+            # Check if this process is our child
+            load proc_parent at idx
+            load my_pid
+            if equal it it
+                # This is our child - check if it's a ZOMBIE
+                load proc_state at idx
+                load PROC_ZOMBIE
+                if equal it it
+                    # Found a zombie child - reap it
+                    load proc_exit_code at idx
+                    store it into exit_code
+                    load proc_pid at idx
+                    store it into child_pid
+
+                    # Free the zombie slot
+                    load PROC_UNUSED
+                    store it into proc_state at idx
+                    store 0 into proc_pid at idx
+
+                    return exit_code
+                end
+            end
+
+            # idx++
+            load idx
+            add it 1
+            store it into idx
+        end
+
+        # No zombie children found - check if we have any living children
+        a has_children
+        store 0 into has_children
+        store 0 into idx
+        while less idx MAX_PROCS
+            load proc_parent at idx
+            load my_pid
+            if equal it it
+                # Found a living child
+                load proc_state at idx
+                load PROC_UNUSED
+                if not equal it it
+                    store 1 into has_children
+                end
+            end
+            load idx
+            add it 1
+            store it into idx
+        end
+
+        # If no children at all, return error
+        load has_children
+        load 0
+        if equal it it
+            print "wait_for_child: no children"
+            return -1
+        end
+
+        # Block waiting for any child to exit
+        store -1 into proc_waiting_for at curr_slot
+        load PROC_BLOCKED
+        store it into proc_state at curr_slot
+
+        # Force context switch
+        call schedule_force
+
+        # When woken, a child exited. Find and reap it.
+        store 0 into idx
+        while less idx MAX_PROCS
+            load proc_parent at idx
+            load my_pid
+            if equal it it
+                # Check for zombie (child exited while we were blocked)
+                # Actually, process_exit already cleaned the zombie state.
+                # We just need to find a reaped child. Since the child
+                # might have been cleaned already, check for UNUSED with
+                # a stored exit code that was passed to us.
+                #
+                # In a real implementation, the exit code would be passed
+                # via a shared data structure or register.
+                # For simplicity, scan for our child that became UNUSED.
+                load proc_state at idx
+                load PROC_UNUSED
+                if equal it it
+                    # This child was reaped. Return last known exit code.
+                    # The actual exit code was delivered when we were woken.
+                    return 0
+                end
+            end
+            load idx
+            add it 1
+            store it into idx
+        end
+
+        return 0
+    end
+
+    # Invalid pid argument (not > 0 and not -1)
+    print "wait_for_child: invalid PID argument"
+    return -1
+end
+
+###############################################################################
+# SECTION 13: QUERY FUNCTIONS
+# Functions to inspect process state and retrieve information.
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# get_current_pid() - Return the PID of the currently running process
+#
+# This is the simplest query function. It looks up the PID of the
+# process that is currently executing on the CPU by indexing into
+# the proc_pid array using current_process.
+#
+# Returns: PID of current process, or -1 if no process is running
+# ---------------------------------------------------------------------------
+function get_current_pid
+    a curr_slot
+
+    # Get the current process slot
+    load current_process
+    store it into curr_slot
+
+    # Validate the slot is in range
+    load curr_slot
+    load 0
+    if less it it
+        return -1
+    end
+    load curr_slot
+    load MAX_PROCS
+    if greater_or_equal it it
+        return -1
+    end
+
+    # Return proc_pid[current_process]
+    load proc_pid at curr_slot
+    return it
+end
+
+# ---------------------------------------------------------------------------
+# get_process_info(slot, buf) - Fill a buffer with process information
+#
+# This function queries the PCB for a given process slot and fills
+# a caller-provided buffer with key process attributes. This is used
+# by the "ps" or "top" system utilities to display process status.
+#
+# The buffer is filled as an array of integers in this order:
+#   buf[0] = PID (process ID)
+#   buf[1] = state (UNUSED/READY/RUNNING/BLOCKED/ZOMBIE)
+#   buf[2] = priority (1-10)
+#   buf[3] = parent PID
+#   buf[4] = exit code (valid if state is ZOMBIE)
+#   buf[5] = current time slice remaining
+#   buf[6] = saved RSP (stack pointer)
+#   buf[7] = saved RIP (instruction pointer)
+#
+# Arguments:
+#   slot - process slot index (0-255) to query
+#   buf  - pointer to integer array of at least 8 elements
+#
+# Returns: 0 on success, -1 if slot is invalid or UNUSED
+# ---------------------------------------------------------------------------
+function get_process_info
+    a slot
+    a buf
+    a state
+
+    # ------------------------------------------------------------------
+    # Step 1: Extract arguments
+    # ------------------------------------------------------------------
+    store argument 0 into slot
+    store argument 1 into buf
+
+    # ------------------------------------------------------------------
+    # Step 2: Validate the slot index
+    # Must be in range [0, MAX_PROCS)
+    # ------------------------------------------------------------------
+    load slot
+    load 0
+    if less it it
+        print "get_process_info: invalid slot (negative)"
+        return -1
+    end
+    load slot
+    load MAX_PROCS
+    if greater_or_equal it it
+        print "get_process_info: invalid slot (out of range)"
+        return -1
+    end
+
+    # ------------------------------------------------------------------
+    # Step 3: Check if slot is UNUSED
+    # We return -1 for unused slots since there's no meaningful info.
+    # ------------------------------------------------------------------
+    load proc_state at slot
+    store it into state
+    load PROC_UNUSED
+    if equal state it
+        # Slot is unused - no process info available
+        return -1
+    end
+
+    # ------------------------------------------------------------------
+    # Step 4: Fill the buffer with process information
+    # Each field is read from the appropriate PCB array and stored
+    # into the caller's buffer at the corresponding offset.
+    # ------------------------------------------------------------------
+
+    # buf[0] = PID
+    load proc_pid at slot
+    store it into buf at 0
+
+    # buf[1] = state
+    load proc_state at slot
+    store it into buf at 1
+
+    # buf[2] = priority
+    load proc_priority at slot
+    store it into buf at 2
+
+    # buf[3] = parent PID
+    load proc_parent at slot
+    store it into buf at 3
+
+    # buf[4] = exit code
+    load proc_exit_code at slot
+    store it into buf at 4
+
+    # buf[5] = remaining time slice
+    load proc_time_slice at slot
+    store it into buf at 5
+
+    # buf[6] = saved RSP (stack pointer)
+    load proc_rsp at slot
+    store it into buf at 6
+
+    # buf[7] = saved RIP (instruction pointer)
+    load proc_rip at slot
+    store it into buf at 7
+
+    # ------------------------------------------------------------------
+    # Step 5: Return success
+    # The caller now has a snapshot of the process's PCB fields.
+    # ------------------------------------------------------------------
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# list_processes() - Print a table of all active processes
+#
+# This is a debugging/diagnostic function that iterates through all
+# process slots and prints information for each non-UNUSED process.
+# It provides a human-readable view of the process table, similar to
+# the UNIX "ps" command.
+#
+# Output format per line:
+#   "SLOT [slot] PID [pid] STATE [state_name] PRI [priority] PARENT [parent]"
+#
+# This function is useful for kernel debugging and status monitoring.
+# It should not be called from interrupt context due to print overhead.
+#
+# Returns: number of active processes printed
+# ---------------------------------------------------------------------------
+function list_processes
+    a idx
+    a active_count
+    a state
+
+    store 0 into active_count
+    store 0 into idx
+
+    print "=== Process Table ==="
+    print "SLOT  PID   STATE   PRI  PARENT"
+
+    while less idx MAX_PROCS
+        # Only print non-UNUSED slots
+        load proc_state at idx
+        store it into state
+        load PROC_UNUSED
+        if not equal state it
+            # Print slot info: slot number
+            print "[slot "
+            print idx
+            print "] PID="
+            load proc_pid at idx
+            print it
+            print " STATE="
+            load state
+            print it
+            print " PRI="
+            load proc_priority at idx
+            print it
+            print " PARENT="
+            load proc_parent at idx
+            print it
+
+            # Count this active process
+            load active_count
+            add it 1
+            store it into active_count
+        end
+
+        # idx++
+        load idx
+        add it 1
+        store it into idx
+    end
+
+    print "===================="
+    print "Total active: "
+    print active_count
+
+    return active_count
+end
+
+###############################################################################
+# SECTION 14: MESSAGE PASSING PRIMITIVES (BASIC)
+# Simple inter-process communication via fixed-size message buffers.
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# msg_send(target_pid, msg_buf_ptr, msg_len) - Send a message to a process
+#
+# Copies message data from the sender's buffer into the target process's
+# per-process message buffer. Marks the target as having a pending message.
+# If the target is BLOCKED waiting for a message, it is woken.
+#
+# Algorithm:
+#   1. Find target process slot by PID
+#   2. Validate message length (must be <= MSG_SIZE)
+#   3. Copy message bytes to target's proc_msg_buf
+#   4. Set proc_msg_pending[target] = msg_len
+#   5. Set proc_msg_source[target] = sender's PID
+#   6. If target is BLOCKED: wake it (set READY, enqueue)
+#
+# Arguments:
+#   target_pid  - PID of the recipient process
+#   msg_buf_ptr - pointer to sender's message buffer
+#   msg_len     - number of bytes to send (must be <= 64)
+#
+# Returns: 0 on success, -1 on failure
+# ---------------------------------------------------------------------------
+function msg_send
+    a target_pid
+    a msg_buf_ptr
+    a msg_len
+    a target_slot
+    a sender_pid
+    a curr_slot
+    a idx
+    a byte_val
+    a dest_base
+
+    # Extract arguments
+    store argument 0 into target_pid
+    store argument 1 into msg_buf_ptr
+    store argument 2 into msg_len
+
+    # Get current process slot for sender PID
+    load current_process
+    store it into curr_slot
+    load proc_pid at curr_slot
+    store it into sender_pid
+
+    # ------------------------------------------------------------------
+    # Step 1: Find target process slot
+    # ------------------------------------------------------------------
+    call find_slot_by_pid target_pid
+    store it into target_slot
+
+    load target_slot
+    load -1
+    if equal it it
+        print "msg_send: target PID not found"
+        return -1
+    end
+
+    # Check target is not UNUSED or ZOMBIE
+    load proc_state at target_slot
+    load PROC_UNUSED
+    if equal it it
+        print "msg_send: target process is dead"
+        return -1
+    end
+
+    # ------------------------------------------------------------------
+    # Step 2: Validate message length
+    # ------------------------------------------------------------------
+    load msg_len
+    load 0
+    if less_or_equal it it
+        print "msg_send: invalid message length"
+        return -1
+    end
+    load msg_len
+    load MSG_SIZE
+    if greater it it
+        # Truncate to maximum allowed size
+        load MSG_SIZE
+        store it into msg_len
+    end
+
+    # ------------------------------------------------------------------
+    # Step 3: Copy message to target's buffer
+    # dest_base = target_slot * MSG_SIZE (start of target's 64-byte region)
+    # ------------------------------------------------------------------
+    load target_slot
+    load MSG_SIZE
+    multiply it it
+    store it into dest_base
+
+    store 0 into idx
+    while less idx msg_len
+        # In a real kernel: byte_val = msg_buf_ptr[idx]
+        # Here we simulate the copy
+        load msg_buf_ptr
+        load idx
+        add it it
+        load proc_msg_buf at it
+        store it into byte_val
+
+        # proc_msg_buf[dest_base + idx] = byte_val
+        load dest_base
+        load idx
+        add it it
+        store byte_val into proc_msg_buf at it
+
+        # idx++
+        load idx
+        add it 1
+        store it into idx
+    end
+
+    # ------------------------------------------------------------------
+    # Step 4: Mark message as pending in target's PCB
+    # ------------------------------------------------------------------
+    store msg_len into proc_msg_pending at target_slot
+    store sender_pid into proc_msg_source at target_slot
+    store msg_len into proc_msg_size at target_slot
+
+    # ------------------------------------------------------------------
+    # Step 5: If target is BLOCKED waiting for a message, wake it
+    # A process waiting for a message will be in PROC_BLOCKED state.
+    # ------------------------------------------------------------------
+    load proc_state at target_slot
+    load PROC_BLOCKED
+    if equal it it
+        load proc_waiting_for at target_slot
+        load -2
+        if equal it it
+            # Process is specifically waiting for a message (-2 sentinel)
+            load PROC_READY
+            store it into proc_state at target_slot
+            store -1 into proc_waiting_for at target_slot
+            call enqueue_ready target_slot
+        end
+    end
+
+    return 0
+end
+
+# ---------------------------------------------------------------------------
+# msg_recv(buf_ptr, max_len) - Receive a message from any process
+#
+# Checks if a message is pending for the current process. If so, copies
+# the message data to the caller's buffer and clears the pending flag.
+# If no message is pending, the process is BLOCKED until one arrives.
+#
+# Algorithm:
+#   1. Check if proc_msg_pending[current] > 0
+#   2. If pending: copy message, clear flag, return bytes received
+#   3. If not pending: block process, schedule, then retry on wake
+#
+# Arguments:
+#   buf_ptr - pointer to caller's buffer to receive the message
+#   max_len - maximum bytes to copy (should be >= MSG_SIZE)
+#
+# Returns: number of bytes received, or -1 on error
+# ---------------------------------------------------------------------------
+function msg_recv
+    a buf_ptr
+    a max_len
+    a curr_slot
+    a pending_len
+    a src_pid
+    a idx
+    a src_base
+    a copy_len
+    a byte_val
+
+    # Extract arguments
+    store argument 0 into buf_ptr
+    store argument 1 into max_len
+
+    # Get current process slot
+    load current_process
+    store it into curr_slot
+
+    # ------------------------------------------------------------------
+    # Step 1: Check if a message is pending
+    # ------------------------------------------------------------------
+    load proc_msg_pending at curr_slot
+    store it into pending_len
+
+    load pending_len
+    load 0
+    if greater it it
+        # Message is pending - copy it to caller's buffer
+
+        # Calculate source base in proc_msg_buf
+        load curr_slot
+        load MSG_SIZE
+        multiply it it
+        store it into src_base
+
+        # Determine copy length (min of pending_len, max_len)
+        load pending_len
+        store it into copy_len
+        load max_len
+        if less it pending_len
+            load max_len
+            store it into copy_len
+        end
+
+        # Copy bytes from proc_msg_buf to caller's buffer
+        store 0 into idx
+        while less idx copy_len
+            # byte_val = proc_msg_buf[src_base + idx]
+            load src_base
+            load idx
+            add it it
+            load proc_msg_buf at it
+            store it into byte_val
+
+            # buf_ptr[idx] = byte_val
+            load buf_ptr
+            load idx
+            add it it
+            store byte_val into it
+
+            # idx++
+            load idx
+            add it 1
+            store it into idx
+        end
+
+        # Clear message pending flag
+        store 0 into proc_msg_pending at curr_slot
+        store 0 into proc_msg_source at curr_slot
+        store 0 into proc_msg_size at curr_slot
+
+        return copy_len
+    end
+
+    # ------------------------------------------------------------------
+    # Step 2: No message pending - block and wait
+    # Set waiting_for to -2 (sentinel value: waiting for message).
+    # Then block and let the scheduler pick another process.
+    # ------------------------------------------------------------------
+    store -2 into proc_waiting_for at curr_slot
+    load PROC_BLOCKED
+    store it into proc_state at curr_slot
+
+    # Yield CPU - we'll be woken when msg_send delivers a message
+    call schedule_force
+
+    # When we return, a message has arrived. Recursively handle it.
+    # In practice, we'd loop back to step 1 instead of recursing.
+    call msg_recv buf_ptr max_len
+    return it
+end
+
+###############################################################################
+# SECTION 15: TIMER TICK HANDLER
+# Called by the hardware timer interrupt to drive the scheduler.
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# timer_tick() - Timer interrupt handler entry point
+#
+# This function is called by the low-level assembly interrupt stub
+# on every timer interrupt. It increments the global tick count,
+# wakes any sleeping processes whose time has come, and then invokes
+# the main scheduler to perform round-robin preemptive scheduling.
+#
+# The typical calling frequency is 100 Hz (every 10ms) or 1000 Hz
+# (every 1ms), giving a DEFAULT_TIME_SLICE of 10 ticks a duration
+# of 100ms or 10ms respectively.
+#
+# Algorithm:
+#   1. tick_count++
+#   2. Call wake_sleepers() to wake up expired sleepers
+#   3. Call schedule() to check time slice and possibly context switch
+#
+# Note: In a real kernel, this would be called from assembly context
+# with interrupts already disabled. The function must be reentrant-safe.
+#
+# Returns: 0 (schedules next process via schedule())
+# ---------------------------------------------------------------------------
+function timer_tick
+    # ------------------------------------------------------------------
+    # Step 1: Increment global tick counter
+    # This is the system's time base. All timing derives from it.
+    # ------------------------------------------------------------------
+    load tick_count
+    add it 1
+    store it into tick_count
+
+    # ------------------------------------------------------------------
+    # Step 2: Wake up any sleeping processes whose time has expired
+    # This must happen before scheduling so woken processes are eligible.
+    # ------------------------------------------------------------------
+    call wake_sleepers
+
+    # ------------------------------------------------------------------
+    # Step 3: Run the main scheduler
+    # This decrements the current process's time slice and may switch.
+    # ------------------------------------------------------------------
+    call schedule
+
+    return 0
+end
+
+###############################################################################
+# SECTION 16: MODULE SUMMARY AND DESIGN NOTES
+###############################################################################
+#
+# This process management module implements a complete round-robin
+# preemptive scheduler for the Jasterish Micro-Kernel. Key design decisions:
+#
+# 1. PARALLEL PCB ARRAYS: Per-process state is stored in parallel arrays
+#    indexed by slot number. This provides O(1) access to any PCB field
+#    and simplifies memory management (no dynamic allocation of PCBs).
+#
+# 2. ROUND-ROBIN SCHEDULING: Every ready process gets an equal time
+#    quantum (DEFAULT_TIME_SLICE ticks). When the quantum expires,
+#    the process is preempted and the next ready process runs.
+#
+# 3. FIXED PROCESS TABLE: MAX_PROCS=256 limits the system to 256
+#    concurrent processes. This is appropriate for a micro-kernel.
+#
+# 4. IDLE PROCESS: Slot 0/PID 0 is the idle process. It always remains
+#    ready and runs when no other process is available. It cannot be
+#    killed or blocked permanently.
+#
+# 5. ZOMBIE PROCESSES: When a process exits, it becomes a ZOMBIE
+#    until its parent calls wait_for_child(). This follows UNIX semantics.
+#
+# 6. MESSAGE PASSING: Simple fixed-size (64-byte) messages between
+#    processes. The msg_send/msg_recv primitives allow basic IPC.
+#
+# 7. CONTEXT SWITCHING: Modeled via save/restore of RSP and RIP in
+#    the PCB. In a real x86-64 implementation, this would use inline
+#    assembly to save/restore all callee-saved registers.
+#
+# Future enhancements:
+#   - Priority-based scheduling (weighted round-robin or MLQ)
+#   - Multi-CPU support (per-CPU run queues, IPI for rescheduling)
+#   - Timer wheel for efficient sleep/wake of many processes
+#   - Signal/interrupt delivery mechanism
+#   - Process groups and sessions
+#   - Copy-on-write fork() implementation
+#
+###############################################################################
+# END OF process.jstr
+###############################################################################

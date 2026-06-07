@@ -1,0 +1,672 @@
+###############################################################################
+# elf.jstr -- ELF64 Executable Loader Module
+# Jasterish Micro-Kernel
+#
+# Provides minimal ELF64 parsing and loading for x86-64 executables.
+# Supports:
+#   - ELF64 validation (magic, class, type, machine)
+#   - Program header parsing
+#   - LOAD segment mapping via VMM
+#   - Entry point extraction
+#
+# Does NOT support:
+#   - Dynamic linking / shared libraries
+#   - Section headers / relocations
+#   - 32-bit ELF
+###############################################################################
+
+# =============================================================================
+# Section 1: ELF Constants
+# =============================================================================
+
+# ELF magic: 0x7F 'E' 'L' 'F'
+global ELF_MAGIC
+global ELF_CLASS_64
+global ELF_DATA_LSB
+global ELF_TYPE_EXEC
+global ELF_MACHINE_X86_64
+
+store 0x464C457F into ELF_MAGIC       # \x7FELF as little-endian u32
+store 2 into ELF_CLASS_64             # 64-bit
+store 1 into ELF_DATA_LSB             # Little endian
+store 2 into ELF_TYPE_EXEC            # Executable file
+store 0x3E into ELF_MACHINE_X86_64    # x86-64
+
+# ELF64 header offsets (in bytes, as array indices for byte access)
+global ELF_OFF_MAGIC
+global ELF_OFF_CLASS
+global ELF_OFF_DATA
+global ELF_OFF_VERSION
+global ELF_OFF_TYPE
+global ELF_OFF_MACHINE
+global ELF_OFF_ENTRY
+global ELF_OFF_PHOFF
+global ELF_OFF_SHOFF
+global ELF_OFF_FLAGS
+global ELF_OFF_EHSIZE
+global ELF_OFF_PHENTSIZE
+global ELF_OFF_PHNUM
+
+store 0 into ELF_OFF_MAGIC
+store 4 into ELF_OFF_CLASS
+store 5 into ELF_OFF_DATA
+store 6 into ELF_OFF_VERSION
+store 16 into ELF_OFF_TYPE
+store 18 into ELF_OFF_MACHINE
+store 24 into ELF_OFF_ENTRY
+store 32 into ELF_OFF_PHOFF
+store 40 into ELF_OFF_SHOFF
+store 48 into ELF_OFF_FLAGS
+store 52 into ELF_OFF_EHSIZE
+store 54 into ELF_OFF_PHENTSIZE
+store 56 into ELF_OFF_PHNUM
+
+# ELF64 program header offsets
+global PHDR_OFF_TYPE
+global PHDR_OFF_FLAGS
+global PHDR_OFF_OFFSET
+global PHDR_OFF_VADDR
+global PHDR_OFF_PADDR
+global PHDR_OFF_FILESZ
+global PHDR_OFF_MEMSZ
+
+store 0 into PHDR_OFF_TYPE
+store 4 into PHDR_OFF_FLAGS
+store 8 into PHDR_OFF_OFFSET
+store 16 into PHDR_OFF_VADDR
+store 24 into PHDR_OFF_PADDR
+store 32 into PHDR_OFF_FILESZ
+store 40 into PHDR_OFF_MEMSZ
+
+# =============================================================================
+# Section 2: ELF Validation
+# =============================================================================
+
+###############################################################################
+# Function: elf_validate
+# -----------------------------------------------------------------------------
+# Check if a buffer contains a valid ELF64 executable for x86-64.
+#
+# buf: pointer to the ELF file in memory
+# Returns: 1 if valid, 0 if invalid
+###############################################################################
+
+elf_validate
+    a buf
+    a magic
+    a elf_class
+    a elf_data
+    a elf_type
+    a elf_machine
+
+    store it into buf
+
+    # Check magic: first 4 bytes should be 0x7F 'E' 'L' 'F'
+    load buf at 0
+    store it into magic
+    load buf at 1
+    store it into it
+    shift_left it 8
+    store it into it
+    bitwise_or magic it
+    store it into magic
+    load buf at 2
+    store it into it
+    shift_left it 16
+    store it into it
+    bitwise_or magic it
+    store it into magic
+    load buf at 3
+    store it into it
+    shift_left it 24
+    store it into it
+    bitwise_or magic it
+    store it into magic
+
+    if not equal magic ELF_MAGIC
+        print "ELF: invalid magic"
+        return 0
+    end
+
+    # Check class (must be 64-bit = 2)
+    load buf at ELF_OFF_CLASS
+    store it into elf_class
+    if not equal elf_class ELF_CLASS_64
+        print "ELF: not 64-bit"
+        return 0
+    end
+
+    # Check data encoding (must be little-endian = 1)
+    load buf at ELF_OFF_DATA
+    store it into elf_data
+    if not equal elf_data ELF_DATA_LSB
+        print "ELF: not little-endian"
+        return 0
+    end
+
+    # Check type (must be executable = 2)
+    load buf at ELF_OFF_TYPE
+    store it into elf_type
+    load buf at ELF_OFF_TYPE
+    add it 1
+    store it into it
+    shift_left it 8
+    store it into it
+    bitwise_or elf_type it
+    store it into elf_type
+    if not equal elf_type ELF_TYPE_EXEC
+        print "ELF: not executable"
+        return 0
+    end
+
+    # Check machine (must be x86-64 = 0x3E)
+    load buf at ELF_OFF_MACHINE
+    store it into elf_machine
+    load buf at ELF_OFF_MACHINE
+    add it 1
+    store it into it
+    shift_left it 8
+    store it into it
+    bitwise_or elf_machine it
+    store it into elf_machine
+    if not equal elf_machine ELF_MACHINE_X86_64
+        print "ELF: not x86-64"
+        return 0
+    end
+
+    return 1
+
+# =============================================================================
+# Section 3: ELF Loading
+# =============================================================================
+
+###############################################################################
+# Function: elf_load
+# -----------------------------------------------------------------------------
+# Load an ELF64 executable into memory.
+#
+# Reads program headers, allocates physical pages for each LOAD segment,
+# maps them to the requested virtual addresses, and copies segment data.
+#
+# buf: pointer to ELF file in memory
+# Returns: entry point address on success, 0 on failure
+###############################################################################
+
+elf_load
+    a buf
+    a entry_point
+    a phoff
+    a phnum
+    a phentsize
+    a phdr_idx
+    a phdr_addr
+    a phdr_type
+    a phdr_vaddr
+    a phdr_paddr
+    a phdr_filesz
+    a phdr_memsz
+    a phdr_offset
+    a phdr_flags
+    a seg_page_count
+    a page_idx
+    a phys_page
+    a virt_page
+    a copy_src
+    a copy_dst
+    a copy_idx
+    a zero_idx
+
+    store it into buf
+
+    # Validate ELF header
+    call elf_validate buf
+    if equal it 0
+        return 0
+    end
+
+    print "ELF: loading executable..."
+
+    # Extract entry point (8 bytes at offset 24)
+    # Read as two 4-byte halves and combine
+    a entry_low
+    a entry_high
+    load buf at 24
+    store it into entry_low
+    load buf at 25
+    store it into it
+    shift_left it 8
+    store it into it
+    bitwise_or entry_low it
+    store it into entry_low
+    load buf at 26
+    store it into it
+    shift_left it 16
+    store it into it
+    bitwise_or entry_low it
+    store it into entry_low
+    load buf at 27
+    store it into it
+    shift_left it 24
+    store it into it
+    bitwise_or entry_low it
+    store it into entry_low
+
+    load buf at 28
+    store it into entry_high
+    load buf at 29
+    store it into it
+    shift_left it 8
+    store it into it
+    bitwise_or entry_high it
+    store it into entry_high
+    load buf at 30
+    store it into it
+    shift_left it 16
+    store it into it
+    bitwise_or entry_high it
+    store it into entry_high
+    load buf at 31
+    store it into it
+    shift_left it 24
+    store it into it
+    bitwise_or entry_high it
+    store it into entry_high
+
+    shift_left entry_high 32
+    store it into entry_point
+    bitwise_or entry_point entry_low
+    store it into entry_point
+
+    # Extract program header info
+    # phoff at offset 32 (8 bytes)
+    a phoff_low
+    a phoff_high
+    load buf at 32
+    store it into phoff_low
+    load buf at 33
+    store it into it
+    shift_left it 8
+    bitwise_or phoff_low it
+    store it into phoff_low
+    load buf at 34
+    store it into it
+    shift_left it 16
+    bitwise_or phoff_low it
+    store it into phoff_low
+    load buf at 35
+    store it into it
+    shift_left it 24
+    bitwise_or phoff_low it
+    store it into phoff_low
+
+    load buf at 36
+    store it into phoff_high
+    load buf at 37
+    store it into it
+    shift_left it 8
+    bitwise_or phoff_high it
+    store it into phoff_high
+    load buf at 38
+    store it into it
+    shift_left it 16
+    bitwise_or phoff_high it
+    store it into phoff_high
+    load buf at 39
+    store it into it
+    shift_left it 24
+    bitwise_or phoff_high it
+    store it into phoff_high
+
+    shift_left phoff_high 32
+    store it into phoff
+    bitwise_or phoff phoff_low
+    store it into phoff
+
+    # phnum at offset 56 (2 bytes)
+    load buf at 56
+    store it into phnum
+    load buf at 57
+    store it into it
+    shift_left it 8
+    bitwise_or phnum it
+    store it into phnum
+
+    # phentsize at offset 54 (2 bytes)
+    load buf at 54
+    store it into phentsize
+    load buf at 55
+    store it into it
+    shift_left it 8
+    bitwise_or phentsize it
+    store it into phentsize
+
+    print "ELF: entry=0x"
+    call serial_print_hex entry_point
+    print " phnum="
+    print phnum
+
+    # Process each program header
+    store 0 into phdr_idx
+    while less phdr_idx phnum
+        # Compute program header address: buf + phoff + (phdr_idx * phentsize)
+        multiply phdr_idx phentsize
+        store it into it
+        add phoff it
+        store it into it
+        add buf it
+        store it into phdr_addr
+
+        # Read p_type (4 bytes at offset 0)
+        load phdr_addr at 0
+        store it into phdr_type
+        load phdr_addr at 1
+        store it into it
+        shift_left it 8
+        bitwise_or phdr_type it
+        store it into phdr_type
+        load phdr_addr at 2
+        store it into it
+        shift_left it 16
+        bitwise_or phdr_type it
+        store it into phdr_type
+        load phdr_addr at 3
+        store it into it
+        shift_left it 24
+        bitwise_or phdr_type it
+        store it into phdr_type
+
+        # Only process LOAD segments (type 1)
+        if equal phdr_type 1
+            # Read p_vaddr (8 bytes at offset 16)
+            a vaddr_low
+            a vaddr_high
+            load phdr_addr at 16
+            store it into vaddr_low
+            load phdr_addr at 17
+            store it into it
+            shift_left it 8
+            bitwise_or vaddr_low it
+            store it into vaddr_low
+            load phdr_addr at 18
+            store it into it
+            shift_left it 16
+            bitwise_or vaddr_low it
+            store it into vaddr_low
+            load phdr_addr at 19
+            store it into it
+            shift_left it 24
+            bitwise_or vaddr_low it
+            store it into vaddr_low
+
+            load phdr_addr at 20
+            store it into vaddr_high
+            load phdr_addr at 21
+            store it into it
+            shift_left it 8
+            bitwise_or vaddr_high it
+            store it into vaddr_high
+            load phdr_addr at 22
+            store it into it
+            shift_left it 16
+            bitwise_or vaddr_high it
+            store it into vaddr_high
+            load phdr_addr at 23
+            store it into it
+            shift_left it 24
+            bitwise_or vaddr_high it
+            store it into vaddr_high
+
+            shift_left vaddr_high 32
+            store it into phdr_vaddr
+            bitwise_or phdr_vaddr vaddr_low
+            store it into phdr_vaddr
+
+            # Read p_offset (8 bytes at offset 8)
+            a off_low
+            a off_high
+            load phdr_addr at 8
+            store it into off_low
+            load phdr_addr at 9
+            store it into it
+            shift_left it 8
+            bitwise_or off_low it
+            store it into off_low
+            load phdr_addr at 10
+            store it into it
+            shift_left it 16
+            bitwise_or off_low it
+            store it into off_low
+            load phdr_addr at 11
+            store it into it
+            shift_left it 24
+            bitwise_or off_low it
+            store it into off_low
+
+            load phdr_addr at 12
+            store it into off_high
+            load phdr_addr at 13
+            store it into it
+            shift_left it 8
+            bitwise_or off_high it
+            store it into off_high
+            load phdr_addr at 14
+            store it into it
+            shift_left it 16
+            bitwise_or off_high it
+            store it into off_high
+            load phdr_addr at 15
+            store it into it
+            shift_left it 24
+            bitwise_or off_high it
+            store it into off_high
+
+            shift_left off_high 32
+            store it into phdr_offset
+            bitwise_or phdr_offset off_low
+            store it into phdr_offset
+
+            # Read p_filesz (8 bytes at offset 32)
+            a fsz_low
+            a fsz_high
+            load phdr_addr at 32
+            store it into fsz_low
+            load phdr_addr at 33
+            store it into it
+            shift_left it 8
+            bitwise_or fsz_low it
+            store it into fsz_low
+            load phdr_addr at 34
+            store it into it
+            shift_left it 16
+            bitwise_or fsz_low it
+            store it into fsz_low
+            load phdr_addr at 35
+            store it into it
+            shift_left it 24
+            bitwise_or fsz_low it
+            store it into fsz_low
+
+            load phdr_addr at 36
+            store it into fsz_high
+            load phdr_addr at 37
+            store it into it
+            shift_left it 8
+            bitwise_or fsz_high it
+            store it into fsz_high
+            load phdr_addr at 38
+            store it into it
+            shift_left it 16
+            bitwise_or fsz_high it
+            store it into fsz_high
+            load phdr_addr at 39
+            store it into it
+            shift_left it 24
+            bitwise_or fsz_high it
+            store it into fsz_high
+
+            shift_left fsz_high 32
+            store it into phdr_filesz
+            bitwise_or phdr_filesz fsz_low
+            store it into phdr_filesz
+
+            # Read p_memsz (8 bytes at offset 40)
+            a msz_low
+            a msz_high
+            load phdr_addr at 40
+            store it into msz_low
+            load phdr_addr at 41
+            store it into it
+            shift_left it 8
+            bitwise_or msz_low it
+            store it into msz_low
+            load phdr_addr at 42
+            store it into it
+            shift_left it 16
+            bitwise_or msz_low it
+            store it into msz_low
+            load phdr_addr at 43
+            store it into it
+            shift_left it 24
+            bitwise_or msz_low it
+            store it into msz_low
+
+            load phdr_addr at 44
+            store it into msz_high
+            load phdr_addr at 45
+            store it into it
+            shift_left it 8
+            bitwise_or msz_high it
+            store it into msz_high
+            load phdr_addr at 46
+            store it into it
+            shift_left it 16
+            bitwise_or msz_high it
+            store it into msz_high
+            load phdr_addr at 47
+            store it into it
+            shift_left it 24
+            bitwise_or msz_high it
+            store it into msz_high
+
+            shift_left msz_high 32
+            store it into phdr_memsz
+            bitwise_or phdr_memsz msz_low
+            store it into phdr_memsz
+
+            # Read p_flags (4 bytes at offset 4)
+            load phdr_addr at 4
+            store it into phdr_flags
+            load phdr_addr at 5
+            store it into it
+            shift_left it 8
+            bitwise_or phdr_flags it
+            store it into phdr_flags
+            load phdr_addr at 6
+            store it into it
+            shift_left it 16
+            bitwise_or phdr_flags it
+            store it into phdr_flags
+            load phdr_addr at 7
+            store it into it
+            shift_left it 24
+            bitwise_or phdr_flags it
+            store it into phdr_flags
+
+            print "ELF: LOAD vaddr=0x"
+            call serial_print_hex phdr_vaddr
+            print " filesz="
+            print phdr_filesz
+
+            # Allocate and map pages for this segment
+            # Round memsz up to page boundary
+            a seg_size_aligned
+            add phdr_memsz 4095
+            store it into seg_size_aligned
+            divide seg_size_aligned 4096
+            store it into seg_size_aligned
+            multiply seg_size_aligned 4096
+            store it into seg_size_aligned
+
+            a seg_page_count
+            divide seg_size_aligned 4096
+            store it into seg_page_count
+
+            store 0 into page_idx
+            while less page_idx seg_page_count
+                call pmm_alloc
+                store it into phys_page
+                if equal phys_page 0
+                    print "ELF: out of memory loading segment"
+                    return 0
+                end
+
+                multiply page_idx 4096
+                store it into it
+                add phdr_vaddr it
+                store it into virt_page
+
+                # Determine flags: always present, writable for data segments
+                a map_flags
+                store PAGE_PRESENT into map_flags
+                bitwise_or map_flags PAGE_WRITABLE
+                store it into map_flags
+                if greater phdr_flags 0
+                    bitwise_or map_flags PAGE_USER
+                    store it into map_flags
+                end
+
+                call vmm_map_page virt_page phys_page map_flags
+
+                add page_idx 1
+                store it into page_idx
+            end
+
+            # Copy file data to mapped memory
+            store 0 into copy_idx
+            while less copy_idx phdr_filesz
+                add buf phdr_offset
+                store it into copy_src
+                add copy_src copy_idx
+                store it into copy_src
+                load copy_src at 0
+                store it into it
+
+                add phdr_vaddr copy_idx
+                store it into copy_dst
+                store it into copy_dst at 0
+
+                add copy_idx 1
+                store it into copy_idx
+            end
+
+            # Zero-fill remaining memory (memsz - filesz)
+            if greater phdr_memsz phdr_filesz
+                a zero_end
+                a zero_count
+                subtract phdr_memsz phdr_filesz
+                store it into zero_count
+                add phdr_vaddr phdr_filesz
+                store it into zero_end
+
+                store 0 into zero_idx
+                while less zero_idx zero_count
+                    add zero_end zero_idx
+                    store it into copy_dst
+                    store 0 into copy_dst at 0
+                    add zero_idx 1
+                    store it into zero_idx
+                end
+            end
+        end
+
+        add phdr_idx 1
+        store it into phdr_idx
+    end
+
+    print "ELF: loaded successfully, entry=0x"
+    call serial_print_hex entry_point
+    return entry_point
+
+###############################################################################
+# End of elf.jstr
+###############################################################################

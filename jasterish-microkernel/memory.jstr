@@ -1,0 +1,1855 @@
+# ============================================================================
+# memory.jstr -- Memory Management Module for the Jasterish Micro-Kernel
+# ============================================================================
+# This module provides three core memory management subsystems for a bare-metal
+# x86-64 micro-kernel:
+#
+#   1. PMM (Physical Memory Manager) -- Bitmap-based frame allocator
+#      Manages allocation and deallocation of 4KB physical page frames.
+#      Uses a bit-map where 1 bit = 1 page. Bit set = allocated, bit clear = free.
+#
+#   2. VMM (Virtual Memory Manager) -- x86-64 page table walker/mapper
+#      Manages the x86-64 hierarchical page tables: PML4 -> PDP -> PD -> PT.
+#      Supports 4-level paging with on-demand page table creation.
+#
+#   3. Kernel Heap Allocator -- Simple first-fit block allocator
+#      Manages the kernel heap region using a linked list of blocks.
+#      Each block has an 8-byte header: signed size (positive=free, negative=used)
+#      and a prev pointer for coalescing.
+#
+#   4. Utility Functions -- memset, memcpy, memmove
+#      Low-level memory manipulation primitives used throughout the kernel.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# SECTION 1: Page Table and Memory Constants
+# ----------------------------------------------------------------------------
+# These constants define the x86-64 paging structure. x86-64 uses 4-level
+# paging: PML4 (Page Map Level 4) -> PDP (Page Directory Pointer) ->
+# PD (Page Directory) -> PT (Page Table). Each table is 4096 bytes with
+# 512 8-byte entries. Each entry contains a physical address (bits 12-51)
+# and flag bits (bits 0-11).
+# ----------------------------------------------------------------------------
+
+global PAGE_SIZE            # Size of one page frame: 4 KiB
+global PAGE_PRESENT         # Flag: page is present in memory
+global PAGE_WRITABLE        # Flag: page is writable
+global PAGE_USER            # Flag: user-accessible (ring 3)
+global PAGE_WRITETHROUGH    # Flag: write-through caching
+global PAGE_NOCACHE         # Flag: disable cache
+global PAGE_ACCESSED        # Flag: CPU sets this on access
+global PAGE_DIRTY           # Flag: CPU sets this on write
+global PAGE_HUGE            # Flag: huge page (2 MiB at PD level, 1 GiB at PDP)
+global PAGE_GLOBAL          # Flag: global page (not flushed on TLB switch)
+global PAGE_COW             # Flag: copy-on-write
+global PAGE_FLAGS_MASK      # Mask to extract address from page table entry
+global PML4_SHIFT           # Bit shift for PML4 index in virtual address
+global PDP_SHIFT            # Bit shift for PDP index in virtual address
+global PD_SHIFT             # Bit shift for PD index in virtual address
+global PT_SHIFT             # Bit shift for PT index in virtual address
+global PML4_INDEX_MASK      # Mask to extract 9-bit index (511 entries per table)
+global RECURSIVE_MAP_INDEX  # PML4 entry used for recursive page table mapping
+global KERNEL_HEAP_START    # Virtual address where kernel heap begins
+global KERNEL_HEAP_SIZE     # Maximum size of kernel heap in bytes
+
+# Higher-half virtual base address where the kernel is mapped.
+global kernel_high_virt
+store 0xFFFFFFFF80000000 into kernel_high_virt
+
+# Initialize all constants with their numeric values.
+# These store into global variables so they are available at runtime.
+
+store 4096 into PAGE_SIZE
+store 1 into PAGE_PRESENT
+store 2 into PAGE_WRITABLE
+store 4 into PAGE_USER
+store 8 into PAGE_WRITETHROUGH
+store 16 into PAGE_NOCACHE
+store 32 into PAGE_ACCESSED
+store 64 into PAGE_DIRTY
+store 128 into PAGE_HUGE
+store 256 into PAGE_GLOBAL
+store 512 into PAGE_COW
+store 0xFFFFFFFFFFFFF000 into PAGE_FLAGS_MASK
+store 39 into PML4_SHIFT
+store 30 into PDP_SHIFT
+store 21 into PD_SHIFT
+store 12 into PT_SHIFT
+store 0x1FF into PML4_INDEX_MASK
+store 510 into RECURSIVE_MAP_INDEX
+store 0xFFFF800000000000 into KERNEL_HEAP_START
+store 1048576 into KERNEL_HEAP_SIZE
+
+# ----------------------------------------------------------------------------
+# SECTION 2: Global State Variables
+# ----------------------------------------------------------------------------
+# The PMM tracks all physical page frames using a bitmap.
+# Each bit represents one 4KB page frame: 0 = free, 1 = allocated.
+# The bitmap itself is stored in a fixed-size global array.
+# ----------------------------------------------------------------------------
+
+global phys_bitmap          # Array: bitmap for physical page tracking
+global phys_bitmap_size     # Size of the bitmap array in bytes
+global phys_total_pages     # Total number of physical page frames
+global phys_used_pages      # Number of currently allocated page frames
+global phys_free_pages      # Number of currently free page frames
+
+global kernel_pml4          # Physical address of the kernel PML4 table
+global heap_start           # Virtual start address of kernel heap
+global heap_end             # Virtual end address of kernel heap
+global heap_size            # Total size of kernel heap in bytes
+
+# The bitmap array is declared with space for tracking up to 65536 pages
+# which covers 256 MB of physical memory -- sufficient for early kernel bringup.
+# Each byte tracks 8 pages (one bit per page).
+array 8192 phys_bitmap
+
+# ----------------------------------------------------------------------------
+# SECTION 3: Physical Memory Manager (PMM)
+# ----------------------------------------------------------------------------
+# The PMM manages physical page frames using a bitmap allocator.
+# Each bit in phys_bitmap represents one 4KB physical page.
+# Bit = 1 means allocated, bit = 0 means free.
+# This is a simple but effective allocator for early kernel use.
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# Function: pmm_init
+# Parameters: mem_lower_kb -- memory below 1MB in KB (from multiboot)
+#             mem_upper_kb -- memory above 1MB in KB (from multiboot)
+# Description:
+#   Initializes the physical memory manager. Computes total physical memory,
+#   sets up the allocation bitmap, marks hardware-reserved and kernel pages
+#   as used, and prints a summary of available memory.
+# ----------------------------------------------------------------------------
+function pmm_init
+    a mem_lower_kb
+    a mem_upper_kb
+    a total_kb
+    a total_pages
+    a bitmap_size
+    a i
+
+    # Compute total physical memory in kilobytes by adding lower and upper.
+    # mem_lower_kb reports memory from 0 to 640KB (conventional memory).
+    # mem_upper_kb reports memory from 1MB to top of RAM.
+    add mem_lower_kb mem_upper_kb
+    store it into total_kb
+
+    # Convert total KB to number of 4KB pages.
+    # Each page is 4096 bytes = 4 KB, so divide total KB by 4.
+    divide total_kb 4
+    store it into total_pages
+
+    # Compute bitmap size: 1 bit per page means total_pages / 8 bytes.
+    # We add 7 before dividing to round up and handle any remainder.
+    add total_pages 7
+    divide it 8
+    store it into bitmap_size
+
+    # Store the computed values into global state.
+    store total_pages into phys_total_pages
+    store total_pages into phys_free_pages
+    store 0 into phys_used_pages
+    store bitmap_size into phys_bitmap_size
+
+    # Zero out the entire bitmap array.
+    # Every byte is set to 0, meaning all pages start as free.
+    store 0 into i
+    while less i bitmap_size
+        store 0 into phys_bitmap at i
+        add i 1
+        store it into i
+    end
+
+    # Mark the first 256 pages (0 to 255) as used.
+    # These cover the first 1 MB of physical memory (0x00000000 - 0x000FFFFF).
+    # This region contains critical hardware structures:
+    #   - Real-mode IVT (Interrupt Vector Table) at 0x00000000
+    #   - BIOS data area at 0x00000400
+    #   - Video memory and ROM regions
+    #   - The kernel itself loaded by the bootloader
+    store 0 into i
+    while less i 256
+        a byte_idx
+        a bit_offset
+        a bit_mask
+
+        # Compute which byte in the bitmap contains this page's bit.
+        divide i 8
+        store it into byte_idx
+
+        # Compute which bit within that byte: bit_offset = page_index % 8.
+        divide i 8
+        multiply it 8
+        store it into bit_offset
+        subtract i bit_offset
+        store it into bit_offset
+
+        # Create the bit mask: 1 << bit_offset.
+        store 1 into bit_mask
+        shift_left bit_mask bit_offset
+        store it into bit_mask
+
+        # Set the bit in the bitmap (mark page as allocated).
+        load phys_bitmap at byte_idx
+        bitwise_or it bit_mask
+        store it into phys_bitmap at byte_idx
+
+        # Update accounting: one more page used, one less free.
+        load phys_used_pages
+        add it 1
+        store it into phys_used_pages
+        load phys_free_pages
+        subtract it 1
+        store it into phys_free_pages
+
+        add i 1
+        store it into i
+    end
+
+    # Print initialization summary.
+    print "PMM: initialized"
+    print phys_total_pages
+    print "pages total,"
+    print phys_free_pages
+    print "free"
+end
+
+# ----------------------------------------------------------------------------
+# Function: pmm_init_multiboot
+# Parameters: mb_ptr -- pointer to multiboot2 info structure
+# Description:
+#   Parses the multiboot2 memory map tag (type 6) to discover actual
+#   RAM layout. Marks hardware-reserved and kernel-loaded regions as used.
+#   Falls back to hardcoded defaults if the memory map tag is not found.
+# ----------------------------------------------------------------------------
+function pmm_init_multiboot
+    a mb_ptr
+    a total_size
+    a tag_ptr
+    a tag_word
+    a tag_type
+    a tag_size
+    a found_memory_map
+    a total_pages
+    a bitmap_size
+    a i
+    a entry_size
+    a entry_addr
+    a num_entries
+    a j
+    a current_entry
+    a entry_base
+    a entry_len
+    a entry_type
+    a max_page
+    a mark_idx
+    a mark_end
+    a bidx
+    a boff
+    a bmask
+    a kern_base
+    a entry_offset
+    a end_page
+
+    # Read total_size from multiboot info header (lower 32 bits).
+    load mb_ptr at 0
+    store it into tag_word
+    bitwise_and tag_word 0xFFFFFFFF
+    store it into total_size
+
+    # Start scanning tags at offset 8.
+    add mb_ptr 8
+    store it into tag_ptr
+
+    store 0 into found_memory_map
+
+    # Scan tags until we find the end tag or exceed total_size.
+    while less tag_ptr total_size
+        load tag_ptr at 0
+        store it into tag_word
+        bitwise_and tag_word 0xFFFFFFFF
+        store it into tag_type
+        shift_right tag_word 32
+        bitwise_and it 0xFFFFFFFF
+        store it into tag_size
+
+        if equal tag_type 0
+            # End tag -- force exit from loop.
+            store total_size into tag_ptr
+        else
+            if equal tag_type 6
+                # Memory map tag found.
+                load tag_ptr at 1
+                store it into tag_word
+                bitwise_and tag_word 0xFFFFFFFF
+                store it into entry_size
+
+                add tag_ptr 16
+                store it into entry_addr
+
+                subtract tag_size 16
+                divide it entry_size
+                store it into num_entries
+
+                # Compute total pages from highest address across all entries.
+                store 0 into max_page
+                store 0 into j
+                while less j num_entries
+                    multiply j entry_size
+                    store it into entry_offset
+                    add entry_addr entry_offset
+                    store it into current_entry
+
+                    load current_entry at 0
+                    store it into entry_base
+                    load current_entry at 1
+                    store it into entry_len
+
+                    add entry_base entry_len
+                    divide it PAGE_SIZE
+                    store it into end_page
+                    greater end_page max_page
+                    store it into it
+                    if compare it 0
+                        store end_page into max_page
+                    end
+
+                    add j 1
+                    store it into j
+                end
+
+                store max_page into total_pages
+                add total_pages 7
+                divide it 8
+                store it into bitmap_size
+
+                store total_pages into phys_total_pages
+                store total_pages into phys_free_pages
+                store 0 into phys_used_pages
+                store bitmap_size into phys_bitmap_size
+
+                store 0 into i
+                while less i bitmap_size
+                    store 0 into phys_bitmap at i
+                    add i 1
+                    store it into i
+                end
+
+                # Mark non-available regions as used.
+                store 0 into j
+                while less j num_entries
+                    multiply j entry_size
+                    store it into entry_offset
+                    add entry_addr entry_offset
+                    store it into current_entry
+
+                    load current_entry at 0
+                    store it into entry_base
+                    load current_entry at 1
+                    store it into entry_len
+
+                    load current_entry at 2
+                    store it into entry_type
+                    bitwise_and entry_type 0xFFFFFFFF
+                    store it into entry_type
+
+                    if equal entry_type 1
+                        # Available RAM -- leave free.
+                        store 0 into it
+                    else
+                        # Reserved / hardware -- mark used.
+                        divide entry_base PAGE_SIZE
+                        store it into mark_idx
+                        add entry_base entry_len
+                        divide it PAGE_SIZE
+                        store it into mark_end
+
+                        while less mark_idx mark_end
+                            if less mark_idx phys_total_pages
+                                divide mark_idx 8
+                                store it into bidx
+                                divide mark_idx 8
+                                multiply it 8
+                                store it into boff
+                                subtract mark_idx boff
+                                store it into boff
+                                store 1 into bmask
+                                shift_left bmask boff
+                                store it into bmask
+                                load phys_bitmap at bidx
+                                bitwise_or it bmask
+                                store it into phys_bitmap at bidx
+                                load phys_used_pages
+                                add it 1
+                                store it into phys_used_pages
+                                load phys_free_pages
+                                subtract it 1
+                                store it into phys_free_pages
+                            end
+                            add mark_idx 1
+                            store it into mark_idx
+                        end
+                    end
+
+                    add j 1
+                    store it into j
+                end
+
+                # Mark kernel-loaded region (1MB to 17MB) as used.
+                store 0x100000 into kern_base
+                add kern_base 0x1000000
+                store it into mark_end
+                divide kern_base PAGE_SIZE
+                store it into mark_idx
+                divide mark_end PAGE_SIZE
+                store it into mark_end
+                while less mark_idx mark_end
+                    if less mark_idx phys_total_pages
+                        divide mark_idx 8
+                        store it into bidx
+                        divide mark_idx 8
+                        multiply it 8
+                        store it into boff
+                        subtract mark_idx boff
+                        store it into boff
+                        store 1 into bmask
+                        shift_left bmask boff
+                        store it into bmask
+                        load phys_bitmap at bidx
+                        bitwise_or it bmask
+                        store it into phys_bitmap at bidx
+                        load phys_used_pages
+                        add it 1
+                        store it into phys_used_pages
+                        load phys_free_pages
+                        subtract it 1
+                        store it into phys_free_pages
+                    end
+                    add mark_idx 1
+                    store it into mark_idx
+                end
+
+                store 1 into found_memory_map
+                # Force exit from tag scan.
+                store total_size into tag_ptr
+            else
+                # Advance to next tag (size already includes padding).
+                add tag_ptr tag_size
+                store it into tag_ptr
+            end
+        end
+    end
+
+    if equal found_memory_map 0
+        print "PMM: no multiboot memory map, using defaults"
+        call pmm_init 32 480
+    else
+        print "PMM: initialized from multiboot map"
+        print phys_total_pages
+        print "pages total,"
+        print phys_free_pages
+        print "free"
+    end
+end
+
+# ----------------------------------------------------------------------------
+# Function: pmm_alloc
+# Parameters: none
+# Returns: physical address of allocated page, or 0 if out of memory
+# Description:
+#   Scans the physical page bitmap to find the first free page frame.
+#   Uses a nested loop: outer loop over bytes, inner loop over bits.
+#   When a free page (bit = 0) is found, sets the bit and returns the address.
+#   This is a first-fit allocator at the page frame level.
+# ----------------------------------------------------------------------------
+function pmm_alloc
+    a byte_idx
+    a bit_idx
+    a bitmap_byte
+    a bit_mask
+    a page_index
+    a found
+
+    # Outer loop: iterate over each byte in the bitmap.
+    store 0 into byte_idx
+    while less byte_idx phys_bitmap_size
+        # Load the current byte from the bitmap.
+        load phys_bitmap at byte_idx
+        store it into bitmap_byte
+
+        # If the byte is 0xFF, all 8 pages in this byte are allocated.
+        # Skip to the next byte for efficiency.
+        equal bitmap_byte 255
+        store it into it
+        if compare it 0
+            # Byte is 0xFF, advance to next byte immediately.
+            add byte_idx 1
+            store it into byte_idx
+        else
+            # This byte has at least one free page. Check each bit.
+            store 0 into bit_idx
+            store 0 into found
+            while less bit_idx 8
+                # Create a mask for the current bit: 1 << bit_idx.
+                store 1 into bit_mask
+                shift_left bit_mask bit_idx
+                store it into bit_mask
+
+                # Test if this bit is clear (page is free).
+                bitwise_and bitmap_byte bit_mask
+                store it into it
+                equal it 0
+                store it into it
+                if compare it 0
+                    # Bit is set, this page is allocated. Check next bit.
+                    add bit_idx 1
+                    store it into bit_idx
+                else
+                    # Found a free page! Compute its global page index.
+                    multiply byte_idx 8
+                    add it bit_idx
+                    store it into page_index
+
+                    # Safety check: ensure page index is within valid range.
+                    greater page_index phys_total_pages
+                    store it into it
+                    if compare it 0
+                        # Mark the page as allocated by setting its bit.
+                        load phys_bitmap at byte_idx
+                        bitwise_or it bit_mask
+                        store it into phys_bitmap at byte_idx
+
+                        # Update global accounting.
+                        load phys_used_pages
+                        add it 1
+                        store it into phys_used_pages
+                        load phys_free_pages
+                        subtract it 1
+                        store it into phys_free_pages
+
+                        # Return the physical address: page_index * PAGE_SIZE.
+                        multiply page_index PAGE_SIZE
+                        return it
+                    end
+
+                    add bit_idx 1
+                    store it into bit_idx
+                end
+            end
+
+            # No free page in this byte (should not reach here if byte != 0xFF).
+            add byte_idx 1
+            store it into byte_idx
+        end
+    end
+
+    # No free pages found -- out of physical memory.
+    return 0
+end
+
+# ----------------------------------------------------------------------------
+# Function: pmm_alloc_zeroed
+# Parameters: none
+# Returns: physical address of a zero-filled page, or 0 if out of memory
+# Description:
+#   Allocates a physical page and clears all 4096 bytes to zero.
+#   Essential for security (prevents data leakage between allocations)
+#   and correctness (page tables must be zero-initialized).
+# ----------------------------------------------------------------------------
+function pmm_alloc_zeroed
+    a page_addr
+    a offset
+
+    # Allocate a raw physical page.
+    call pmm_alloc
+    store it into page_addr
+
+    # If allocation failed, propagate the failure.
+    equal page_addr 0
+    store it into it
+    if compare it 0
+        return 0
+    end
+
+    # Zero out the entire 4KB page.
+    # We write in long (8-byte) increments for efficiency.
+    # 4096 bytes / 8 = 512 iterations.
+    store 0 into offset
+    while less offset 512
+        store 0 into page_addr at offset
+        add offset 1
+        store it into offset
+    end
+
+    return page_addr
+end
+
+# ----------------------------------------------------------------------------
+# Function: pmm_free
+# Parameters: page_addr -- physical address of page to free
+# Description:
+#   Frees a previously allocated physical page by clearing its bit
+#   in the bitmap. Updates the used/free counters.
+#   Validates the address and checks for double-free.
+# ----------------------------------------------------------------------------
+function pmm_free
+    a page_addr
+    a page_index
+    a byte_idx
+    a bit_offset
+    a bit_mask
+    a current_byte
+
+    # A null or zero address is never valid -- ignore it.
+    equal page_addr 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Compute the page index from the physical address.
+    divide page_addr PAGE_SIZE
+    store it into page_index
+
+    # Safety: verify the page index is within bounds.
+    greater_or_equal page_index phys_total_pages
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Compute which byte in the bitmap contains this page's bit.
+    divide page_index 8
+    store it into byte_idx
+
+    # Compute the bit position within that byte (0 to 7).
+    # bit_offset = page_index % 8.
+    divide page_index 8
+    multiply it 8
+    store it into bit_offset
+    subtract page_index bit_offset
+    store it into bit_offset
+
+    # Create the bit mask: 1 << bit_offset.
+    store 1 into bit_mask
+    shift_left bit_mask bit_offset
+    store it into bit_mask
+
+    # Load the current byte to verify the page is actually allocated.
+    load phys_bitmap at byte_idx
+    store it into current_byte
+    bitwise_and current_byte bit_mask
+    store it into it
+    equal it 0
+    store it into it
+    if compare it 0
+        # Page is already free -- double-free detected. Ignore for safety.
+        return
+    end
+
+    # Clear the bit: bitmap[byte_idx] = bitmap[byte_idx] & (~bit_mask).
+    # We compute ~bit_mask by XORing with 0xFF (byte inversion).
+    bitwise_xor bit_mask 255
+    store it into it
+    bitwise_and current_byte it
+    store it into phys_bitmap at byte_idx
+
+    # Update accounting: one less used, one more free.
+    load phys_used_pages
+    subtract it 1
+    store it into phys_used_pages
+    load phys_free_pages
+    add it 1
+    store it into phys_free_pages
+end
+
+# ----------------------------------------------------------------------------
+# Function: pmm_get_free
+# Returns: number of currently free physical pages
+# Description:
+#   Simple accessor returning the phys_free_pages counter.
+# ----------------------------------------------------------------------------
+function pmm_get_free
+    load phys_free_pages
+    return it
+end
+
+# ----------------------------------------------------------------------------
+# SECTION 4: Virtual Memory Manager (VMM)
+# ----------------------------------------------------------------------------
+# The VMM manages x86-64 page tables for translating virtual addresses
+# to physical addresses. The hierarchy is:
+#
+#   CR3 -> PML4[512 entries] -> PDP[512 entries] -> PD[512 entries]
+#                                                    -> PT[512 entries] -> Physical Page
+#
+# Each 9-bit index selects one of 512 entries from the corresponding table.
+# The top 16 bits of a canonical virtual address are sign-extended (bits 48-63).
+# We use recursive mapping at PML4 index 510 to allow the page tables
+# themselves to be accessed as virtual memory.
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# Function: vmm_init
+# Description:
+#   Initializes the virtual memory manager. Allocates a PML4 table,
+#   identity-maps the first 1 GB of physical memory using 2MB huge pages
+#   (simplifying boot-time page tables), sets up recursive mapping,
+#   and enables paging by loading CR3 and setting CR0.PG.
+# ----------------------------------------------------------------------------
+function vmm_init
+    a pml4_phys
+    a pdp_phys
+    a pd_phys
+    a i
+    a entry
+    a huge_page_addr
+    a pml4_entry_510
+
+    # Allocate and zero the PML4 table (top level of page table hierarchy).
+    call pmm_alloc_zeroed
+    store it into pml4_phys
+    equal pml4_phys 0
+    store it into it
+    if compare it 0
+        print "VMM: FATAL -- cannot allocate PML4"
+        return
+    end
+    store pml4_phys into kernel_pml4
+
+    # Allocate and zero the PDP table (second level).
+    call pmm_alloc_zeroed
+    store it into pdp_phys
+    equal pdp_phys 0
+    store it into it
+    if compare it 0
+        print "VMM: FATAL -- cannot allocate PDP"
+        return
+    end
+
+    # Set PML4[0] to point to the PDP with present and writable flags.
+    # Entry format: physical_address | flags
+    bitwise_or pdp_phys PAGE_PRESENT
+    store it into entry
+    bitwise_or entry PAGE_WRITABLE
+    store it into entry
+    store entry into pml4_phys at 0
+
+    # Set up recursive mapping at PML4[510].
+    # This makes the PML4 itself accessible at virtual address:
+    #   0xFFFFFB8000000000 | (510 << 30) | (510 << 21) | (510 << 12)
+    # allowing the kernel to modify page tables without physical addresses.
+    bitwise_or pml4_phys PAGE_PRESENT
+    store it into pml4_entry_510
+    bitwise_or pml4_entry_510 PAGE_WRITABLE
+    store it into pml4_entry_510
+    store pml4_entry_510 into pml4_phys at 510
+
+    # Allocate a PD for the first PDP entry.
+    call pmm_alloc_zeroed
+    store it into pd_phys
+    equal pd_phys 0
+    store it into it
+    if compare it 0
+        print "VMM: FATAL -- cannot allocate PD"
+        return
+    end
+
+    # Link PDP[0] to the PD.
+    bitwise_or pd_phys PAGE_PRESENT
+    store it into entry
+    bitwise_or entry PAGE_WRITABLE
+    store it into entry
+    store entry into pdp_phys at 0
+
+    # Fill the PD with 512 entries, each mapping a 2MB huge page.
+    # This maps 512 * 2MB = 1 GB of physical memory starting at address 0.
+    # Each entry = physical_address | PRESENT | WRITABLE | HUGE.
+    store 0 into i
+    while less i 512
+        # Compute physical address for this huge page.
+        # Each huge page is 2MB = 0x200000 bytes.
+        multiply i 0x200000
+        store it into huge_page_addr
+
+        # Build the page table entry with flags.
+        bitwise_or huge_page_addr PAGE_PRESENT
+        store it into entry
+        bitwise_or entry PAGE_WRITABLE
+        store it into entry
+        bitwise_or entry PAGE_HUGE
+        store it into entry
+
+        # Store the entry in the PD at index i.
+        store entry into pd_phys at i
+
+        add i 1
+        store it into i
+    end
+
+    # Enable paging via x86-64 control registers:
+    # 1. Load CR3 with the physical address of the PML4.
+    #    CR3 holds the base of the current page table hierarchy.
+    # 2. Set the PG (Paging) bit in CR0 to enable translation.
+    #    PG bit = bit 31 of CR0 = 0x80000000.
+    #
+    # Inline assembly (Jasterish compiles these to native instructions):
+    #    mov cr3, pml4_phys
+    #    mov rax, cr0
+    #    or  rax, 0x80000000
+    #    mov cr0, rax
+    asm "mov cr3, %0" with pml4_phys
+    asm "mov %rax, cr0"
+    asm "or  %rax, 0x80000000"
+    asm "mov cr0, %rax"
+
+    print "VMM: Paging enabled with 1GB identity map"
+
+    # Map the kernel to higher half after paging is enabled.
+    # The kernel is loaded at physical 0x100000 (1MB) and mapped to
+    # virtual 0xFFFFFFFF80000000.
+    call vmm_map_kernel_high
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_map_kernel_high
+# Description:
+#   Maps the kernel image from its physical load address (0x100000)
+#   to the higher-half virtual address 0xFFFFFFFF80000000.
+#   Maps 16MB of kernel space using 4KB regular pages.
+# ----------------------------------------------------------------------------
+function vmm_map_kernel_high
+    a phys_addr
+    a virt_addr
+    a page_count
+    a i
+    a kernel_phys_base
+    a kernel_virt_base
+    a flags
+
+    store 0x100000 into kernel_phys_base
+    store kernel_high_virt into kernel_virt_base
+    store 4096 into page_count   # 4096 pages = 16MB
+
+    store PAGE_PRESENT into flags
+    bitwise_or flags PAGE_WRITABLE
+    store it into flags
+
+    store 0 into i
+    while less i page_count
+        multiply i PAGE_SIZE
+        store it into it
+        add kernel_phys_base it
+        store it into phys_addr
+        add kernel_virt_base it
+        store it into virt_addr
+
+        call vmm_map_page virt_addr phys_addr flags
+
+        add i 1
+        store it into i
+    end
+
+    print "VMM: kernel mapped to higher half at 0xFFFFFFFF80000000"
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_get_pml4_index
+# Parameters: virt -- virtual address
+# Returns: PML4 table index (bits 39-47 of virtual address)
+# Description:
+#   Extracts the 9-bit PML4 index from a virtual address.
+#   Formula: (virt >> 39) & 0x1FF
+#   This selects which of the 512 PML4 entries maps the address.
+# ----------------------------------------------------------------------------
+function vmm_get_pml4_index
+    a virt
+    shift_right virt PML4_SHIFT
+    store it into it
+    bitwise_and it PML4_INDEX_MASK
+    return it
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_get_pdp_index
+# Parameters: virt -- virtual address
+# Returns: PDP table index (bits 30-38 of virtual address)
+# Description:
+#   Extracts the 9-bit PDP index from a virtual address.
+#   Formula: (virt >> 30) & 0x1FF
+#   This selects which of the 512 PDP entries maps the address.
+# ----------------------------------------------------------------------------
+function vmm_get_pdp_index
+    a virt
+    shift_right virt PDP_SHIFT
+    store it into it
+    bitwise_and it PML4_INDEX_MASK
+    return it
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_get_pd_index
+# Parameters: virt -- virtual address
+# Returns: PD table index (bits 21-29 of virtual address)
+# Description:
+#   Extracts the 9-bit PD index from a virtual address.
+#   Formula: (virt >> 21) & 0x1FF
+#   This selects which of the 512 PD entries maps the address.
+# ----------------------------------------------------------------------------
+function vmm_get_pd_index
+    a virt
+    shift_right virt PD_SHIFT
+    store it into it
+    bitwise_and it PML4_INDEX_MASK
+    return it
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_get_pt_index
+# Parameters: virt -- virtual address
+# Returns: PT table index (bits 12-20 of virtual address)
+# Description:
+#   Extracts the 9-bit PT index from a virtual address.
+#   Formula: (virt >> 12) & 0x1FF
+#   This selects which of the 512 PT entries maps the address.
+# ----------------------------------------------------------------------------
+function vmm_get_pt_index
+    a virt
+    shift_right virt PT_SHIFT
+    store it into it
+    bitwise_and it PML4_INDEX_MASK
+    return it
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_walk_page_table
+# Parameters: virt  -- virtual address to walk
+#             create -- if 1, allocate missing page tables; if 0, fail
+# Returns: pointer to the PT entry for virt, or 0 if not mapped
+# Description:
+#   Walks the 4-level page table hierarchy from PML4 down to PT.
+#   At each level, extracts the index using the vmm_get_*_index helpers,
+#   checks if the entry is present (PAGE_PRESENT flag).
+#   If not present and create=1, allocates a new zeroed page table.
+#   If not present and create=0, returns 0 (page not mapped).
+#   Returns a pointer to the final PT entry (not the physical address).
+# ----------------------------------------------------------------------------
+function vmm_walk_page_table
+    a virt
+    a create
+    a pml4_idx
+    a pdp_idx
+    a pd_idx
+    a pt_idx
+    a entry
+    a table_addr
+    a next_table
+    a is_present
+
+    # Load the PML4 physical address from the kernel_pml4 global.
+    load kernel_pml4
+    store it into table_addr
+
+    # --- Level 1: PML4 ---
+    # Get the PML4 index for this virtual address.
+    call vmm_get_pml4_index with virt
+    store it into pml4_idx
+
+    # Get the PML4 entry at the computed index.
+    load table_addr at pml4_idx
+    store it into entry
+
+    # Check if the entry is present (bit 0 = PAGE_PRESENT).
+    bitwise_and entry PAGE_PRESENT
+    store it into is_present
+    equal is_present 0
+    store it into it
+    if compare it 0
+        # Entry not present. Should we create a new page table?
+        equal create 1
+        store it into it
+        if compare it 0
+            # Do not create -- page table walk fails.
+            return 0
+        else
+            # Allocate a new PDP page table.
+            call pmm_alloc_zeroed
+            store it into next_table
+            equal next_table 0
+            store it into it
+            if compare it 0
+                return 0
+            end
+
+            # Set the PML4 entry: physical address | PRESENT | WRITABLE.
+            bitwise_or next_table PAGE_PRESENT
+            store it into entry
+            bitwise_or entry PAGE_WRITABLE
+            store it into entry
+            store entry into table_addr at pml4_idx
+
+            # Continue walking with the new table.
+            store next_table into table_addr
+        end
+    else
+        # Extract the physical address of the next-level table.
+        # Clear the flag bits (bottom 12 bits) to get the base address.
+        bitwise_and entry PAGE_FLAGS_MASK
+        store it into table_addr
+    end
+
+    # --- Level 2: PDP ---
+    call vmm_get_pdp_index with virt
+    store it into pdp_idx
+
+    load table_addr at pdp_idx
+    store it into entry
+
+    bitwise_and entry PAGE_PRESENT
+    store it into is_present
+    equal is_present 0
+    store it into it
+    if compare it 0
+        equal create 1
+        store it into it
+        if compare it 0
+            return 0
+        else
+            call pmm_alloc_zeroed
+            store it into next_table
+            equal next_table 0
+            store it into it
+            if compare it 0
+                return 0
+            end
+
+            bitwise_or next_table PAGE_PRESENT
+            store it into entry
+            bitwise_or entry PAGE_WRITABLE
+            store it into entry
+            store entry into table_addr at pdp_idx
+
+            store next_table into table_addr
+        end
+    else
+        bitwise_and entry PAGE_FLAGS_MASK
+        store it into table_addr
+    end
+
+    # --- Level 3: PD ---
+    call vmm_get_pd_index with virt
+    store it into pd_idx
+
+    load table_addr at pd_idx
+    store it into entry
+
+    bitwise_and entry PAGE_PRESENT
+    store it into is_present
+    equal is_present 0
+    store it into it
+    if compare it 0
+        equal create 1
+        store it into it
+        if compare it 0
+            return 0
+        else
+            call pmm_alloc_zeroed
+            store it into next_table
+            equal next_table 0
+            store it into it
+            if compare it 0
+                return 0
+            end
+
+            bitwise_or next_table PAGE_PRESENT
+            store it into entry
+            bitwise_or entry PAGE_WRITABLE
+            store it into entry
+            store entry into table_addr at pd_idx
+
+            store next_table into table_addr
+        end
+    else
+        bitwise_and entry PAGE_FLAGS_MASK
+        store it into table_addr
+    end
+
+    # --- Level 4: PT ---
+    call vmm_get_pt_index with virt
+    store it into pt_idx
+
+    # Return the address of the PT entry itself (not the entry value).
+    # The caller can read from or write to this address.
+    multiply pt_idx 8
+    store it into it
+    add it table_addr
+    return it
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_map_page
+# Parameters: virt  -- virtual address to map
+#             phys  -- physical address to map to
+#             flags -- page flags (OR'd with PAGE_PRESENT)
+# Description:
+#   Maps a single virtual page to a physical page.
+#   Walks (and creates if needed) the page table hierarchy,
+#   then writes the physical address with flags into the PT entry.
+#   Finally, invalidates the TLB entry for this virtual address.
+#   The TLB must be flushed because the CPU caches page translations.
+# ----------------------------------------------------------------------------
+function vmm_map_page
+    a virt
+    a phys
+    a flags
+    a pt_entry_ptr
+    a entry_value
+
+    # Ensure PAGE_PRESENT is always set -- a page without PRESENT is invalid.
+    bitwise_or flags PAGE_PRESENT
+    store it into flags
+
+    # Walk the page tables, creating any missing intermediate levels.
+    call vmm_walk_page_table with virt 1
+    store it into pt_entry_ptr
+
+    # If walk failed (out of memory), we cannot map the page.
+    equal pt_entry_ptr 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Build the PT entry: physical address (page-aligned) | flags.
+    # PAGE_FLAGS_MASK clears the bottom 12 bits of the physical address
+    # to ensure page alignment, then we OR in the flags.
+    bitwise_and phys PAGE_FLAGS_MASK
+    store it into entry_value
+    bitwise_or entry_value flags
+    store it into entry_value
+
+    # Write the entry to the page table.
+    store entry_value into pt_entry_ptr at 0
+
+    # Invalidate the TLB entry for this virtual address.
+    # The CPU caches page translations in the Translation Lookaside Buffer.
+    # After modifying a page table entry, we must invalidate the cached entry
+    # or the CPU may use the stale translation.
+    # Inline assembly: invlpg virt
+    asm "invlpg %0" with virt
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_unmap_page
+# Parameters: virt -- virtual address to unmap
+# Description:
+#   Removes a virtual-to-physical mapping by clearing the PT entry.
+#   Does NOT free the physical page -- that is the caller's responsibility.
+#   Invalidates the TLB after clearing the entry.
+#   If the page was not mapped, this is a no-op.
+# ----------------------------------------------------------------------------
+function vmm_unmap_page
+    a virt
+    a pt_entry_ptr
+
+    # Walk the page tables without creating missing levels.
+    call vmm_walk_page_table with virt 0
+    store it into pt_entry_ptr
+
+    # If the page was not mapped, nothing to do.
+    equal pt_entry_ptr 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Clear the PT entry (set to 0) -- this unmaps the page.
+    store 0 into pt_entry_ptr at 0
+
+    # Invalidate the TLB for this virtual address.
+    # The CPU must not use a cached translation for an unmapped page.
+    asm "invlpg %0" with virt
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_map_page_in_table
+# Parameters: pml4 -- physical address of target PML4
+#             virt -- virtual address to map
+#             phys -- physical address to map to
+#             flags -- page flags
+# Description:
+#   Maps a page into a specific page table (not the current kernel_pml4).
+#   Saves and restores kernel_pml4 around the operation.
+# ----------------------------------------------------------------------------
+function vmm_map_page_in_table
+    a pml4
+    a virt
+    a phys
+    a flags
+    a saved_pml4
+
+    store argument 0 into pml4
+    store argument 1 into virt
+    store argument 2 into phys
+    store argument 3 into flags
+
+    # Save current kernel_pml4
+    load kernel_pml4
+    store it into saved_pml4
+
+    # Switch to target page table
+    store pml4 into kernel_pml4
+
+    # Map the page
+    call vmm_map_page virt phys flags
+
+    # Restore kernel_pml4
+    store saved_pml4 into kernel_pml4
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_virt_to_phys
+# Parameters: virt -- virtual address to translate
+# Returns: physical address mapped to virt, or 0 if not mapped
+# Description:
+#   Translates a virtual address to its corresponding physical address.
+#   Walks the page tables and extracts the physical page base from the PT entry,
+#   then adds the page offset (bottom 12 bits of the virtual address).
+#   Returns 0 if the virtual address is not mapped.
+# ----------------------------------------------------------------------------
+function vmm_virt_to_phys
+    a virt
+    a pt_entry_ptr
+    a pt_entry
+    a phys_base
+    a page_offset
+    a present
+
+    # Walk the page tables without creating anything.
+    call vmm_walk_page_table with virt 0
+    store it into pt_entry_ptr
+
+    # If no mapping exists, return 0.
+    equal pt_entry_ptr 0
+    store it into it
+    if compare it 0
+        return 0
+    end
+
+    # Read the PT entry at the computed address.
+    load pt_entry_ptr at 0
+    store it into pt_entry
+
+    # Check if the page is actually present.
+    bitwise_and pt_entry PAGE_PRESENT
+    store it into present
+    equal present 0
+    store it into it
+    if compare it 0
+        return 0
+    end
+
+    # Extract the physical page base address (top bits, bottom 12 cleared).
+    bitwise_and pt_entry PAGE_FLAGS_MASK
+    store it into phys_base
+
+    # Extract the page offset: bottom 12 bits of virtual address.
+    # page_offset = virt & 0xFFF
+    bitwise_and virt 0xFFF
+    store it into page_offset
+
+    # Physical address = page base address + offset within page.
+    add phys_base page_offset
+    return it
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_resolve_pte
+# Parameters: virt -- virtual address
+# Returns: the page table entry value, or 0 if not mapped
+# Description:
+#   Walks the page tables and returns the raw PTE (including flags).
+#   Returns 0 if the page is not mapped.
+# ----------------------------------------------------------------------------
+function vmm_resolve_pte
+    a virt
+    a pt_entry_ptr
+    a pt_entry
+    a present
+
+    call vmm_walk_page_table with virt 0
+    store it into pt_entry_ptr
+
+    equal pt_entry_ptr 0
+    store it into it
+    if compare it 0
+        return 0
+    end
+
+    load pt_entry_ptr at 0
+    store it into pt_entry
+
+    bitwise_and pt_entry PAGE_PRESENT
+    store it into present
+    equal present 0
+    store it into it
+    if compare it 0
+        return 0
+    end
+
+    return pt_entry
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_update_pte
+# Parameters: virt -- virtual address
+#             new_pte -- new page table entry value
+# Description:
+#   Updates the PTE for a mapped virtual page. Does NOT create missing
+#   intermediate page tables. Invalidates the TLB after writing.
+# ----------------------------------------------------------------------------
+function vmm_update_pte
+    a virt
+    a new_pte
+    a pt_entry_ptr
+
+    call vmm_walk_page_table with virt 0
+    store it into pt_entry_ptr
+
+    equal pt_entry_ptr 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    store new_pte into pt_entry_ptr at 0
+    asm "invlpg %0" with virt
+end
+
+# ----------------------------------------------------------------------------
+# Function: vmm_new_page_table
+# Description:
+#   Allocates a new zeroed physical page suitable for use as a PML4,
+#   PDP, PD, or PT table. Wrapper around pmm_alloc_zeroed.
+# Returns: physical address of the new page table, or 0 on failure
+# ----------------------------------------------------------------------------
+function vmm_new_page_table
+    call pmm_alloc_zeroed
+    return it
+end
+
+# ----------------------------------------------------------------------------
+# SECTION 5: Kernel Heap Allocator
+# ----------------------------------------------------------------------------
+# The kernel heap uses a simple first-fit allocator with bidirectional
+# block coalescing. Each block has an 8-byte (2 long) header:
+#   Offset 0: block_size (signed long)
+#             Positive = free block, Negative = allocated block
+#   Offset 1: prev_block (unsigned long)
+#             Pointer to previous block header, or 0 for the first block
+#
+# The heap starts at KERNEL_HEAP_START (high canonical address) and spans
+# KERNEL_HEAP_SIZE bytes. kmalloc returns addresses after the header.
+# kfree negates the size to mark free and coalesces adjacent free blocks.
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# Function: heap_init
+# Description:
+#   Initializes the kernel heap region. Sets up the heap bounds and creates
+#   the initial free block spanning the entire heap (minus header overhead).
+#   The initial block has a positive size indicating "free".
+# ----------------------------------------------------------------------------
+function heap_init
+    a initial_block
+    a heap_kb
+
+    # Set heap boundaries using the configured constants.
+    store KERNEL_HEAP_START into heap_start
+    store KERNEL_HEAP_SIZE into heap_size
+    add KERNEL_HEAP_START KERNEL_HEAP_SIZE
+    store it into heap_end
+
+    # The first block header starts at the heap base address.
+    store heap_start into initial_block
+
+    # Store the block size as a positive value indicating "free".
+    # The entire heap minus header space is initially available.
+    # Block size = heap_size - 16 (room for header and trailing alignment).
+    subtract heap_size 16
+    store it into it
+    store it into initial_block at 0
+
+    # Store the previous block pointer: 0 means this is the first block.
+    store 0 into initial_block at 1
+
+    # Print heap initialization info.
+    divide KERNEL_HEAP_SIZE 1024
+    store it into heap_kb
+    print "Heap:"
+    print heap_kb
+    print "KB at virtual"
+    print heap_start
+end
+
+# ----------------------------------------------------------------------------
+# Function: kmalloc
+# Parameters: size -- number of bytes to allocate
+# Returns: pointer to allocated memory, or 0 if allocation fails
+# Description:
+#   Allocates memory from the kernel heap using first-fit strategy.
+#   Size is aligned to 16 bytes minimum. An 8-byte header is prepended.
+#   Searches the heap for the first free block that is large enough.
+#   If the block is significantly larger than requested, it is split into
+#   an allocated portion and a new free block.
+#   Returns a pointer to the user area (after the header).
+# ----------------------------------------------------------------------------
+function kmalloc
+    a size
+    a aligned_size
+    a block_ptr
+    a block_size
+    a header_size
+    a remainder
+    a next_block
+    a user_ptr
+    a abs_size
+
+    # kmalloc header size is 8 bytes (1 long).
+    store 8 into header_size
+
+    # Reject zero-size allocations.
+    equal size 0
+    store it into it
+    if compare it 0
+        return 0
+    end
+
+    # Align requested size to 16-byte boundary for cache line alignment.
+    # Also ensure a minimum allocation of 16 bytes.
+    greater size 16
+    store it into it
+    if compare it 0
+        store 16 into aligned_size
+    else
+        store size into aligned_size
+    end
+
+    # Total needed = aligned user size + header overhead.
+    add aligned_size header_size
+    store it into aligned_size
+
+    # Start searching from the beginning of the heap.
+    store heap_start into block_ptr
+
+    # Walk the heap blocks looking for a suitable free block.
+    # We continue while the block pointer is within the heap bounds.
+    while less block_ptr heap_end
+        # Load the block size from the header.
+        # Positive size means free; negative means allocated.
+        load block_ptr at 0
+        store it into block_size
+
+        # Check if this block is free (positive size) and large enough.
+        greater block_size 0
+        store it into it
+        if compare it 0
+            # Block is allocated (negative size) or zero -- skip it.
+            # Compute the absolute size to advance to the next block.
+            greater block_size 0
+            store it into it
+            if compare it 0
+                multiply block_size -1
+                store it into abs_size
+            else
+                store block_size into abs_size
+            end
+            add block_ptr abs_size
+            store it into block_ptr
+        else
+            # Block is free. Check if it is large enough.
+            greater_or_equal block_size aligned_size
+            store it into it
+            if compare it 0
+                # Block is free but too small -- advance to next block.
+                add block_ptr block_size
+                store it into block_ptr
+            else
+                # Found a suitable block! Check if we should split it.
+                # Split only if the remainder can hold a new block
+                # with header + 16 bytes minimum data (24 bytes total).
+                subtract block_size aligned_size
+                store it into remainder
+                greater remainder 32
+                store it into it
+                if compare it 0
+                    # Not enough room to split -- use the entire block.
+                    # Mark as used by negating the size.
+                    multiply block_size -1
+                    store it into block_size
+                    store block_size into block_ptr at 0
+                else
+                    # Split: create a new free block after the allocated portion.
+                    # next_block = block_ptr + aligned_size
+                    add block_ptr aligned_size
+                    store it into next_block
+
+                    # Set the new block's size (free, positive).
+                    store remainder into next_block at 0
+
+                    # Set the new block's prev pointer to the current block.
+                    store block_ptr into next_block at 1
+
+                    # Update the current block's size to the allocated amount.
+                    # Negate to mark as "used".
+                    store aligned_size into block_size
+                    multiply block_size -1
+                    store it into block_size
+                    store block_size into block_ptr at 0
+                end
+
+                # Return the address just past the 8-byte header.
+                add block_ptr header_size
+                store it into user_ptr
+                return user_ptr
+            end
+        end
+
+        # Safety: ensure we do not loop past the heap end.
+        greater_or_equal block_ptr heap_end
+        store it into it
+        if compare it 0
+            # Force exit from loop by advancing past heap_end.
+            store heap_end into block_ptr
+        end
+    end
+
+    # No suitable block found -- the heap is exhausted.
+    return 0
+end
+
+# ----------------------------------------------------------------------------
+# Function: kfree
+# Parameters: addr -- pointer returned by kmalloc (points past the header)
+# Description:
+#   Frees a previously allocated heap block. Calculates the block header
+#   address (8 bytes before the user pointer), marks the block as free
+#   (makes the size positive), and coalesces with adjacent free blocks
+#   to reduce memory fragmentation.
+#   Coalescing checks both the next block (forward) and previous block
+#   (backward using the prev pointer stored in each header).
+#   Ignores null pointers (free of NULL is a no-op per C standard).
+# ----------------------------------------------------------------------------
+function kfree
+    a addr
+    a block_ptr
+    a block_size
+    a next_block
+    a next_size
+    a prev_block
+    a prev_size
+    a new_size
+
+    # Ignore null pointers -- free(NULL) is defined as a no-op.
+    equal addr 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # The block header is 8 bytes before the user pointer.
+    subtract addr 8
+    store it into block_ptr
+
+    # Verify the block is within the heap bounds for safety.
+    less block_ptr heap_start
+    store it into it
+    if compare it 0
+        return
+    end
+    greater_or_equal block_ptr heap_end
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Load the current block size (should be negative = allocated).
+    load block_ptr at 0
+    store it into block_size
+
+    # If already free (positive), this is a double-free. Ignore for safety.
+    greater block_size 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Mark as free by making the size positive.
+    multiply block_size -1
+    store it into block_size
+    store block_size into block_ptr at 0
+
+    # --- Coalesce with next block (forward) ---
+    # Compute the address of the next block header.
+    add block_ptr block_size
+    store it into next_block
+
+    # Check if the next block is within heap and is also free.
+    less next_block heap_end
+    store it into it
+    if compare it 0
+        # Next block is past heap end -- cannot coalesce forward.
+        store 0 into it
+    else
+        load next_block at 0
+        store it into next_size
+        greater next_size 0
+        store it into it
+        if compare it 0
+            # Next block is allocated -- cannot coalesce forward.
+            store 0 into it
+        else
+            # Next block is free -- merge them into one larger block.
+            # New size = current size + next block size.
+            add block_size next_size
+            store it into new_size
+            store new_size into block_ptr at 0
+
+            # Update our size tracker for potential backward coalescing.
+            store new_size into block_size
+
+            # The prev pointer of the merged block stays the same.
+            store 1 into it
+        end
+    end
+
+    # --- Coalesce with previous block (backward) ---
+    # Load the prev pointer from our header to find the previous block.
+    load block_ptr at 1
+    store it into prev_block
+
+    # Check if there is a previous block (prev != 0).
+    equal prev_block 0
+    store it into it
+    if compare it 0
+        # There is a previous block. Check if it is free.
+        greater_or_equal prev_block heap_start
+        store it into it
+        if compare it 0
+            # Previous block is outside heap -- ignore.
+            store 0 into it
+        else
+            load prev_block at 0
+            store it into prev_size
+            greater prev_size 0
+            store it into it
+            if compare it 0
+                # Previous block is allocated -- cannot coalesce backward.
+                store 0 into it
+            else
+                # Previous block is free -- merge it with current block.
+                # New size = prev_size + current block_size.
+                add prev_size block_size
+                store it into new_size
+                store new_size into prev_block at 0
+
+                # Update the next block's prev pointer to point to prev_block.
+                add prev_block new_size
+                store it into next_block
+                less next_block heap_end
+                store it into it
+                if compare it 0
+                    # No next block -- nothing to update.
+                    store 0 into it
+                else
+                    store prev_block into next_block at 1
+                end
+            end
+        end
+    end
+end
+
+# ----------------------------------------------------------------------------
+# SECTION 6: Memory Utility Functions
+# ----------------------------------------------------------------------------
+# These low-level memory manipulation functions are the building blocks
+# used by higher-level kernel code. They operate on raw byte addresses.
+# memset initializes memory, memcpy copies non-overlapping regions,
+# and memmove handles potentially overlapping regions safely.
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# Function: memset
+# Parameters: addr  -- starting address to fill
+#             value -- byte value to store (0-255)
+#             count -- number of bytes to fill
+# Description:
+#   Fills a region of memory with a repeated byte value.
+#   Commonly used to zero-initialize buffers, page tables, and structs.
+#   Handles count = 0 as a no-op.
+# ----------------------------------------------------------------------------
+function memset
+    a addr
+    a value
+    a count
+    a i
+
+    # Guard against zero or negative count.
+    greater count 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Loop from 0 to count-1, storing the byte value at each offset.
+    store 0 into i
+    while less i count
+        store value into addr at i
+        add i 1
+        store it into i
+    end
+end
+
+# ----------------------------------------------------------------------------
+# Function: memcpy
+# Parameters: dest -- destination address
+#             src  -- source address
+#             count -- number of bytes to copy
+# Description:
+#   Copies count bytes from src to dest. The regions must NOT overlap.
+#   For overlapping regions, use memmove instead.
+#   Copies forward from index 0 to count-1.
+#   Handles null pointers and zero count as no-ops.
+# ----------------------------------------------------------------------------
+function memcpy
+    a dest
+    a src
+    a count
+    a i
+    a byte_val
+
+    # Guard against zero or negative count.
+    greater count 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Guard against null pointers.
+    equal dest 0
+    store it into it
+    if compare it 0
+        return
+    end
+    equal src 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Forward copy: from index 0 up to count-1.
+    store 0 into i
+    while less i count
+        # Load one byte from the source address.
+        load src at i
+        store it into byte_val
+
+        # Store it at the destination address.
+        store byte_val into dest at i
+
+        add i 1
+        store it into i
+    end
+end
+
+# ----------------------------------------------------------------------------
+# Function: memmove
+# Parameters: dest -- destination address
+#             src  -- source address
+#             count -- number of bytes to copy
+# Description:
+#   Copies count bytes from src to dest. Handles overlapping regions safely.
+#   If dest > src, copies backwards to avoid corrupting source data
+#   that has not yet been copied.
+#   If dest <= src, behaves identically to memcpy (forward copy).
+#   Handles null pointers and zero count as no-ops.
+# ----------------------------------------------------------------------------
+function memmove
+    a dest
+    a src
+    a count
+    a i
+    a byte_val
+
+    # Guard against zero or negative count.
+    greater count 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Guard against null pointers.
+    equal dest 0
+    store it into it
+    if compare it 0
+        return
+    end
+    equal src 0
+    store it into it
+    if compare it 0
+        return
+    end
+
+    # Determine copy direction based on overlap.
+    # If dest > src, the regions overlap with dest after src.
+    # A forward copy would overwrite source bytes before reading them,
+    # so we must copy backwards (from count-1 down to 0).
+    greater dest src
+    store it into it
+    if compare it 0
+        # No overlap (dest <= src): forward copy is safe.
+        # Behaves identically to memcpy.
+        store 0 into i
+        while less i count
+            load src at i
+            store it into byte_val
+            store byte_val into dest at i
+            add i 1
+            store it into i
+        end
+    else
+        # Overlapping with dest after src: copy backwards.
+        # Start at the last byte and work toward the first.
+        subtract count 1
+        store it into i
+        while greater_or_equal i 0
+            # Load byte from source at offset i.
+            load src at i
+            store it into byte_val
+
+            # Store byte at destination at offset i.
+            store byte_val into dest at i
+
+            # Decrement counter.
+            subtract i 1
+            store it into i
+        end
+    end
+end
+
+# ============================================================================
+# End of memory.jstr -- Memory Management Module for Jasterish Micro-Kernel
+# ============================================================================
+# Module Summary:
+#   - PMM: Bitmap-based physical page frame allocator
+#     * pmm_init, pmm_alloc, pmm_alloc_zeroed, pmm_free, pmm_get_free
+#   - VMM: x86-64 4-level page table manager
+#     * vmm_init, vmm_get_pml4/pdp/pd/pt_index
+#     * vmm_walk_page_table, vmm_map_page, vmm_unmap_page, vmm_virt_to_phys
+#   - Heap: First-fit block allocator with coalescing
+#     * heap_init, kmalloc, kfree
+#   - Utilities: Low-level memory primitives
+#     * memset, memcpy, memmove
+# ============================================================================

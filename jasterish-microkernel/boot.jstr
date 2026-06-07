@@ -1,0 +1,956 @@
+###############################################################################
+# boot.jstr -- Jasterish Micro-Kernel: Boot & Core Module
+#
+# This module provides the bare-metal boot sequence, serial driver, CPU
+# initialization, and panic handler for the Jasterish Micro-Kernel.
+#
+# Components:
+#   - Multiboot2 header for compliant boot loaders
+#   - Kernel entry point with stack setup
+#   - COM1 serial port driver (115200 baud, 8N1)
+#   - Global Descriptor Table (GDT) initialization
+#   - CPU halt and idle routines
+#   - Panic handler with register dump
+###############################################################################
+
+# =============================================================================
+# Section 1: Global Constants
+# =============================================================================
+# All constants are declared as global variables. These define the fundamental
+# hardware and kernel parameters used throughout the boot sequence.
+
+# COM1 serial port base I/O address. The UART registers are accessed at
+# offsets from this base: data=+0, IER=+1, FCR=+2, LCR=+3, LSR=+5.
+global COM1_PORT
+store 0x3F8 into COM1_PORT
+
+# Size of a single memory page in bytes. The x86-64 architecture uses
+# 4 KiB pages for memory management.
+global PAGE_SIZE
+store 4096 into PAGE_SIZE
+
+# Size of the kernel stack in bytes. Each process gets an 8 KiB stack.
+global STACK_SIZE
+store 8192 into STACK_SIZE
+
+# Size of the kernel heap in bytes (1 MiB). Used for dynamic allocations
+# before the full memory manager is initialized.
+global HEAP_SIZE
+store 1048576 into HEAP_SIZE
+
+# Maximum number of processes supported by the scheduler.
+global MAX_PROCS
+store 256 into MAX_PROCS
+
+# Size of an inter-process message in bytes.
+global MSG_SIZE
+store 64 into MSG_SIZE
+
+# Virtual base address where the kernel is mapped in higher half memory.
+# The kernel lives at 0xFFFFFFFF80000000 and above.
+global KERNEL_VIRT_BASE
+store 0xFFFFFFFF80000000 into KERNEL_VIRT_BASE
+
+# =============================================================================
+# Section 2: Global State Variables
+# =============================================================================
+
+# Kernel stack bottom address. The stack grows downward from stack_top,
+# which is computed as stack_bottom + STACK_SIZE.
+global stack_bottom
+store 0 into stack_bottom
+
+# Flag indicating whether the serial port has been initialized.
+# Non-zero means serial is ready for output.
+global serial_ready
+store 0 into serial_ready
+
+# Multiboot2 info pointer passed by the bootloader in EBX.
+# Saved here early in _start before any function calls.
+global multiboot_info_ptr
+store 0 into multiboot_info_ptr
+
+# The Global Descriptor Table entries array. We need 7 entries:
+#   [0] Null descriptor (required by x86 architecture)
+#   [1] Kernel code segment
+#   [2] Kernel data segment
+#   [3] User code segment
+#   [4] User data segment
+#   [5] TSS descriptor (low 8 bytes)
+#   [6] TSS descriptor (high 8 bytes)
+global gdt_entries
+array 7 gdt_entries
+
+# GDT descriptor structure used by the lgdt instruction.
+# This is a 10-byte structure: 2 bytes limit, 8 bytes base address.
+global gdt_descriptor
+array 2 gdt_descriptor
+
+# Task State Segment for x86-64 long mode.
+# Minimum size is 104 bytes. Key field is RSP0 at offset 4.
+global tss_structure
+array 13 tss_structure
+
+# TSS stack for ring 0 interrupts when in user mode
+global tss_stack
+array 4096 tss_stack
+
+###############################################################################
+# Function: _start
+# -----------------------------------------------------------------------------
+# Kernel entry point. This is the very first code executed after the boot
+# loader jumps to the kernel. We set up the Multiboot2 header so the boot
+# loader recognizes us, then initialize the stack, disable interrupts, and
+# hand off to kernel_main.
+###############################################################################
+
+_start
+    # -------------------------------------------------------------------------
+    # Multiboot2 Header
+    # -------------------------------------------------------------------------
+    # The Multiboot2 header must appear within the first 32768 bytes of the
+    # kernel image and aligned to a 64-bit boundary. The boot loader (GRUB2,
+    # etc.) searches for the magic number 0xE85250D6 to find this header.
+    #
+    # Header format:
+    #   Offset 0:  magic        = 0xE85250D6
+    #   Offset 4:  architecture = 0          (i386 protected mode / x86)
+    #   Offset 8:  header_length = 24        (size of header in bytes)
+    #   Offset 12: checksum     = -(magic + arch + length) mod 2^32
+    #
+    # The checksum ensures: magic + arch + length + checksum = 0 (mod 2^32)
+    # -------------------------------------------------------------------------
+
+    # Compute checksum: checksum = 0 - (magic + architecture + header_length)
+    # First compute magic + architecture
+    add 0xE85250D6 0
+    store it into a mb_sum
+    # Add header_length = 24
+    add mb_sum 24
+    store it into mb_sum
+    # Negate to get checksum: checksum = 0 - mb_sum
+    subtract 0 mb_sum
+    store it into a mb_checksum
+
+    # Emit the Multiboot2 header in memory
+    # Store magic at the beginning of the header
+    store 0xE85250D6 into a mb_header at 0
+    # Store architecture (0 = i386)
+    store 0 into mb_header at 1
+    # Store header length (24 bytes)
+    store 24 into mb_header at 2
+    # Store computed checksum
+    store mb_checksum into mb_header at 3
+
+    # -------------------------------------------------------------------------
+    # Early Boot Setup
+    # -------------------------------------------------------------------------
+    # The boot loader has loaded us into memory and jumped to _start.
+    # We must now set up a valid stack before we can call any functions.
+    # The stack grows downward, so RSP starts at stack_bottom + STACK_SIZE.
+
+    # Compute stack_top = stack_bottom + STACK_SIZE
+    load stack_bottom
+    add it STACK_SIZE
+    store it into a stack_top
+
+    # Set the stack pointer register (RSP) to stack_top
+    # This is done via inline register assignment
+    store stack_top into register rsp
+
+    # -------------------------------------------------------------------------
+    # Save Multiboot2 Info Pointer
+    # -------------------------------------------------------------------------
+    # The bootloader passes the multiboot info pointer in the EBX register.
+    # We must save it before any function calls clobber EBX.
+    inline "mov rax, rbx"
+    store register rax into multiboot_info_ptr
+
+    # -------------------------------------------------------------------------
+    # Disable Interrupts
+    # -------------------------------------------------------------------------
+    # We must disable interrupts immediately. The interrupt descriptor table
+    # (IDT) has not been set up yet, so any interrupt would cause a triple
+    # fault. We use the CLI instruction to clear the interrupt enable flag.
+    inline "cli"
+
+    # -------------------------------------------------------------------------
+    # Initialize Serial Output
+    # -------------------------------------------------------------------------
+    # Initialize the serial port early so we can print diagnostic messages
+    # if anything goes wrong during boot.
+    call serial_init
+
+    # -------------------------------------------------------------------------
+    # Initialize the Global Descriptor Table
+    # -------------------------------------------------------------------------
+    # Set up a proper GDT with kernel and user segments before entering
+    # the main kernel code. This establishes the flat memory model.
+    call gdt_init
+
+    # -------------------------------------------------------------------------
+    # Initialize the Task State Segment
+    # -------------------------------------------------------------------------
+    # The TSS provides the kernel stack pointer (RSP0) for interrupts
+    # that occur while running in ring 3 (user mode).
+    call tss_init
+
+    # -------------------------------------------------------------------------
+    # Hand off to the kernel main function
+    # -------------------------------------------------------------------------
+    # kernel_main is the C (or Jasterish) entry point for the rest of the
+    # kernel initialization: memory management, process scheduler, etc.
+    # Pass the multiboot info pointer as an argument.
+    call kernel_main multiboot_info_ptr
+
+    # -------------------------------------------------------------------------
+    # Halt Forever (should never reach here)
+    # -------------------------------------------------------------------------
+    # If kernel_main somehow returns, we halt the CPU. This is a safety net.
+_start_halt_loop
+    inline "cli"
+    inline "hlt"
+    jump _start_halt_loop
+
+    return 0
+
+###############################################################################
+# Function: serial_init
+# -----------------------------------------------------------------------------
+# Initialize the COM1 serial port for 115200 baud, 8 data bits, no parity,
+# 1 stop bit (8N1). This allows early kernel output before the framebuffer
+# or other display drivers are available.
+#
+# UART initialization sequence:
+#   1. Disable interrupts during setup
+#   2. Enable DLAB (divisor latch access bit) to set baud rate
+#   3. Set divisor to 1 for 115200 baud
+#   4. Configure line control (8N1)
+#   5. Enable FIFO buffers
+#   6. Re-enable interrupts
+###############################################################################
+
+serial_init
+    # Save the UART register offsets as local variables for clarity
+    a UART_DATA
+    store COM1_PORT into UART_DATA
+
+    a UART_IER
+    add COM1_PORT 1
+    store it into UART_IER
+
+    a UART_FCR
+    add COM1_PORT 2
+    store it into UART_FCR
+
+    a UART_LCR
+    add COM1_PORT 3
+    store it into UART_LCR
+
+    a UART_LSR
+    add COM1_PORT 5
+    store it into UART_LSR
+
+    a UART_DLL
+    store COM1_PORT into UART_DLL
+
+    a UART_DLH
+    add COM1_PORT 1
+    store it into UART_DLH
+
+    # Step 1: Disable all interrupts during initialization
+    # Write 0x00 to the Interrupt Enable Register
+    store 0x00 into port UART_IER
+
+    # Step 2: Enable DLAB (Divisor Latch Access Bit)
+    # Set bit 7 of LCR to 1. This maps the DATA and IER registers to
+    # DLL (divisor low) and DLH (divisor high) respectively.
+    store 0x80 into port UART_LCR
+
+    # Step 3: Set baud rate divisor to 1 for 115200 baud
+    # Divisor = 115200 / desired_baud. For 115200 baud, divisor = 1.
+    # DLL = low byte of divisor = 1
+    store 1 into port UART_DLL
+    # DLH = high byte of divisor = 0
+    store 0 into port UART_DLH
+
+    # Step 4: Configure line control
+    # LCR = 0x03 means:
+    #   bits [1:0] = 11b = 8-bit word length
+    #   bit  2     = 0   = 1 stop bit
+    #   bits [5:3] = 000 = no parity
+    #   bit  7     = 0   = DLAB off (normal register access)
+    store 0x03 into port UART_LCR
+
+    # Step 5: Enable FIFO (First-In-First-Out) buffers
+    # FCR = 0xC7 means:
+    #   bit 0 = 1 = enable FIFO
+    #   bit 1 = 1 = clear receiver FIFO
+    #   bit 2 = 1 = clear transmitter FIFO
+    #   bits [7:6] = 11b = 14-byte trigger level
+    store 0xC7 into port UART_FCR
+
+    # Step 6: Enable receiver data available interrupt
+    # IER = 0x01 enables the "received data available" interrupt
+    store 0x01 into port UART_IER
+
+    # Mark the serial port as initialized
+    store 1 into serial_ready
+
+    # Print a confirmation message
+    print "[serial] COM1 initialized at 115200 baud 8N1"
+
+    return 0
+
+###############################################################################
+# Function: serial_putc(char c)
+# -----------------------------------------------------------------------------
+# Write a single character to the COM1 serial port.
+# Waits for the transmitter holding register to be empty before sending.
+# Automatically converts '\n' to '\r\n' for proper terminal display.
+#
+# Parameters:
+#   c - The ASCII character to send (byte value)
+###############################################################################
+
+serial_putc
+    a c
+    # Parameter c is passed in register it; save it locally
+    store it into c
+
+    # -------------------------------------------------------------------------
+    # Wait for Transmitter Holding Register Empty
+    # -------------------------------------------------------------------------
+    # Read the Line Status Register (LSR) at COM1_PORT + 5
+    # Bit 5 (THRE) = 1 when the transmitter holding register is empty
+    # We loop until this bit is set.
+
+    a lsr_addr
+    add COM1_PORT 5
+    store it into lsr_addr
+
+_serial_putc_wait_loop
+    # Read LSR
+    load from port lsr_addr
+    store it into a lsr_value
+
+    # Mask bit 5: THRE (Transmitter Holding Register Empty)
+    bitwise_and lsr_value 0x20
+    store it into a thre_ready
+
+    # If bit 5 is zero, keep waiting
+    if equal thre_ready 0
+        jump _serial_putc_wait_loop
+    end
+
+    # -------------------------------------------------------------------------
+    # Write Character to Data Port
+    # -------------------------------------------------------------------------
+    store c into port COM1_PORT
+
+    # -------------------------------------------------------------------------
+    # Handle Newline Conversion
+    # -------------------------------------------------------------------------
+    # If the character is '\n' (0x0A), also send '\r' (0x0D)
+    if equal c 10
+        a lsr_addr2
+        add COM1_PORT 5
+        store it into lsr_addr2
+
+    _serial_putc_cr_wait
+        load from port lsr_addr2
+        store it into a lsr_value2
+        bitwise_and lsr_value2 0x20
+        store it into a thre_ready2
+        if equal thre_ready2 0
+            jump _serial_putc_cr_wait
+        end
+
+        # Send carriage return (0x0D)
+        store 13 into port COM1_PORT
+    end
+
+    return 0
+
+###############################################################################
+# Function: serial_puts(string s)
+# -----------------------------------------------------------------------------
+# Write a null-terminated string to the serial port.
+# Iterates through each character and calls serial_putc until the null
+# terminator (byte value 0) is encountered.
+#
+# Parameters:
+#   s - Address of the null-terminated string
+###############################################################################
+
+serial_puts
+    a s
+    # Parameter s (address) is passed in it; save locally
+    store it into s
+
+    # Initialize character index
+    a idx
+    store 0 into idx
+
+_serial_puts_loop
+    # Load the current character: s[idx]
+    load s at idx
+    store it into a ch
+
+    # Check for null terminator (byte value 0)
+    if equal ch 0
+        jump _serial_puts_done
+    end
+
+    # Call serial_putc with the current character (pass via it)
+    load ch
+    call serial_putc
+
+    # Increment index and continue
+    add idx 1
+    store it into idx
+    jump _serial_puts_loop
+
+_serial_puts_done
+    return 0
+
+###############################################################################
+# Function: serial_print_hex(long value)
+# -----------------------------------------------------------------------------
+# Print a 64-bit value as hexadecimal with a "0x" prefix.
+# Prints exactly 16 hex digits, including leading zeros.
+# Example: serial_print_hex(255) prints "0x00000000000000FF"
+#
+# Parameters:
+#   value - The 64-bit unsigned integer to print
+###############################################################################
+
+serial_print_hex
+    a value
+    # Parameter value is passed in register it; save it locally
+    store it into value
+
+    # Print the "0x" prefix
+    print "0x"
+
+    # Process all 16 nibbles from most significant to least significant.
+    # We use a loop counter that goes from 15 down to 0.
+    a nibble_pos
+    store 15 into nibble_pos
+
+_serial_hex_loop
+    # Compute right shift amount: (15 - nibble_pos) * 4
+    a shift_amount
+    subtract 15 nibble_pos
+    multiply it 4
+    store it into shift_amount
+
+    # Shift value right by shift_amount
+    shift_right value shift_amount
+    store it into a shifted_val
+
+    # Mask the low 4 bits to get the nibble value (0-15)
+    bitwise_and shifted_val 0x0F
+    store it into a nibble_val
+
+    # Convert nibble (0-15) to ASCII character
+    # If nibble_val < 10: char = '0' + nibble_val = 0x30 + nibble_val
+    # If nibble_val >= 10: char = 'A' + (nibble_val - 10) = 0x41 + nibble_val - 10
+    if less nibble_val 10
+        add 0x30 nibble_val
+        store it into a hex_char
+    else
+        add 0x41 nibble_val
+        store it into a hex_temp
+        subtract hex_temp 10
+        store it into hex_char
+    end
+
+    # Send the hex character via serial_putc
+    load hex_char
+    call serial_putc
+
+    # Decrement nibble position
+    subtract nibble_pos 1
+    store it into nibble_pos
+
+    # Continue loop while nibble_pos >= 0
+    # Since Jasterish uses unsigned, we loop while nibble_pos < 16 (wrap check)
+    # A simpler approach: check if we have processed 16 digits
+    if greater nibble_pos 4294967295
+        jump _serial_hex_loop
+    end
+
+    return 0
+
+###############################################################################
+# Function: serial_print_dec(int value)
+# -----------------------------------------------------------------------------
+# Print a 32-bit signed integer as decimal text.
+# Handles negative numbers by printing a '-' prefix and negating.
+# Uses repeated division by 10 to extract digits in reverse order,
+# then prints them from most significant to least significant.
+#
+# Parameters:
+#   value - The 32-bit signed integer to print
+###############################################################################
+
+serial_print_dec
+    a value
+    # Parameter value is passed in register it; save it locally
+    store it into value
+
+    # -------------------------------------------------------------------------
+    # Handle Negative Numbers
+    # -------------------------------------------------------------------------
+    if less value 0
+        # Print minus sign
+        print "-"
+        # Negate: value = 0 - value
+        subtract 0 value
+        store it into value
+    end
+
+    # -------------------------------------------------------------------------
+    # Special Case: Zero
+    # -------------------------------------------------------------------------
+    if equal value 0
+        print "0"
+        return 0
+    end
+
+    # -------------------------------------------------------------------------
+    # Extract Digits via Division
+    # -------------------------------------------------------------------------
+    # Repeatedly divide by 10 and collect remainders (digits).
+    # A 32-bit unsigned integer has at most 10 decimal digits.
+
+    # Temporary digit buffer (max 10 digits, use 16 for safety)
+    array 16 digit_buf
+
+    a num_digits
+    store 0 into num_digits
+
+    a remaining
+    store value into remaining
+
+_serial_dec_extract_loop
+    # Divide remaining by 10
+    divide remaining 10
+    store it into a quotient
+
+    # remainder = remaining - (quotient * 10)
+    multiply quotient 10
+    store it into a product
+    subtract remaining product
+    store it into a digit
+
+    # Store digit in buffer at current position
+    store digit into digit_buf at num_digits
+
+    # Increment digit count
+    add num_digits 1
+    store it into num_digits
+
+    # Update remaining for next iteration
+    store quotient into remaining
+
+    # Continue if remaining > 0
+    if greater remaining 0
+        jump _serial_dec_extract_loop
+    end
+
+    # -------------------------------------------------------------------------
+    # Print Digits in Reverse Order
+    # -------------------------------------------------------------------------
+    # Digits were stored LSB first, so print from (num_digits-1) down to 0.
+
+    a print_idx
+    subtract num_digits 1
+    store it into print_idx
+
+_serial_dec_print_loop
+    # Load digit from buffer at print_idx
+    load digit_buf at print_idx
+    store it into a digit_to_print
+
+    # Convert digit (0-9) to ASCII '0'-'9'
+    add 0x30 digit_to_print
+    store it into a ascii_digit
+
+    # Send the ASCII digit via serial_putc
+    load ascii_digit
+    call serial_putc
+
+    # Decrement index
+    subtract print_idx 1
+    store it into print_idx
+
+    # Continue while print_idx >= 0 (unsigned wrap check)
+    if greater print_idx 4294967295
+        jump _serial_dec_print_loop
+    end
+
+    return 0
+
+###############################################################################
+# Function: gdt_init
+# -----------------------------------------------------------------------------
+# Set up a minimal Global Descriptor Table with 6 entries:
+#
+#   Entry 0: Null descriptor (required, all zeros)
+#   Entry 1: Kernel code segment (base=0, limit=0xFFFFF, type=0x9A)
+#   Entry 2: Kernel data segment (base=0, limit=0xFFFFF, type=0x92)
+#   Entry 3: User code segment   (base=0, limit=0xFFFFF, type=0xFA)
+#   Entry 4: User data segment   (base=0, limit=0xFFFFF, type=0xF2)
+#   Entry 5: TSS descriptor (64-bit system segment)
+#
+# In long mode, GDT entries use a simplified flat model encoding.
+# Each non-null entry is encoded as a 64-bit value.
+# After setting up the entries, we load the GDT via lgdt and reload
+# all segment registers to use the new descriptors.
+###############################################################################
+
+gdt_init
+    # -------------------------------------------------------------------------
+    # Entry 0: Null Descriptor (all zeros)
+    # -------------------------------------------------------------------------
+    # The x86 architecture requires the first GDT entry to be all zeros.
+    store 0 into gdt_entries at 0
+
+    # -------------------------------------------------------------------------
+    # Entry 1: Kernel Code Segment
+    # -------------------------------------------------------------------------
+    # Type byte 0x9A = 10011010b:
+    #   P=1 (present), DPL=00 (ring 0), S=1 (code/data), Type=1010
+    #   Type=1010: code segment, execute/read, non-conforming
+    # In long mode, the encoding for a 64-bit ring 0 code segment is:
+    #   0x00AF9A000000FFFF
+    store 0x00AF9A000000FFFF into gdt_entries at 1
+
+    # -------------------------------------------------------------------------
+    # Entry 2: Kernel Data Segment
+    # -------------------------------------------------------------------------
+    # Type byte 0x92 = 10010010b:
+    #   P=1 (present), DPL=00 (ring 0), S=1 (code/data), Type=0010
+    #   Type=0010: data segment, read/write, expand-up
+    # Data segment in long mode: 0x00AF92000000FFFF
+    store 0x00AF92000000FFFF into gdt_entries at 2
+
+    # -------------------------------------------------------------------------
+    # Entry 3: User Code Segment
+    # -------------------------------------------------------------------------
+    # Type byte 0xFA = 11111010b:
+    #   P=1 (present), DPL=11 (ring 3), S=1 (code/data), Type=1010
+    # User (ring 3) code segment: 0x00AFFA000000FFFF
+    store 0x00AFFA000000FFFF into gdt_entries at 3
+
+    # -------------------------------------------------------------------------
+    # Entry 4: User Data Segment
+    # -------------------------------------------------------------------------
+    # Type byte 0xF2 = 11110010b:
+    #   P=1 (present), DPL=11 (ring 3), S=1 (code/data), Type=0010
+    # User (ring 3) data segment: 0x00AFF2000000FFFF
+    store 0x00AFF2000000FFFF into gdt_entries at 4
+
+    # -------------------------------------------------------------------------
+    # Load the GDT Descriptor and Issue lgdt
+    # -------------------------------------------------------------------------
+    # The GDT descriptor (operand to lgdt) has this format:
+    #   Offset 0: limit = (number of entries * 8) - 1
+    #   Offset 2: base  = address of gdt_entries array
+
+    # Compute limit: (7 entries * 8 bytes) - 1 = 55
+    a gdt_limit
+    multiply 7 8
+    store it into a gdt_size_bytes
+    subtract gdt_size_bytes 1
+    store it into gdt_limit
+
+    # Store limit in the first element of gdt_descriptor
+    store gdt_limit into gdt_descriptor at 0
+
+    # Store base address of gdt_entries in the second element
+    store gdt_entries into gdt_descriptor at 1
+
+    # Issue the lgdt instruction using inline assembly
+    inline "lgdt [gdt_descriptor]"
+
+    # -------------------------------------------------------------------------
+    # Reload Segment Registers
+    # -------------------------------------------------------------------------
+    # After loading a new GDT, all segment registers must be reloaded
+    # to reference the new descriptors. We use:
+    #   CS (code segment)  = 0x08  (entry 1, kernel code, RPL=0)
+    #   DS, ES, FS, GS, SS = 0x10  (entry 2, kernel data, RPL=0)
+
+    # Load DS, ES, FS, GS, SS with kernel data selector (0x10)
+    inline "mov ax, 0x10"
+    inline "mov ds, ax"
+    inline "mov es, ax"
+    inline "mov fs, ax"
+    inline "mov gs, ax"
+    inline "mov ss, ax"
+
+    # Reload CS via a far return. We push the new CS selector (0x08)
+    # and the address of the instruction after the reload, then retfq.
+    inline "push 0x08"
+    inline "lea rax, [rip + _gdt_reload_cs_done]"
+    inline "push rax"
+    inline "retfq"
+
+_gdt_reload_cs_done
+    # At this point all segment registers use our GDT descriptors.
+
+    print "[gdt] GDT loaded: null, kcode, kdata, ucode, udata, tss"
+
+    return 0
+
+###############################################################################
+# Function: tss_init
+# -----------------------------------------------------------------------------
+# Initialize the Task State Segment (TSS) for x86-64 long mode.
+# The TSS provides the kernel stack pointer (RSP0) that the CPU uses
+# when an interrupt occurs while running in ring 3 (user mode).
+#
+# The TSS structure (104 bytes minimum):
+#   Offset 0x00: reserved (u32)
+#   Offset 0x04: RSP0 (u64) — kernel stack for ring 3 interrupts
+#   Offset 0x0C: RSP1 (u64)
+#   Offset 0x14: RSP2 (u64)
+#   Offset 0x1C: reserved (u64)
+#   Offset 0x24: IST1 (u64)
+#   ... (IST2-7)
+#   Offset 0x64: reserved (u16)
+#   Offset 0x66: I/O map base (u16)
+#
+# We only care about RSP0. All other fields are zero.
+###############################################################################
+
+tss_init
+    a i
+    a tss_base
+    a tss_limit
+    a tss_desc_low
+    a tss_desc_high
+    a tss_base_low
+    a tss_access
+    a tss_base_high
+    a tss_rsp0
+    a tss_rsp0_addr
+
+    # Zero the entire TSS structure (13 qwords = 104 bytes).
+    store 0 into i
+    while less i 13
+        store 0 into tss_structure at i
+        add i 1
+        store it into i
+    end
+
+    # Set RSP0 to the top of the dedicated TSS stack.
+    add tss_stack 4096
+    store it into tss_rsp0
+    subtract tss_rsp0 8
+    store it into tss_rsp0
+
+    # RSP0 resides at byte offset 4 in the TSS.
+    add tss_structure 4
+    store it into tss_rsp0_addr
+    store tss_rsp0 into tss_rsp0_addr at 0
+
+    # Build the 16-byte TSS descriptor (split across two GDT entries).
+    store tss_structure into tss_base
+    store 103 into tss_limit
+
+    # Lower qword: limit[15:0] | base[23:0]<<16 | access<<40 | base[31:24]<<56
+    store tss_limit into tss_desc_low
+    bitwise_and tss_desc_low 0xFFFF
+    store it into tss_desc_low
+
+    bitwise_and tss_base 0xFFFFFF
+    shift_left it 16
+    store it into tss_base_low
+    bitwise_or tss_desc_low tss_base_low
+    store it into tss_desc_low
+
+    store 0x89 into tss_access
+    shift_left tss_access 40
+    store it into tss_access
+    bitwise_or tss_desc_low tss_access
+    store it into tss_desc_low
+
+    shift_right tss_base 24
+    bitwise_and it 0xFF
+    shift_left it 56
+    store it into tss_base_high
+    bitwise_or tss_desc_low tss_base_high
+    store it into tss_desc_low
+
+    # Upper qword: base[63:32]
+    shift_right tss_base 32
+    bitwise_and it 0xFFFFFFFF
+    store it into tss_desc_high
+
+    store tss_desc_low into gdt_entries at 5
+    store tss_desc_high into gdt_entries at 6
+
+    # Load the Task Register with selector 0x28 (entry 5, RPL=0).
+    inline "mov ax, 0x28"
+    inline "ltr ax"
+
+    print "[tss] TSS initialized and TR loaded with 0x28"
+    return 0
+
+###############################################################################
+# Function: cpu_halt
+# -----------------------------------------------------------------------------
+# Halt the CPU until the next interrupt arrives.
+# Used for irrecoverable conditions. We disable interrupts briefly to
+# prevent a race where an interrupt arrives between CLI and HLT, then
+# re-enable and halt so NMIs can still wake us.
+###############################################################################
+
+cpu_halt
+    # Disable interrupts to prevent a race condition
+    inline "cli"
+
+    # Re-enable so NMI or other interrupts can wake us
+    inline "sti"
+
+    # Halt the CPU until an interrupt occurs
+    inline "hlt"
+
+    return 0
+
+###############################################################################
+# Function: cpu_idle
+# -----------------------------------------------------------------------------
+# The kernel idle loop. Called when no process is ready to run.
+# Enables interrupts and halts the CPU, waiting for the next timer
+# interrupt or I/O event to wake the scheduler.
+# This function never returns -- it loops forever.
+###############################################################################
+
+cpu_idle
+_cpu_idle_loop
+    # Enable interrupts
+    inline "sti"
+
+    # Halt until the next interrupt fires
+    inline "hlt"
+
+    # After waking, loop back to STI + HLT again.
+    # If the scheduler found no runnable process, we return here.
+    jump _cpu_idle_loop
+
+    # Unreachable
+    return 0
+
+###############################################################################
+# Function: panic(string msg)
+# -----------------------------------------------------------------------------
+# Kernel panic handler. Called when an unrecoverable error is detected.
+# Prints "KERNEL PANIC: " followed by the error message, dumps the
+# current register state, disables interrupts, and halts forever.
+#
+# Parameters:
+#   msg - Null-terminated string describing the panic reason
+###############################################################################
+
+panic
+    a msg
+    # Parameter msg (string address) is passed in it; save locally
+    store it into msg
+
+    # -------------------------------------------------------------------------
+    # Print Panic Header
+    # -------------------------------------------------------------------------
+    print "\n\n"
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print "!!"
+    print "!!  KERNEL PANIC: "
+
+    # Print the caller-provided panic message
+    load msg
+    call serial_puts
+
+    print ""
+    print "!!"
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print "\n"
+
+    # -------------------------------------------------------------------------
+    # Register Dump
+    # -------------------------------------------------------------------------
+    # Capture and print key CPU registers to aid debugging.
+    print "--- Register Dump ---\n"
+
+    # RIP: Use a label-based approach to get a near approximation
+    print "RIP: "
+    # Load the address of a known label as a proxy for RIP
+    # In a real implementation, RIP would be captured from the stack
+    # (return address) or via special handling.
+    store 0 into a reg_rip
+    load reg_rip
+    call serial_print_hex
+    print "\n"
+
+    # RSP: Stack pointer
+    print "RSP: "
+    inline "mov rax, rsp"
+    store register rax into a reg_rsp
+    load reg_rsp
+    call serial_print_hex
+    print "\n"
+
+    # RAX: Accumulator register
+    print "RAX: "
+    store register rax into a reg_rax
+    load reg_rax
+    call serial_print_hex
+    print "\n"
+
+    # RBX: Base register
+    print "RBX: "
+    inline "mov rax, rbx"
+    store register rax into a reg_rbx
+    load reg_rbx
+    call serial_print_hex
+    print "\n"
+
+    # RCX: Count register
+    print "RCX: "
+    inline "mov rax, rcx"
+    store register rax into a reg_rcx
+    load reg_rcx
+    call serial_print_hex
+    print "\n"
+
+    # RDX: Data register
+    print "RDX: "
+    inline "mov rax, rdx"
+    store register rax into a reg_rdx
+    load reg_rdx
+    call serial_print_hex
+    print "\n"
+
+    # Final separator
+    print "\n--- System halted ---\n"
+
+    # -------------------------------------------------------------------------
+    # Halt Forever
+    # -------------------------------------------------------------------------
+_panic_halt_loop
+    inline "cli"
+    inline "hlt"
+    jump _panic_halt_loop
+
+    return 0
+
+###############################################################################
+# End of boot.jstr
+###############################################################################
+# This module provides the foundational infrastructure for the Jasterish
+# Micro-Kernel. Once boot.jstr completes, the kernel transitions to
+# kernel_main for higher-level initialization.
+###############################################################################

@@ -1,0 +1,36 @@
+# Alpaca-Style Instruction Tuning and Foundation Datasets (Base Knowledge)
+
+Alpaca (Stanford) and its derivatives (Dolly, OpenOrca, FLAN, ShareGPT) are foundational for instruction-following LLMs. They use self-instruct or human-written prompts to create (instruction, input, output) triples.
+
+## Standard Format
+{
+  "instruction": "Explain how to support someone experiencing executive dysfunction.",
+  "input": "The person struggles to start tasks even when they want to.",
+  "output": "Validate that this is a common neurobiological experience related to dopamine and task initiation barriers. Suggest externalizing the start with body doubling, the 2-minute rule, or breaking into micro-steps. Offer to co-create a tiny first action together."
+}
+
+## Key Techniques from the Ecosystem
+- Self-Instruct: Use a strong model to generate diverse instructions from seed tasks, then filter and label.
+- Evol-Instruct: Evolve instructions to be more complex (WizardLM style).
+- Data quality > quantity: Prefer high-quality, diverse, multi-turn conversations over noisy web data.
+- For causal LM fine-tuning: Concatenate as "### Instruction:\n{instr}\n### Input:\n{in}\n### Response:\n{out}" and train with next-token prediction (ignore instruction tokens in loss sometimes).
+- Evaluation: Use MT-Bench, AlpacaEval, or human preference for helpfulness/harmlessness.
+
+## Tried-and-Tested Recipes
+1. Start with a capable base (Llama-3, Mistral, Gemma).
+2. SFT on 10k-100k high-quality instructions (Alpaca 52k cleaned, OpenOrca, UltraChat).
+3. Optional: DPO/RLHF or ORPO on preference data for alignment.
+4. Use TRL library's SFTTrainer for easy implementation:
+   from trl import SFTTrainer
+   trainer = SFTTrainer(model, train_dataset=dataset, dataset_text_field="text", ...)
+
+## Application to Neurodivergence
+Curate or generate instructions around:
+- Translating masking experiences into self-advocacy scripts.
+- Pattern recognition for sensory needs or burnout precursors.
+- Coaching responses that are direct, non-patronizing, and autonomy-respecting (Jasterish-aligned).
+- Technical: How to build local, private neuro-support tools using Transformers + PEFT + custom vector embeddings.
+
+These foundation techniques, when mixed with domain-specific neurodivergence data (behavioral patterns, practitioner responses, performance optimization), create robust base models before further specialization or alignment.
+
+Always prioritize consent, privacy, and avoidance of pathologizing language in the resulting model behavior.

@@ -1,0 +1,60 @@
+# PEFT (Parameter-Efficient Fine-Tuning) - LoRA and Adapters (Foundation Knowledge)
+
+PEFT enables fine-tuning large models on limited hardware by updating only a small number of parameters (often <1%).
+
+## Core PEFT Techniques
+- LoRA (Low-Rank Adaptation): The most popular. Adds low-rank matrices to attention weights.
+  from peft import LoraConfig, get_peft_model
+  config = LoraConfig(
+      r=16,  # rank
+      lora_alpha=32,
+      target_modules=["q_proj", "v_proj"],  # for Llama/Mistral
+      lora_dropout=0.05,
+      bias="none",
+      task_type="CAUSAL_LM"
+  )
+  model = get_peft_model(base_model, config)
+  model.print_trainable_parameters()  # Shows only ~0.1-1% params trainable
+
+- Other methods: Prefix Tuning, P-Tuning, Prompt Tuning, AdaLoRA, IA3.
+
+## Training with PEFT + Transformers
+Combine with SFTTrainer from TRL or standard Trainer:
+from peft import LoraConfig, get_peft_model
+from transformers import Trainer, TrainingArguments
+
+peft_config = LoraConfig(...)
+model = get_peft_model(model, peft_config)
+
+training_args = TrainingArguments(
+    output_dir="./neuro-peft-model",
+    num_train_epochs=3,
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=4,
+    learning_rate=2e-4,
+    fp16=True,
+)
+
+trainer = Trainer(model=model, args=training_args, train_dataset=dataset)
+trainer.train()
+
+# Save adapter only (tiny size!)
+model.save_pretrained("./neuro-adapter")
+# Later: base_model + adapter via PeftModel.from_pretrained(base, "./neuro-adapter")
+
+## Merging and Inference
+- Merge for deployment: model = model.merge_and_unload()  # Then save full model if needed.
+- For inference with adapters without merge: use PeftModel for dynamic loading.
+
+## Best Practices (Tried and Tested)
+- Target modules: For Llama-2/3: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+- r=8-64, alpha=2*r often works well.
+- Use 4-bit base (bitsandbytes) + LoRA for 7B-70B models on single GPU.
+- For neurodivergence tasks: LoRA on a base like Mistral-7B or Phi-3 on curated datasets of lived experiences, coping strategies, and affirming coaching dialogues.
+- Hyperparams: lr=1e-4 to 3e-4, epochs 1-5 for adapters (they converge fast).
+- Multiple adapters: Train separate LoRAs for different neurotypes (ADHD coaching, autism sensory support) and switch at inference.
+
+## Integration with Neurodivergence LLM Pipeline
+Use PEFT to efficiently adapt your MorphlexLLM or standard Transformers models on the neuro-specific vector datasets compiled via morphlex pipeline. This allows on-device or sovereign fine-tuning without full model retraining.
+
+PEFT + Transformers + your custom JStar/Morphlex stack forms a powerful, efficient foundation for accessible AI tools.

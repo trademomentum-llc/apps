@@ -57,3 +57,38 @@ logs/
 rr_db.json
 .qwen/
 .cache_jstar_target/
+
+# Session / build / debug junk (generated during long AI session)
+.cache/
+*.png
+Dockerfile
+Dockerfile.fixed
+*.iso
+*.qcow2
+*.log
+core
+*.core
+qemu_*
+jstar/jstar_macos
+jstar_bootstrap_out/
+primitives_*.md
+primitives_passing.txt
+primitives_proposed_additions.txt
+plan.md
+error.txt
+exports/
+include/
+jasterish-microkernel/   # if this is build output; keep source if intentional
+docs/2026-*-*.md   # generated design specs from session
+scripts/*_darwin.sh
+scripts/*_trace.sh.bak
+scripts/binary_footprint_analyzer.py
+scripts/chained_source_maintainer.py
+scripts/efficiency_mandate_auditor.py
+test_jstar2.stderr
+1775948*.png
+return42-website.html
+context/
+bootstrap.log
+SPEC.md
+alpine-*

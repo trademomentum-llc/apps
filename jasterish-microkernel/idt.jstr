@@ -1,0 +1,783 @@
+###############################################################################
+# idt.jstr -- Interrupt Descriptor Table Module
+# Jasterish Micro-Kernel
+#
+# This module provides:
+#   - IDT initialization with 256 entries
+#   - Exception handlers (0-31): divide-by-zero, GPF, page-fault, double-fault
+#   - IRQ dispatch (32-47): routes hardware interrupts to driver handlers
+#   - System call gate (0x80): legacy int 0x80 entry point
+#
+# The IDT is loaded with lidt and contains 64-bit long-mode gate descriptors.
+# Each descriptor is 16 bytes (2 longs).
+###############################################################################
+
+# =============================================================================
+# Section 1: IDT Constants
+# =============================================================================
+
+# IDT gate type flags for long mode
+global IDT_PRESENT
+global IDT_INTERRUPT_GATE
+global IDT_TRAP_GATE
+global IDT_RING0
+global IDT_RING3
+global IDT_64BIT
+
+store 0x80 into IDT_PRESENT       # Present bit (bit 7)
+store 0x0E into IDT_INTERRUPT_GATE # Interrupt gate type (0xE = 1110b)
+store 0x0F into IDT_TRAP_GATE      # Trap gate type (0xF = 1111b)
+store 0x00 into IDT_RING0          # DPL 0 (ring 0)
+store 0x60 into IDT_RING3          # DPL 3 (ring 3), bits 5-6
+store 0x00 into IDT_64BIT          # Long-mode bit in type field
+
+# =============================================================================
+# Section 2: IDT Data Structures
+# =============================================================================
+
+# The IDT itself: 256 entries, each 16 bytes = 4096 bytes total
+# We declare it as an array of 512 longs (512 * 8 = 4096 bytes)
+global idt_entries
+array 512 idt_entries
+
+# IDT descriptor for lidt: 2 bytes limit + 8 bytes base
+global idt_descriptor
+array 2 idt_descriptor
+
+# Interrupt handler stub addresses table
+# These are conceptual addresses that the assembly stubs would use
+# In a real kernel, assembly stubs push the vector number and jump
+# to a common handler. Here we model the dispatch.
+
+global interrupt_handler_table
+array 256 interrupt_handler_table
+
+# =============================================================================
+# Section 3: IDT Initialization
+# =============================================================================
+
+###############################################################################
+# Function: idt_init
+# -----------------------------------------------------------------------------
+# Initialize the Interrupt Descriptor Table.
+# Sets up gates for:
+#   - CPU exceptions (vectors 0-31)
+#   - Hardware IRQs (vectors 32-47, remapped from 0x20-0x2F)
+#   - System call gate (vector 0x80)
+#
+# After setting all gates, loads the IDT via lidt.
+###############################################################################
+
+idt_init
+    a vector
+    a handler_addr
+
+    print "IDT: initializing interrupt descriptor table..."
+
+    # -------------------------------------------------------------------------
+    # Step 1: Clear all IDT entries to zero (unhandled interrupts = safe)
+    # -------------------------------------------------------------------------
+    store 0 into vector
+    while less vector 256
+        call idt_set_gate vector 0 0 0
+        add vector 1
+        store it into vector
+    end
+
+    # -------------------------------------------------------------------------
+    # Step 2: Set up CPU exception handlers (vectors 0-31)
+    # -------------------------------------------------------------------------
+
+    # Vector 0: Divide-by-zero error
+    call idt_set_gate 0 exception_divide_by_zero IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 1: Debug exception
+    call idt_set_gate 1 exception_debug IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 2: Non-maskable interrupt
+    call idt_set_gate 2 exception_nmi IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 3: Breakpoint (INT3)
+    call idt_set_gate 3 exception_breakpoint IDT_PRESENT IDT_TRAP_GATE
+
+    # Vector 4: Overflow
+    call idt_set_gate 4 exception_overflow IDT_PRESENT IDT_TRAP_GATE
+
+    # Vector 5: Bound range exceeded
+    call idt_set_gate 5 exception_bound_range IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 6: Invalid opcode
+    call idt_set_gate 6 exception_invalid_opcode IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 7: Device not available
+    call idt_set_gate 7 exception_device_na IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 8: Double fault (has error code, uses IST)
+    call idt_set_gate 8 exception_double_fault IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 10: Invalid TSS (has error code)
+    call idt_set_gate 10 exception_invalid_tss IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 11: Segment not present (has error code)
+    call idt_set_gate 11 exception_segment_np IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 12: Stack-segment fault (has error code)
+    call idt_set_gate 12 exception_stack_fault IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 13: General protection fault (has error code)
+    call idt_set_gate 13 exception_gpf IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 14: Page fault (has error code)
+    call idt_set_gate 14 exception_page_fault IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 16: x87 FPU error
+    call idt_set_gate 16 exception_fpu_error IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 17: Alignment check (has error code)
+    call idt_set_gate 17 exception_alignment_check IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 18: Machine check
+    call idt_set_gate 18 exception_machine_check IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # Vector 19: SIMD FPU exception
+    call idt_set_gate 19 exception_simd_error IDT_PRESENT IDT_INTERRUPT_GATE
+
+    # -------------------------------------------------------------------------
+    # Step 3: Set up IRQ handlers (vectors 32-47)
+    # These map to the remapped PIC interrupts:
+    #   IRQ0 = vector 32 (timer)
+    #   IRQ1 = vector 33 (keyboard)
+    #   IRQ2-15 = vectors 34-47
+    # -------------------------------------------------------------------------
+    store 32 into vector
+    while less_or_equal vector 47
+        call idt_set_gate vector irq_common_handler IDT_PRESENT IDT_INTERRUPT_GATE
+        add vector 1
+        store it into vector
+    end
+
+    # -------------------------------------------------------------------------
+    # Step 4: Set up system call gate (vector 0x80 = 128)
+    # This uses a trap gate with DPL=3 so user code can invoke it.
+    # Attribute byte = present(0x80) | ring3(0x60) | trap_gate(0x0F) = 0xEF
+    # -------------------------------------------------------------------------
+    a syscall_attr
+    bitwise_or IDT_PRESENT IDT_RING3
+    store it into syscall_attr
+    bitwise_or syscall_attr IDT_TRAP_GATE
+    store it into syscall_attr
+    call idt_set_gate 128 syscall_entry_point syscall_attr 0
+
+    # -------------------------------------------------------------------------
+    # Step 5: Load the IDT descriptor and issue lidt
+    # -------------------------------------------------------------------------
+    a idt_limit
+
+    # Limit = (256 entries * 16 bytes) - 1 = 4095
+    multiply 256 16
+    store it into idt_limit
+    subtract idt_limit 1
+    store it into idt_limit
+
+    # Store limit in descriptor[0]
+    store idt_limit into idt_descriptor at 0
+
+    # Store base address in descriptor[1]
+    store idt_entries into idt_descriptor at 1
+
+    # Issue lidt instruction
+    inline "lidt [idt_descriptor]"
+
+    print "IDT: 256 gates configured, lidt loaded"
+    return 0
+
+###############################################################################
+# Function: idt_set_gate
+# -----------------------------------------------------------------------------
+# Configure a single IDT gate descriptor.
+#
+# In long mode, each IDT entry is 16 bytes:
+#   Offset 0-1:   bits 0-15 of handler offset
+#   Offset 2-3:   code segment selector (0x08 = kernel code)
+#   Offset 4:     IST index (0 = no IST)
+#   Offset 5:     type attributes (P+DPL+type)
+#   Offset 6-7:   bits 16-31 of handler offset
+#   Offset 8-11:  bits 32-63 of handler offset
+#   Offset 12-15: reserved (zero)
+#
+# We pack this into two 64-bit values stored in idt_entries.
+#
+# Arguments:
+#   vector    - interrupt vector number (0-255)
+#   handler   - address of handler function
+#   flags     - attribute byte (P+DPL+type)
+###############################################################################
+
+idt_set_gate
+    a vector
+    a handler
+    a present_flag
+    a type_flag
+    a entry_idx
+    a low_offset
+    a high_offset
+    a mid_offset
+    a seg_selector
+    a first_long
+    a second_long
+    a attr_byte
+
+    # Save arguments (Jasterish: first arg in 'it', rest via argument N)
+    store argument 0 into vector
+    store argument 1 into handler
+    store argument 2 into present_flag
+    store argument 3 into type_flag
+
+    # Combine present + type into attribute byte
+    bitwise_or present_flag type_flag
+    store it into attr_byte
+
+    # Compute entry index in idt_entries array
+    # Each entry is 2 longs, so entry_idx = vector * 2
+    multiply vector 2
+    store it into entry_idx
+
+    # Segment selector = kernel code segment (0x08)
+    store 0x08 into seg_selector
+
+    # Extract offset pieces from handler address
+    # low_offset  = handler & 0xFFFF
+    bitwise_and handler 0xFFFF
+    store it into low_offset
+
+    # mid_offset = (handler >> 16) & 0xFFFF
+    shift_right handler 16
+    store it into mid_offset
+    bitwise_and mid_offset 0xFFFF
+    store it into mid_offset
+
+    # high_offset = (handler >> 32) & 0xFFFFFFFF
+    shift_right handler 32
+    store it into high_offset
+    bitwise_and high_offset 0xFFFFFFFF
+    store it into high_offset
+
+    # Build first 64-bit long:
+    #   bits 0-15:  low_offset
+    #   bits 16-31: seg_selector
+    #   bits 32-39: IST (0) + reserved (0)
+    #   bits 40-47: attr_byte (P+DPL+type)
+    #   bits 48-63: mid_offset
+
+    shift_left seg_selector 16
+    store it into first_long
+    bitwise_or first_long low_offset
+    store it into first_long
+
+    shift_left attr_byte 40
+    store it into it
+    bitwise_or first_long it
+    store it into first_long
+
+    shift_left mid_offset 48
+    store it into it
+    bitwise_or first_long it
+    store it into first_long
+
+    # Build second 64-bit long:
+    #   bits 0-31:  high_offset
+    #   bits 32-63: reserved (0)
+    store high_offset into second_long
+
+    # Store into idt_entries
+    store first_long into idt_entries at entry_idx
+    add entry_idx 1
+    store it into entry_idx
+    store second_long into idt_entries at entry_idx
+
+    return 0
+
+###############################################################################
+# Section 4: Exception Handlers
+###############################################################################
+
+###############################################################################
+# Function: exception_divide_by_zero
+# -----------------------------------------------------------------------------
+# Handler for vector 0: divide-by-zero error.
+###############################################################################
+
+exception_divide_by_zero
+    print ""
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print "!! EXCEPTION: Divide-by-zero (vector 0)"
+    print "!!"
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print ""
+    call panic "divide by zero"
+    return 0
+
+###############################################################################
+# Function: exception_debug
+# -----------------------------------------------------------------------------
+# Handler for vector 1: debug exception.
+###############################################################################
+
+exception_debug
+    print "[exception] Debug (vector 1)"
+    return 0
+
+###############################################################################
+# Function: exception_nmi
+# -----------------------------------------------------------------------------
+# Handler for vector 2: non-maskable interrupt.
+###############################################################################
+
+exception_nmi
+    print "[exception] NMI (vector 2)"
+    return 0
+
+###############################################################################
+# Function: exception_breakpoint
+# -----------------------------------------------------------------------------
+# Handler for vector 3: breakpoint (INT3).
+###############################################################################
+
+exception_breakpoint
+    print "[exception] Breakpoint (vector 3)"
+    return 0
+
+###############################################################################
+# Function: exception_overflow
+# -----------------------------------------------------------------------------
+# Handler for vector 4: overflow.
+###############################################################################
+
+exception_overflow
+    print "[exception] Overflow (vector 4)"
+    return 0
+
+###############################################################################
+# Function: exception_bound_range
+# -----------------------------------------------------------------------------
+# Handler for vector 5: bound range exceeded.
+###############################################################################
+
+exception_bound_range
+    print "[exception] Bound range exceeded (vector 5)"
+    call panic "bound range exceeded"
+    return 0
+
+###############################################################################
+# Function: exception_invalid_opcode
+# -----------------------------------------------------------------------------
+# Handler for vector 6: invalid opcode.
+###############################################################################
+
+exception_invalid_opcode
+    print ""
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print "!! EXCEPTION: Invalid Opcode (vector 6)"
+    print "!!"
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print ""
+    call panic "invalid opcode"
+    return 0
+
+###############################################################################
+# Function: exception_device_na
+# -----------------------------------------------------------------------------
+# Handler for vector 7: device not available.
+###############################################################################
+
+exception_device_na
+    print "[exception] Device not available (vector 7)"
+    call panic "device not available"
+    return 0
+
+###############################################################################
+# Function: exception_double_fault
+# -----------------------------------------------------------------------------
+# Handler for vector 8: double fault.
+# This is a critical error - the CPU faulted while handling a fault.
+###############################################################################
+
+exception_double_fault
+    print ""
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print "!! EXCEPTION: DOUBLE FAULT (vector 8)"
+    print "!! The system is in an unrecoverable state."
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print ""
+    # Double fault is fatal - halt forever
+    inline "cli"
+    inline "hlt"
+    return 0
+
+###############################################################################
+# Function: exception_invalid_tss
+# -----------------------------------------------------------------------------
+# Handler for vector 10: invalid TSS.
+###############################################################################
+
+exception_invalid_tss
+    print "[exception] Invalid TSS (vector 10)"
+    call panic "invalid TSS"
+    return 0
+
+###############################################################################
+# Function: exception_segment_np
+# -----------------------------------------------------------------------------
+# Handler for vector 11: segment not present.
+###############################################################################
+
+exception_segment_np
+    print "[exception] Segment not present (vector 11)"
+    call panic "segment not present"
+    return 0
+
+###############################################################################
+# Function: exception_stack_fault
+# -----------------------------------------------------------------------------
+# Handler for vector 12: stack-segment fault.
+###############################################################################
+
+exception_stack_fault
+    print "[exception] Stack fault (vector 12)"
+    call panic "stack fault"
+    return 0
+
+###############################################################################
+# Function: exception_gpf
+# -----------------------------------------------------------------------------
+# Handler for vector 13: general protection fault.
+###############################################################################
+
+exception_gpf
+    print ""
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print "!! EXCEPTION: General Protection Fault (vector 13)"
+    print "!!"
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print ""
+    call panic "general protection fault"
+    return 0
+
+###############################################################################
+# Function: exception_page_fault
+# -----------------------------------------------------------------------------
+# Handler for vector 14: page fault.
+# Reads CR2 to get the faulting address and prints diagnostic info.
+###############################################################################
+
+exception_page_fault
+    a fault_addr
+    a error_code
+    a pte
+    a old_phys
+    a new_phys
+    a pte_flags
+    a is_cow
+    a is_write
+
+    # CR2 holds the virtual address that caused the page fault
+    inline "mov rax, cr2"
+    store register rax into fault_addr
+
+    # Read the error code from the stack. In x86-64, the CPU pushes
+    # the error code after RIP/CS/RFLAGS (and SS/RSP if cross-privilege).
+    # After the function prologue, the error code is at [rbp+8].
+    inline "mov rax, [rbp+8]"
+    store register rax into error_code
+
+    # Resolve the PTE for the faulting address
+    call vmm_resolve_pte fault_addr
+    store it into pte
+
+    # Check if this is a COW page
+    bitwise_and pte PAGE_COW
+    store it into is_cow
+
+    # The error code bit 1 indicates a write fault
+    bitwise_and error_code 2
+    store it into is_write
+
+    load is_cow
+    load 0
+    if not equal it it
+        load is_write
+        load 0
+        if not equal it it
+            # This is a write fault on a COW page -- copy the page
+
+        # Extract the old physical page address
+        bitwise_and pte PAGE_FLAGS_MASK
+        store it into old_phys
+
+        # Allocate a new physical page
+        call pmm_alloc
+        store it into new_phys
+
+        load new_phys
+        load 0
+        if equal it it
+            print ""
+            print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            print "!! EXCEPTION: Page Fault (vector 14)"
+            print "!! COW copy failed: out of memory"
+            print "!! Faulting address: "
+            load fault_addr
+            call serial_print_hex
+            print ""
+            print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            print ""
+            call panic "COW page fault: out of memory"
+            return 0
+        end
+
+        # Copy the old page contents to the new page.
+        # Since physical memory below 1GB is identity-mapped,
+        # we can use memcpy directly on physical addresses.
+        call memcpy new_phys old_phys PAGE_SIZE
+
+        # Build new PTE: new physical address | PRESENT | WRITABLE | USER
+        # Clear COW flag so this process owns the writable copy.
+        bitwise_and new_phys PAGE_FLAGS_MASK
+        store it into pte_flags
+        bitwise_or pte_flags PAGE_PRESENT
+        store it into pte_flags
+        bitwise_or pte_flags PAGE_WRITABLE
+        store it into pte_flags
+        bitwise_or pte_flags PAGE_USER
+        store it into pte_flags
+
+        # Update the page table entry
+        call vmm_update_pte fault_addr pte_flags
+
+        print "[COW] Copied page for address "
+        load fault_addr
+        call serial_print_hex
+        print " old_phys="
+        load old_phys
+        call serial_print_hex
+        print " new_phys="
+        load new_phys
+        call serial_print_hex
+
+        # Skip error code on stack and return via iretq.
+        # In x86-64, the CPU always pushes SS:RSP for interrupts,
+        # so the full frame is present after skipping the error code.
+        inline "leave"
+        inline "add rsp, 8"
+        inline "iretq"
+
+        # unreachable
+        return 0
+        end
+    end
+
+    # Not a COW fault -- print diagnostics and panic
+    print ""
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print "!! EXCEPTION: Page Fault (vector 14)"
+    print "!!"
+
+    print "!! Faulting address: "
+    load fault_addr
+    call serial_print_hex
+    print ""
+    print "!! Error code: "
+    load error_code
+    call serial_print_hex
+    print ""
+    print "!! PTE: "
+    load pte
+    call serial_print_hex
+    print ""
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print ""
+
+    call panic "page fault"
+    return 0
+
+###############################################################################
+# Function: exception_fpu_error
+# -----------------------------------------------------------------------------
+# Handler for vector 16: x87 FPU error.
+###############################################################################
+
+exception_fpu_error
+    print "[exception] x87 FPU error (vector 16)"
+    return 0
+
+###############################################################################
+# Function: exception_alignment_check
+# -----------------------------------------------------------------------------
+# Handler for vector 17: alignment check.
+###############################################################################
+
+exception_alignment_check
+    print "[exception] Alignment check (vector 17)"
+    call panic "alignment check"
+    return 0
+
+###############################################################################
+# Function: exception_machine_check
+# -----------------------------------------------------------------------------
+# Handler for vector 18: machine check.
+###############################################################################
+
+exception_machine_check
+    print ""
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print "!! EXCEPTION: Machine Check (vector 18)"
+    print "!! Hardware failure detected."
+    print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    print ""
+    inline "cli"
+    inline "hlt"
+    return 0
+
+###############################################################################
+# Function: exception_simd_error
+# -----------------------------------------------------------------------------
+# Handler for vector 19: SIMD FPU exception.
+###############################################################################
+
+exception_simd_error
+    print "[exception] SIMD error (vector 19)"
+    return 0
+
+###############################################################################
+# Section 5: IRQ Common Handler and Dispatch
+###############################################################################
+
+###############################################################################
+# Function: irq_common_handler
+# -----------------------------------------------------------------------------
+# Common entry point for all hardware IRQs (vectors 32-47).
+# In a real kernel, an assembly stub would push the vector number and
+# jump here. We dispatch based on the vector to the specific driver handler.
+###############################################################################
+
+irq_common_handler
+    a vector_num
+
+    # In real implementation, vector_num is pushed by assembly stub
+    # Here we model the dispatch conceptually
+    # The actual vector would be determined from the interrupt context
+    print "[irq] common handler dispatch"
+    return 0
+
+###############################################################################
+# Function: irq_dispatch
+# -----------------------------------------------------------------------------
+# Dispatch an IRQ to the appropriate device driver handler.
+#
+# irq_num: the hardware IRQ number (0-15), NOT the vector number
+#
+# This is called by the low-level assembly IRQ stubs after saving context.
+###############################################################################
+
+irq_dispatch
+    a irq_num
+
+    store it into irq_num
+
+    # IRQ0: PIT timer
+    if equal irq_num 0
+        call pit_handler
+        return 0
+    end
+
+    # IRQ1: PS/2 keyboard
+    if equal irq_num 1
+        call keyboard_handler
+        return 0
+    end
+
+    # IRQ2: cascade (slave PIC) — should not fire directly
+    if equal irq_num 2
+        print "[irq] cascade signal (IRQ2)"
+        call pic_eoi 2
+        return 0
+    end
+
+    # IRQ3-7: unhandled serial/parallel ports
+    if less irq_num 8
+        print "[irq] unhandled IRQ "
+        print irq_num
+        call pic_eoi irq_num
+        return 0
+    end
+
+    # IRQ8-15: slave PIC interrupts
+    if less irq_num 16
+        print "[irq] slave IRQ "
+        print irq_num
+        call pic_eoi irq_num
+        return 0
+    end
+
+    # Invalid IRQ number
+    print "[irq] invalid IRQ number: "
+    print irq_num
+    return 0
+
+###############################################################################
+# Section 6: System Call Entry Stub
+###############################################################################
+
+###############################################################################
+# Function: syscall_entry_point
+# -----------------------------------------------------------------------------
+# Assembly stub for int 0x80 system calls.
+# In a real kernel, this stub would:
+#   1. Save all user registers on the kernel stack
+#   2. Load kernel segment selectors
+#   3. Call syscall_handler with register arguments
+#   4. Restore registers
+#   5. iretq back to user mode
+#
+# Here we model the concept since Jasterish abstracts the assembly layer.
+###############################################################################
+
+syscall_entry_point
+    # In real implementation:
+    #   swapgs (if using GS base for per-CPU data)
+    #   push all registers
+    #   call syscall_handler
+    #   pop all registers
+    #   iretq
+
+    # For Jasterish, we delegate to the high-level handler
+    call syscall_handler
+    return 0
+
+###############################################################################
+# Section 7: IDT Utility Functions
+###############################################################################
+
+###############################################################################
+# Function: idt_disable_interrupts
+# -----------------------------------------------------------------------------
+# Disable interrupts (CLI).
+###############################################################################
+
+idt_disable_interrupts
+    inline "cli"
+    return 0
+
+###############################################################################
+# Function: idt_enable_interrupts
+# -----------------------------------------------------------------------------
+# Enable interrupts (STI).
+###############################################################################
+
+idt_enable_interrupts
+    inline "sti"
+    return 0
+
+###############################################################################
+# End of idt.jstr
+###############################################################################

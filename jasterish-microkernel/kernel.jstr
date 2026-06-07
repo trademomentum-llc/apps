@@ -1,0 +1,1012 @@
+###############################################################################
+# kernel.jstr -- Jasterish Micro-Kernel: Main Initialization Module
+#
+# This is the central orchestration module that initializes all subsystems
+# in the correct order and starts the scheduler. It is called from the
+# boot module's _start entry point after the stack, GDT, and serial port
+# have been configured.
+#
+# Initialization Order:
+#   1. Serial output (already done in boot, but confirm)
+#   2. Global Descriptor Table (already done in boot)
+#   3. Physical Memory Manager (PMM)
+#   4. Virtual Memory Manager (VMM) with paging
+#   5. Kernel Heap Allocator
+#   6. Interrupt Descriptor Table (IDT) and hardware drivers (PIC, PIT)
+#   7. Process scheduler and idle process
+#   8. IPC message subsystem
+#   9. System call interface
+#   10. Create user-space init process
+#   11. Enable interrupts and enter scheduler loop
+#
+# The kernel follows the micro-kernel architecture: the kernel itself
+# is minimal, and system services (file system, network, etc.) run as
+# separate user-space processes communicating via IPC.
+###############################################################################
+
+# =============================================================================
+# Section 1: Kernel Banner and Version Information
+# =============================================================================
+
+# Kernel version string -- printed during boot for identification
+global kernel_version
+store "JMK v1.0 -- Jasterish Micro-Kernel" into kernel_version
+
+global kernel_build_date
+store "2026-05-28" into kernel_build_date
+
+global kernel_arch
+store "x86-64" into kernel_arch
+
+# =============================================================================
+# Section 2: Kernel Main Function
+# =============================================================================
+
+###############################################################################
+# Function: kernel_main
+# -----------------------------------------------------------------------------
+# The primary kernel initialization function. Called once from _start in
+# boot.jstr. This function never returns -- it transitions directly into
+# the scheduler loop.
+#
+# Phase 1: Output kernel identification banner
+# Phase 2: Initialize memory management (PMM -> VMM -> heap)
+# Phase 3: Initialize interrupt and driver subsystems
+# Phase 4: Initialize process scheduling
+# Phase 5: Initialize IPC
+# Phase 6: Initialize system calls
+# Phase 7: Create the init process
+# Phase 8: Enable interrupts and start scheduling
+###############################################################################
+
+kernel_main
+    a mb_ptr
+
+    # Receive multiboot info pointer from boot module
+    store it into mb_ptr
+
+    # =====================================================================
+    # Phase 1: Kernel Banner
+    # =====================================================================
+    # Print the kernel banner and build information. This is the first
+    # visible output after the boot loader hands control to the kernel.
+    print ""
+    print "============================================================"
+    print "  JMK -- Jasterish Micro-Kernel"
+    print "  Version 1.0"
+    print "  Architecture: x86-64"
+    print "  Build Date: 2026-05-28"
+    print "============================================================"
+    print ""
+    print "[kernel] Starting kernel_main..."
+
+    # =====================================================================
+    # Phase 2: Memory Management Initialization
+    # =====================================================================
+    # The memory subsystem must be initialized before anything else
+    # because subsequent subsystems need to allocate memory.
+
+    print "[kernel] Phase 2: Memory management initialization"
+
+    # Initialize the Physical Memory Manager.
+    # If the bootloader provided a multiboot info pointer, we parse it
+    # to discover actual memory layout. Otherwise fall back to defaults.
+    if greater mb_ptr 0
+        print "[kernel] Parsing multiboot memory map..."
+        call pmm_init_multiboot mb_ptr
+    else
+        print "[kernel] No multiboot info, using default 512MB..."
+        call pmm_init 32 480
+    end
+
+    # Initialize the Virtual Memory Manager.
+    # This sets up page tables, maps the kernel to higher half,
+    # and enables paging.
+    print "[kernel] Initializing VMM and enabling paging..."
+    call vmm_init
+
+    # Initialize the kernel heap allocator.
+    # This provides kmalloc/kfree for dynamic memory allocation.
+    print "[kernel] Initializing kernel heap..."
+    call heap_init
+
+    print "[kernel] Memory management ready"
+
+    # Neuro / data subsystem (for lowered primitives + VFS neuro files + rr swarm)
+    print "[kernel] Initializing syscall numbers and data/neuro layer (Train/Mask/Optimize support)..."
+    call syscall_numbers_init
+    call data_init
+    print "[kernel] Data + neuro syscalls ready (0x50-0x54, 0x4D, 0x4F)"
+
+    # =====================================================================
+    # Phase 3: Interrupt and Driver Subsystems
+    # =====================================================================
+    # Initialize the interrupt controller (PIC), timer (PIT), and
+    # keyboard driver. These must be set up before we enable interrupts.
+
+    print "[kernel] Phase 3: Driver and interrupt initialization"
+
+    # Initialize the Interrupt Descriptor Table (IDT)
+    # This must happen before enabling any hardware interrupts.
+    call idt_init
+
+    # Initialize all hardware drivers (PIC, PIT, keyboard)
+    call drivers_init
+
+    # Initialize the ATA disk driver
+    call disk_init
+
+    # Initialize the virtual filesystem
+    call vfs_init
+
+    print "[kernel] Drivers ready"
+
+    # =====================================================================
+    # Phase 4: Process Scheduler Initialization
+    # =====================================================================
+    # Set up the process table, create the idle process, and prepare
+    # the round-robin scheduler.
+
+    print "[kernel] Phase 4: Process scheduler initialization"
+
+    call scheduler_init
+
+    print "[kernel] Scheduler ready"
+
+    # =====================================================================
+    # Phase 5: IPC Subsystem Initialization
+    # =====================================================================
+    # Set up the message passing system for inter-process communication.
+
+    print "[kernel] Phase 5: IPC subsystem initialization"
+
+    call ipc_init
+
+    print "[kernel] IPC ready"
+
+    # =====================================================================
+    # Phase 6: System Call Interface Initialization
+    # =====================================================================
+    # Register the system call handler with the IDT so user processes
+    # can invoke kernel services via int 0x80.
+
+    print "[kernel] Phase 6: System call interface initialization"
+
+    call syscall_init
+
+    print "[kernel] System calls ready"
+
+    # =====================================================================
+    # Phase 7: Create the Init Process
+    # =====================================================================
+    # Create the first user-space process (PID 1, the "init" process).
+    # This process is the ancestor of all other user processes and
+    # typically runs a simple shell or service manager.
+    #
+    # The init process entry point is the init_function defined below.
+
+    print "[kernel] Phase 7: Creating init process..."
+
+    a init_pid
+    call process_create init_function 5
+    store it into init_pid
+
+    if compare init_pid -1
+        print "[kernel] FATAL: Failed to create init process!"
+        call panic "init process creation failed"
+    end
+
+    print "[kernel] Init process created with PID:"
+    print init_pid
+
+    # =====================================================================
+    # Phase 8: Start the Scheduler
+    # =====================================================================
+    # Enable hardware interrupts and enter the scheduler loop.
+    # From this point on, the system is fully operational and processes
+    # are scheduled via timer-driven preemption.
+
+    print ""
+    print "============================================================"
+    print "[kernel] JMK initialization complete. Starting scheduler..."
+    print "============================================================"
+    print ""
+
+    # Enable interrupts (STI instruction)
+    inline "sti"
+
+    # Enter the scheduler -- this function never returns.
+    # It loops forever, selecting and running processes.
+    call scheduler_loop
+
+    # Safety: if scheduler_loop somehow returns, panic.
+    call panic "scheduler_loop returned unexpectedly"
+
+    return 0
+
+###############################################################################
+# Function: scheduler_loop
+# -----------------------------------------------------------------------------
+# The main scheduler loop. Called once from kernel_main after all
+# initialization is complete and interrupts are enabled.
+#
+# This loop runs forever in kernel context. On each iteration:
+#   1. Check if there are any READY processes in the queue
+#   2. If yes: dequeue and context-switch to the next process
+#   3. If no:  enter the idle state (HLT until next interrupt)
+#
+# Timer interrupts drive preemption via the schedule() function,
+# which is called from pit_handler every 10ms.
+###############################################################################
+
+scheduler_loop
+    # The scheduler loop runs forever
+    while 1 greater 0
+        # Check if the ready queue has any processes
+        a has_ready
+        call ready_queue_not_empty
+        store it into has_ready
+
+        if compare has_ready 1
+            # There is at least one ready process.
+            # Dequeue it and switch to it.
+            a next_proc
+            call dequeue_ready
+            store it into next_proc
+
+            if greater_or_equal next_proc 0
+                # Valid process index -- switch to it
+                call switch_to next_proc
+            end
+        end
+
+        # No ready processes -- halt the CPU until the next interrupt.
+        # The timer or keyboard interrupt will wake us, and the handler
+        # will either schedule a process or we'll loop back here.
+        call cpu_idle_step
+    end
+
+    return 0
+
+###############################################################################
+# Function: ready_queue_not_empty
+# -----------------------------------------------------------------------------
+# Check whether the ready queue contains at least one process.
+#
+# Returns: 1 if the queue is not empty, 0 if empty.
+###############################################################################
+
+ready_queue_not_empty
+    a head_val
+    load ready_head
+    store it into head_val
+
+    a tail_val
+    load ready_tail
+    store it into tail_val
+
+    # Queue is empty when head == tail
+    if equal head_val tail_val
+        return 0
+    end
+
+    return 1
+
+###############################################################################
+# Function: cpu_idle_step
+# -----------------------------------------------------------------------------
+# A single iteration of the CPU idle sequence.
+# Enables interrupts and halts the CPU until the next interrupt arrives.
+# This is called when no process is ready to run.
+###############################################################################
+
+cpu_idle_step
+    # Enable interrupts so the next timer/keyboard interrupt wakes us
+    inline "sti"
+
+    # Halt until an interrupt occurs (HLT instruction)
+    inline "hlt"
+
+    return 0
+
+###############################################################################
+# Function: init_user_process
+# -----------------------------------------------------------------------------
+# Creates a simple ring-3 user process to demonstrate the iretq path.
+# Allocates a code page with a 'jmp $' instruction and a stack page,
+# then creates the process via process_create_user.
+#
+# Returns: PID of the user process, or -1 on failure.
+###############################################################################
+
+function init_user_process
+    a code_phys
+    a code_virt
+    a stack_virt
+    a user_pid
+
+    # User code at 0x100000000, stack top at 0x100001000
+    store 0x100000000 into code_virt
+    store 0x100001000 into stack_virt
+
+    # Allocate a physical page for user code
+    call pmm_alloc
+    store it into code_phys
+
+    load code_phys
+    load 0
+    if equal it it
+        print "[init] Failed to allocate user code page"
+        return -1
+    end
+
+    # Write 'jmp $' (0xEB 0xFE) to the code page.
+    # Since physical memory below 1GB is identity-mapped, we can
+    # write directly to the physical address.
+    store code_phys into register rax
+    inline "mov word [rax], 0xFEEB"
+
+    # Create the user process (maps stack, and we passed code_phys)
+    call process_create_user code_virt stack_virt 5 code_phys
+    store it into user_pid
+
+    load user_pid
+    load -1
+    if equal it it
+        print "[init] Failed to create user process"
+        call pmm_free code_phys
+        return -1
+    end
+
+    print "[init] User demo process created with PID:"
+    print user_pid
+
+    return user_pid
+end
+
+###############################################################################
+# Function: init_function
+# -----------------------------------------------------------------------------
+# The init process (PID 1) entry point. This is the first user-space
+# process created by the kernel. It runs a simple interactive shell
+# that demonstrates the micro-kernel's IPC, system call, and process
+# management capabilities.
+#
+# The init process:
+#   1. Prints a startup message
+#   2. Creates a child process that runs a counter demo
+#   3. Enters a simple command loop reading keyboard input
+#   4. Handles basic commands: help, ps, tick, reboot
+#
+# This function runs in user-space (ring 3) and uses system calls
+# for all kernel interactions.
+###############################################################################
+
+init_function
+    # Print init process startup banner
+    print ""
+    print "[init] Process started (PID 1)"
+    print "[init] JMK Micro-Kernel User Shell"
+    print "[init] Type 'help' for available commands"
+    print ""
+
+    # Create a child process that demonstrates IPC
+    print "[init] Starting counter demo process..."
+    a child_pid
+    call process_create counter_demo 3
+    store it into child_pid
+
+    if greater child_pid 0
+        print "[init] Counter demo started with PID:"
+        print child_pid
+    end
+
+    # Create a ring-3 user process to demonstrate iretq entry
+    print "[init] Starting user-mode demo process..."
+    a user_pid
+    call init_user_process
+    store it into user_pid
+
+    if greater user_pid 0
+        print "[init] User-mode demo started with PID:"
+        print user_pid
+    end
+
+    # Enter the interactive shell loop
+    call shell_loop
+
+    # If shell_loop returns (shouldn't happen), exit
+    print "[init] Shell exited, halting..."
+    call process_exit 0
+
+    return 0
+
+###############################################################################
+# Function: counter_demo
+# -----------------------------------------------------------------------------
+# A simple background process that demonstrates IPC messaging.
+# Counts from 1 to 100, sending periodic status messages to the
+# init process (PID 1) via IPC.
+###############################################################################
+
+counter_demo
+    print "[counter] Counter demo process started"
+
+    a counter
+    store 0 into counter
+
+    while less counter 100
+        add counter 1
+        store it into counter
+
+        # Every 10 counts, print status and send IPC message
+        a counter_mod
+        modulo counter 10
+        store it into counter_mod
+
+        if equal counter_mod 0
+            print "[counter] Count reached:"
+            print counter
+
+            # Send a status message to init (PID 1)
+            array 16 status_msg
+            store counter into status_msg at 0
+            store 99 into status_msg at 1
+            call ipc_send 1 status_msg 8
+        end
+
+        # Small delay between iterations
+        call sleep 1
+    end
+
+    print "[counter] Counter demo complete, exiting..."
+    call process_exit 0
+
+    return 0
+
+###############################################################################
+# Function: shell_loop
+# -----------------------------------------------------------------------------
+# A minimal interactive shell for the init process.
+# Reads characters from the keyboard and processes simple commands.
+#
+# Supported commands:
+#   help    -- Show available commands
+#   ps      -- List running processes
+#   tick    -- Show system uptime in ticks
+#   mem     -- Show memory statistics
+#   echo    -- Echo back typed text
+#   reboot  -- Reboot the system (not yet implemented)
+#   quit    -- Exit the shell
+###############################################################################
+
+shell_loop
+    # Print shell prompt
+    print "JMK> "
+
+    # Buffer for a single command line
+    array 64 cmd_buf
+    a cmd_len
+    store 0 into cmd_len
+
+shell_read_loop
+    # Read a character from the keyboard (non-blocking)
+    call keyboard_getc
+    store it into a ch
+
+    # If no character available, yield and try again
+    if equal ch 0
+        call yield
+        jump shell_read_loop
+    end
+
+    # Echo the character
+    call serial_putc ch
+
+    # Check for Enter key (newline)
+    if equal ch 10
+        # Null-terminate the command string
+        store 0 into cmd_buf at cmd_len
+
+        print ""
+
+        # Process the command
+        call process_command cmd_buf cmd_len
+
+        # Reset buffer for next command
+        store 0 into cmd_len
+        print "JMK> "
+        jump shell_read_loop
+    end
+
+    # Check for backspace
+    if equal ch 8
+        if greater cmd_len 0
+            subtract cmd_len 1
+            store it into cmd_len
+            # Echo backspace-space-backspace to erase
+            call serial_putc 8
+            call serial_putc 32
+            call serial_putc 8
+        end
+        jump shell_read_loop
+    end
+
+    # Add character to buffer if space available
+    if less cmd_len 63
+        store ch into cmd_buf at cmd_len
+        add cmd_len 1
+        store it into cmd_len
+    end
+
+    jump shell_read_loop
+
+    return 0
+
+###############################################################################
+# Function: process_command
+# -----------------------------------------------------------------------------
+# Parse and execute a single shell command.
+#
+# cmd_buf: buffer containing the null-terminated command string
+# cmd_len: length of the command string
+###############################################################################
+
+process_command
+    a cmd_buf
+    a cmd_len
+
+    # Save parameters
+    store it into cmd_len
+    store it into cmd_buf
+
+    # Handle empty command
+    if equal cmd_len 0
+        return 0
+    end
+
+    # Check for "help" command (h-e-l-p)
+    load cmd_buf at 0
+    store it into a c0
+    load cmd_buf at 1
+    store it into a c1
+    load cmd_buf at 2
+    store it into a c2
+    load cmd_buf at 3
+    store it into a c3
+
+    if equal c0 104
+        if equal c1 101
+            if equal c2 108
+                if equal c3 112
+                    call cmd_help
+                    return 0
+                end
+            end
+        end
+    end
+
+    # Check for "ps" command
+    if equal c0 112
+        if equal c1 115
+            if equal c2 0
+                call cmd_ps
+                return 0
+            end
+        end
+    end
+
+    # Check for "tick" command
+    if equal c0 116
+        if equal c1 105
+            if equal c2 99
+                if equal c3 107
+                    call cmd_tick
+                    return 0
+                end
+            end
+        end
+    end
+
+    # Check for "mem" command
+    if equal c0 109
+        if equal c1 101
+            if equal c2 109
+                if equal c3 0
+                    call cmd_mem
+                    return 0
+                end
+            end
+        end
+    end
+
+    # Check for "echo" command
+    if equal c0 101
+        if equal c1 99
+            if equal c2 104
+                if equal c3 111
+                    call cmd_echo cmd_buf cmd_len
+                    return 0
+                end
+            end
+        end
+    end
+
+    # Check for "ls" command
+    if equal c0 108
+        if equal c1 115
+            if equal c2 0
+                call cmd_ls
+                return 0
+            end
+        end
+    end
+
+    # Check for "cat" command
+    if equal c0 99
+        if equal c1 97
+            if equal c2 116
+                if equal c3 32
+                    call cmd_cat cmd_buf cmd_len
+                    return 0
+                end
+            end
+        end
+    end
+
+    # Check for "sync" command
+    if equal c0 115
+        if equal c1 121
+            if equal c2 110
+                if equal c3 99
+                    call cmd_sync
+                    return 0
+                end
+            end
+        end
+    end
+
+    # Check for "quit" command
+    if equal c0 113
+        if equal c1 117
+            if equal c2 105
+                if equal c3 116
+                    print "[shell] Exiting..."
+                    call process_exit 0
+                    return 0
+                end
+            end
+        end
+    end
+
+    # Unknown command
+    print "Unknown command. Type 'help' for available commands."
+
+    return 0
+
+###############################################################################
+# Function: cmd_help
+# -----------------------------------------------------------------------------
+# Display the help message listing available shell commands.
+###############################################################################
+
+cmd_help
+    print ""
+    print "=== JMK Shell Commands ==="
+    print "  help   -- Show this help message"
+    print "  ps     -- List running processes"
+    print "  tick   -- Show system uptime in timer ticks"
+    print "  mem    -- Show memory statistics"
+    print "  echo   -- Echo back typed text (type 'echo <text>')"
+    print "  ls     -- List files in the filesystem"
+    print "  cat    -- Display file contents (type 'cat <file>')"
+    print "  sync   -- Sync filesystem to disk"
+    print "  quit   -- Exit the shell"
+    print ""
+    return 0
+
+###############################################################################
+# Function: cmd_ps
+# -----------------------------------------------------------------------------
+# Display a list of running processes.
+###############################################################################
+
+cmd_ps
+    print ""
+    print "=== Process Table ==="
+    print "  PID  State     Parent"
+
+    a slot
+    store 0 into slot
+
+    for slot from 0 to MAX_PROCS
+        # Skip unused slots for cleaner output
+        a state
+        load proc_state at slot
+        store it into state
+
+        if greater state 0
+            a pid
+            load proc_pid at slot
+            store it into pid
+
+            a parent
+            load proc_parent at slot
+            store it into parent
+
+            # Print PID
+            print "  "
+            call serial_print_dec pid
+
+            # Print state name
+            if equal state 1
+                print "  READY    "
+            end
+            if equal state 2
+                print "  RUNNING  "
+            end
+            if equal state 3
+                print "  BLOCKED  "
+            end
+            if equal state 4
+                print "  ZOMBIE   "
+            end
+
+            # Print parent PID
+            call serial_print_dec parent
+            print ""
+        end
+    end
+
+    print ""
+    return 0
+
+###############################################################################
+# Function: cmd_tick
+# -----------------------------------------------------------------------------
+# Display the current system uptime in timer ticks.
+###############################################################################
+
+cmd_tick
+    a ticks
+    load tick_count
+    store it into ticks
+
+    print "System uptime: "
+    call serial_print_dec ticks
+    print " ticks"
+    print ""
+
+    return 0
+
+###############################################################################
+# Function: cmd_mem
+# -----------------------------------------------------------------------------
+# Display memory statistics from the PMM and heap.
+###############################################################################
+
+cmd_mem
+    print ""
+    print "=== Memory Statistics ==="
+
+    # Total physical pages
+    print "Total physical pages: "
+    call serial_print_dec phys_total_pages
+    print ""
+
+    # Used physical pages
+    print "Used physical pages:  "
+    call serial_print_dec phys_used_pages
+    print ""
+
+    # Free physical pages
+    print "Free physical pages:  "
+    call serial_print_dec phys_free_pages
+    print ""
+
+    print ""
+    return 0
+
+###############################################################################
+# Function: cmd_echo
+# -----------------------------------------------------------------------------
+# Echo back the text typed after the "echo" command.
+# Skips the "echo" prefix (5 characters) and prints the rest.
+###############################################################################
+
+cmd_echo
+    a cmd_buf
+    a cmd_len
+    a idx
+
+    store it into cmd_len
+    store it into cmd_buf
+
+    # Skip the "echo" prefix (5 chars: e-c-h-o-space)
+    # Start printing from index 5
+    store 5 into idx
+
+    while less idx cmd_len
+        a ch
+        load cmd_buf at idx
+        store it into ch
+        call serial_putc ch
+        add idx 1
+        store it into idx
+    end
+
+    print ""
+    return 0
+
+###############################################################################
+# Function: cmd_ls
+# -----------------------------------------------------------------------------
+# List files in the virtual filesystem.
+###############################################################################
+
+cmd_ls
+    call vfs_list
+    return 0
+
+###############################################################################
+# Function: cmd_cat
+# -----------------------------------------------------------------------------
+# Display the contents of a file.
+# Parses the filename after "cat " (4 characters).
+###############################################################################
+
+cmd_cat
+    a cmd_buf
+    a cmd_len
+    a filename
+    a name_idx
+    a fd
+    a read_buf
+    a bytes_read
+    a idx
+    a ch
+
+    store it into cmd_len
+    store it into cmd_buf
+
+    # Validate we have something after "cat "
+    if less cmd_len 5
+        print "Usage: cat <filename>"
+        return 0
+    end
+
+    # Extract filename starting at index 4
+    array 16 filename
+    store 0 into name_idx
+    a src_idx
+    store 4 into src_idx
+    while less src_idx cmd_len
+        load cmd_buf at src_idx
+        store it into ch
+        if equal ch 0
+            store cmd_len into src_idx
+        else
+            store ch into filename at name_idx
+            add name_idx 1
+            store it into name_idx
+            add src_idx 1
+            store it into src_idx
+        end
+    end
+    store 0 into filename at name_idx
+
+    # Open the file for reading
+    call vfs_open filename 0
+    store it into fd
+    if less fd 0
+        print "cat: file not found"
+        return 0
+    end
+
+    # Read and print contents
+    array 64 read_buf
+    print ""
+    while greater 1 0
+        call vfs_read fd read_buf 64
+        store it into bytes_read
+        if less_or_equal bytes_read 0
+            break
+        end
+
+        store 0 into idx
+        while less idx bytes_read
+            load read_buf at idx
+            store it into ch
+            call serial_putc ch
+            add idx 1
+            store it into idx
+        end
+    end
+    print ""
+
+    call vfs_close fd
+    return 0
+
+###############################################################################
+# Function: cmd_sync
+# -----------------------------------------------------------------------------
+# Sync the virtual filesystem to disk.
+###############################################################################
+
+cmd_sync
+    call vfs_sync_to_disk
+    return 0
+
+###############################################################################
+# Function: kernel_self_test
+# -----------------------------------------------------------------------------
+# Run a quick self-test of kernel subsystems after initialization.
+# This validates that PMM, VMM, heap, IPC, and scheduling are working.
+###############################################################################
+
+kernel_self_test
+    print "[kernel] Running self-test..."
+
+    # Test 1: PMM alloc/free
+    a test_page
+    call pmm_alloc
+    store it into test_page
+
+    if greater test_page 0
+        print "[test] PMM alloc: PASS"
+        call pmm_free test_page
+        print "[test] PMM free: PASS"
+    else
+        print "[test] PMM alloc: FAIL"
+    end
+
+    # Test 2: Heap allocation
+    a test_ptr
+    call kmalloc 64
+    store it into test_ptr
+
+    if greater test_ptr 0
+        print "[test] Heap kmalloc(64): PASS"
+        call kfree test_ptr
+        print "[test] Heap kfree: PASS"
+    else
+        print "[test] Heap kmalloc: FAIL"
+    end
+
+    # Test 3: IPC message buffer allocation
+    a test_msg
+    call ipc_alloc_buffer
+    store it into test_msg
+
+    if greater test_msg 0
+        print "[test] IPC buffer alloc: PASS"
+        call ipc_free_buffer test_msg
+        print "[test] IPC buffer free: PASS"
+    else
+        print "[test] IPC buffer alloc: FAIL"
+    end
+
+    print "[kernel] Self-test complete"
+    print ""
+
+    return 0
+
+###############################################################################
+# End of kernel.jstr
+###############################################################################
+# This module completes the Jasterish Micro-Kernel. After kernel_main
+# completes initialization, the system enters a fully operational state
+# with:
+#
+#   - Physical memory management (bitmap-based page allocation)
+#   - Virtual memory management (4-level x86-64 page tables)
+#   - Kernel heap allocator (buddy allocation with coalescing)
+#   - Round-robin process scheduler with time-slice preemption
+#   - Inter-process communication (message passing)
+#   - System call interface (11 syscalls via int 0x80)
+#   - Hardware drivers (PIC, PIT timer, PS/2 keyboard)
+#   - Interactive shell running in the init process
+#
+# Total modules: 7 source files, ~7500 lines of Jasterish code
+# Architecture: Micro-kernel with message-passing IPC
+###############################################################################
