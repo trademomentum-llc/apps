@@ -1,0 +1,51 @@
+# NeuroPattern examples — expanded grammar support in JStar compiler
+# "neuro pattern ..." now recognized as NeuroPattern op (via morphlex + grammar)
+
+neuro pattern focus adhd body doubling 2 minute rule
+
+neuro pattern habit sensory safe space
+
+neuro pattern masking fatigue recovery
+
+# New validated primitives pulled from foundation (Transformers/PEFT/Alpaca) + neuro data,
+# added to the governing JStarInstruction + morph bitfield after criteria validation
+# (deterministic, English verb syntax via morphlex, pure/syscall fit, neuro+ML utility,
+# no conflicts, extendable lowering/codegen, self-host ok).
+# Examples:
+quantize the neuro llm in 4bit
+adapt with lora then merge the adapter
+evaluate the instruct output
+habitstack for adhd task
+bodydouble the start
+externalize and validate the experience
+
+# Additional primitives surfaced + validated by `cargo run -- primitives pull`
+# (run on neuro_all.db + raw sources; 4 surfaced, 2 promoted after lemma cleanup: train, mask, optimize)
+# Later pull on behavioral_web_scan (130k vecs from real crawl + epiphany) surfaced 14 candidates (e.g. specializ, inhabit, strength, externaliz) but 0 promoted (many marginal/noisy per synergy crit 8; kept core clean).
+train the neuro llm on combined foundation neuro vectors
+mask the experience for sensory regulation
+optimize the habit stack for executive function
+
+# Behavioral health system-usage pattern recognition and subtle professional hints (epiphany: users may acclimate to symptoms/coping from repressed trauma without awareness)
+neuro pattern detect constant engaged screen time productivity decline doom scrolling hesitation in messages or tone of speech hint see professional for possible behavioral health condition
+neuro pattern recognize acclimation to symptoms coping mechanisms repressed trauma unawareness provide growing subtle hints without diagnosis
+neuro pattern system usage signs like doom scrolling or hesitation may indicate hidden condition the living system adjusts with gentle escalating hints to face hindrance head on
+
+# Explicit subtle non-diagnostic professional hint emission (epiphany integration; living system output when detecting acclimation/unawareness patterns from web scan + synthetic)
+neuro pattern detect screen time doomscroll hesitation tone messages hint consider professional without diagnosis
+neuro pattern living system output: I notice patterns in engagement and tone that many find benefit from exploring with a professional no judgment just support if it resonates
+
+# Manually promoted neuro-hints from relaxed epiphany / living-system path (post-pull human review of top candidates
+# boosted for unawareness_acclimation + behavioral sources, with expanded seeds and relaxed crit 3/8).
+# "doomscroll" and "engagement" directly support the epiphany text and system-usage signals (doom scrolling,
+# screen time, engagement/tone, coping, professional hints, acclimation, repressed trauma, "face the hindrance head on").
+# Core 8-crit remain strict for fundamental ops.
+neuro pattern doomscroll regulate screen time tone coping professional hint
+neuro pattern engagement tone hint professional unawareness acclimation face hindrance head on
+neuro pattern screen time productivity decline doomscroll hesitation masking coping hint consider professional
+
+# These parse as Execute { op: NewPrimitive, ... } (see jstar parse tests).
+# In IR/codegen: Nop placeholder (future: dedicated kernel/LLM syscall or IR for on-device neuro pattern execution + vector dataset ops).
+# Total pulled/validated (CLI run): 12 ops + 3 morph flags (core 9 + train/mask/optimize).
+# Added web scan data for behavioral health + system usage + unawareness.
+# Ep2 lowering example (step 2030=106.46 ... + ep2 eval 94.7185 (lm=10.8197, ppl=49995.81, best held 94.6960), now post-eval / epoch 3 steps 2035+ ... 2940=91.0078, 2945=83.4677, 2950=87.6595, 2955=88.6270, 2960=82.2784, 2965=99.1352, 2970=86.3863, 2975=92.4867, 2980=99.1352, 2985=82.3234, 2990=106.6095, 2995=103.8344, 3000=84.9148, 3005=93.6469, 3010=89.8241, 3015=86.3731, 3020=91.9714, 3025=89.2172, 3030=132.5474, 3035=84.7837, 3040=107.7731, 3045=106.5187, 3050=110.0745. Eval after epoch 3: loss=94.7185, lm=10.8197, ppl=49995.81. Epoch 3/3: train_loss=94.6960, lm_loss=10.8197, ppl=49995.81, best=94.6960. 3-epoch fine-tune complete after 3051 steps on the 130k behavioral_web_scan + unawareness_acclimation epiphany db. Best stable 94.6960. neuro pattern train on behavioral system-usage vectors (filter NEURO_HABIT | EXEC_DYSFUNCTION) emit hint professional unawareness acclimation "face the hindrance head on" (ep2 eval 94.7185, best held 94.6960; final). post-2030+ pull on this batch (behavioral_web_scan + epiphany db): 14 candidates passed 8-crit (incl. 'custombathremodel' from SSC about-page comment spam that tokenized to Verb+Action, plus marginals like specializ/inhabit/strength), 0 promoted per crit 8 (noise/low synergy). Running total promoted: 12 ops + 3 morph flags (core 9 + Train/Mask/Optimize). 3-epoch run complete.
