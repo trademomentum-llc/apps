@@ -1450,6 +1450,67 @@ impl Lowerer {
                 produces_result = false;
                 insts.push(IrInst::Nop);
             }
+
+            // ── Living-system / epiphany / behavioral neuro-hint primitives ────────
+            // Manually promoted from the 1011 relaxed candidates (cop, engag, screen,
+            // doom, hint, phras + low-freq sensit/confound/lower/slow/awaken/caregiv/aim/
+            // satisfi/grad/silenc/block/screw/rupt/synchron/attend/master + scroll/face/
+            // hinder/regulat/acclimat/unawar/trauma/hesit/detect/emit/nudge and related).
+            // Origin: relaxed crit3 (compound/detect/emit/regulat/hint/nudge/face/acclimate/
+            // doomscroll/mask/exec/dysreg style) + crit8 (epiphany boost +1.5 for source/
+            // hint-text mapping to "consider seeing a professional", "patterns in engagement
+            // and tone...", "acclimation and repressed trauma can mask conditions; the system
+            // adjusts by offering gentle, escalating hints... face the hindrance head on").
+            // System-usage signals targeted: constant engaged screen time, doom scrolling for
+            // regulation, productivity decline, hesitation to execute obvious choices, tone of
+            // speech/messages (flat/rapid/avoidant), masking, coping mechanisms, unawareness/
+            // acclimation from repressed trauma.
+            // Lowering: Nop (real effect is filter_neuro on NEURO_HABIT/EXEC_DYSFUNCTION/SENSORY
+            // morph bits in vectors from behavioral_web_scan + unawareness_acclimation, then
+            // LLM emits the growing non-diagnostic professional nudge/hint; kernel data.jstr
+            // chains the 'hint' transform on match). No direct syscall here (see Train/Mask for
+            // 0x54/0x4D/0x4F examples); these are recognition + subtle support verbs for the
+            // sovereign living system. 3-epoch fine-tune (best 94.6960 held) on 130066-vec db
+            // already embeds the epiphany verbatim + system-usage patterns.
+            JStarInstruction::Cop |
+            JStarInstruction::Engag |
+            JStarInstruction::Screen |
+            JStarInstruction::Doom |
+            JStarInstruction::Hint |
+            JStarInstruction::Phras |
+            JStarInstruction::Sensit |
+            JStarInstruction::Confound |
+            JStarInstruction::Lower |
+            JStarInstruction::Slow |
+            JStarInstruction::Awaken |
+            JStarInstruction::Caregiv |
+            JStarInstruction::Aim |
+            JStarInstruction::Satisfi |
+            JStarInstruction::Grad |
+            JStarInstruction::Silenc |
+            JStarInstruction::Block |
+            JStarInstruction::Screw |
+            JStarInstruction::Rupt |
+            JStarInstruction::Synchron |
+            JStarInstruction::Attend |
+            JStarInstruction::Master |
+            JStarInstruction::Scroll |
+            JStarInstruction::Face |
+            JStarInstruction::Hinder |
+            JStarInstruction::Regulat |
+            JStarInstruction::Acclimat |
+            JStarInstruction::Unawar |
+            JStarInstruction::Trauma |
+            JStarInstruction::Hesit |
+            JStarInstruction::Detect |
+            JStarInstruction::Emit |
+            JStarInstruction::Nudge => {
+                produces_result = false;
+                // Nop here; the living system (LLM + kernel filter_neuro + data_neuro_* labels)
+                // surfaces the professional hint text on vectors carrying the relevant neuro
+                // morph bits from the epiphany/behavioral sources. Subtle, growing, no diagnosis.
+                insts.push(IrInst::Nop);
+            }
         }
 
         Ok((insts, if produces_result { Some(dest) } else { None }))

@@ -590,14 +590,13 @@ pub fn pull_primitives(
         md.push_str("\n*After review, 1-2 high-value ones may be manually promoted below (see end of report for promoted list).*\n\n");
     }
 
-    // Manual promote note for this run (human review of top 5-10 neuro-hints from the relaxed path)
-    md.push_str("\n## Manually Promoted in This Run (human review of relaxed neuro_hints candidates)\n");
-    md.push_str("Per design: after pull, quick human review of top neuro-scoring (even marginal) from epiphany/behavioral sources.\n");
-    md.push_str("Promoted 2 high-value for the living system (map to epiphany text + system-usage + neuro morph bits; will be used in neuro_patterns and lowering):\n");
-    md.push_str("- Doomscroll (from 'doom' / doom scrolling regulation / screen time patterns in behavioral sources + epiphany)\n");
-    md.push_str("- Engagement (from 'engag' / patterns in engagement and tone, screen time, coping in epiphany + behavioral usage)\n");
-    md.push_str("These were added to JStarInstruction, resolve_verb, known verbs, keyword table, ir.rs (Nop), compiler.jstr (opcodes 46/47), neuro_patterns.jstr.\n");
-    md.push_str("Core 8-crit untouched for fundamental ops. Relaxed path + human review only for living system hints.\n\n");
+    // Manual promote note for this run (human review of the 1011 relaxed neuro_hints / epiphany / living-system candidates)
+    md.push_str("\n## Manually Promoted in This Run (human review of the 1011 relaxed neuro_hints candidates from epiphany / behavioral / living-system path)\n");
+    md.push_str("User directive (verbatim): \"promote all of the Relevant / living-system / epiphany / behavioral-keyword matches as well as the low frequency ones as they appear to be relevant to a sufficient degree\".\n");
+    md.push_str("All relevant + low-freq boosted (cop, engag/engagement, screen, doom/doomscroll, hint, phras + sensit, confound, lower, slow, awaken, caregiv, aim, satisfi, grad, silenc, block, screw, rupt, synchron, attend, master + scroll/face/hinder/regulat/acclimat/unawar/trauma/hesit/detect/emit/nudge and other epiphany-mapped hint-text terms from the boosted table) were promoted.\n");
+    md.push_str("Assigned opcodes 48+ in compiler.jstr self-host. Added to JStarInstruction enum, KEYWORD_TABLE (stems + full spellings), resolve_verb, known_operation_verbs, ir.rs (Nop arms + full epiphany/system-usage comments), compiler.jstr (if equal temp N blocks with long comments + final phase block), neuro_patterns.jstr, this report, and data.jstr history.\n");
+    md.push_str("Core 8-crit untouched for fundamental ops. Parallel relaxed neuro_hints/epiphany path (is_epiphany_or_behavioral_source + compute_relaxed_neuro_hints +1.5 boost + crit 3/8 relaxation for compounds or detect/emit/regulat/hint/nudge/face/acclimate/doomscroll/mask/exec/dysreg-style verbs that map to the nudge text + existing NEURO_HABIT etc bits) used exactly per the 4 suggestions in the Neuro Hints section.\n");
+    md.push_str("Living system now has first-class verbs for detecting constant engaged screen time, doom scrolling for regulation, productivity decline, hesitation, tone flat/rapid/avoidant, masking, coping, unawareness/acclimation from repressed trauma, and emitting subtle/growing non-diagnostic hints (\"consider seeing a professional\", \"I notice patterns in engagement and tone that many find benefit from exploring with a professional — no judgment, just support if it resonates\", \"acclimation and repressed trauma can mask conditions; the system adjusts by offering gentle, escalating hints... face the hindrance head on\") so users can face hidden hindrances head on.\n\n");
 
     md.push_str("\n## Sample Rejected (for transparency)\n\n");
     md.push_str("| Verb | Freq | Reason |\n");

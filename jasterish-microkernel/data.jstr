@@ -25,6 +25,17 @@
 #   in_dbh ; data_mmap_db ; out_addr (vectors base for map)
 #   data_load_neuro_pattern (stub for swarm)
 #
+# Mass promotion (macos worktree only): promoted all relevant living-system / epiphany /
+# behavioral-keyword + low-freq from 1011 (cop/engag/screen/doom/hint/phras + sensit/confound/
+# lower/slow/awaken/caregiv/aim/satisfi/grad/silenc/block/screw/rupt/synchron/attend/master/
+# scroll/face/hinder/regulat/acclimat/unawar/trauma/hesit/detect/emit/nudge etc).
+# User: "promote all of the Relevant / living-system / epiphany / behavioral-keyword matches
+# as well as the low frequency ones as they appear to be relevant to a sufficient degree".
+# filter_neuro (NEURO_HABIT | EXEC_DYSFUNCTION) then chain 'hint' transform on match to surface
+# the professional nudge ("consider seeing a professional", "patterns in engagement and tone...",
+# "acclimation and repressed trauma can mask... face the hindrance head on").
+# 3-epoch complete, best 94.6960 held. Verbatim epiphany + system-usage list in labels.
+#
 # TokenVector layout (12B, mapped to 3 words):
 #   0: id (i32 BLAKE3 lexeme)
 #   4: lemma_id (i32)

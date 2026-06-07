@@ -78,6 +78,56 @@ pub enum JStarInstruction {
     Syscall,
     Halt,
     Nop,
+
+    // ── Living-system / epiphany / behavioral neuro-hint primitives ─────────
+    // Manually promoted (all relevant + low-freq boosted from the 1011 relaxed
+    // neuro_hints candidates after human review of epiphany + behavioral_web_scan
+    // + unawareness_acclimation sources). These support detection of system-usage
+    // signals (constant engaged screen time, doom scrolling for regulation,
+    // productivity decline, hesitation to execute choices, tone of speech/messages
+    // that is flat/rapid/avoidant, masking, coping mechanisms) and unawareness/
+    // acclimation due to repressed trauma. They emit subtle/growing/non-diagnostic
+    // hints ("consider seeing a professional", "I notice patterns in engagement
+    // and tone that many find benefit from exploring with a professional — no
+    // judgment, just support if it resonates", "acclimation and repressed trauma
+    // can mask conditions; the system adjusts by offering gentle, escalating hints
+    // ... face the hindrance head on") so users can face hidden hindrances head on.
+    // Lowered as Nop (real dispatch effect lives in LLM + kernel filter_neuro on
+    // NEURO_* morph bits + data.jstr hint transform). Origin: relaxed crit 3/8 path
+    // + epiphany boost +1.5 for source/hint-text mapping.
+    Cop,
+    Engag,
+    Screen,
+    Doom,
+    Hint,
+    Phras,
+    Sensit,
+    Confound,
+    Lower,
+    Slow,
+    Awaken,
+    Caregiv,
+    Aim,
+    Satisfi,
+    Grad,
+    Silenc,
+    Block,
+    Screw,
+    Rupt,
+    Synchron,
+    Attend,
+    Master,
+    Scroll,
+    Face,
+    Hinder,
+    Regulat,
+    Acclimat,
+    Unawar,
+    Trauma,
+    Hesit,
+    Detect,
+    Emit,
+    Nudge,
 }
 
 /// What category a token falls into in the JStar language.
@@ -260,6 +310,46 @@ static KEYWORD_TABLE: LazyLock<HashMap<i32, TokenCategory>> = LazyLock::new(|| {
         ("strlen",   TokenCategory::Operation(JStarInstruction::StrLen)),
         ("strcopy",  TokenCategory::Operation(JStarInstruction::StrCopy)),
         ("hash",     TokenCategory::Operation(JStarInstruction::Hash)),
+        // ── Living-system epiphany / behavioral neuro-hint ops (relaxed path, human review of 1011) ──
+        // These enable the living system to recognize system-usage patterns and emit subtle professional hints.
+        ("cop",       TokenCategory::Operation(JStarInstruction::Cop)),
+        ("coping",    TokenCategory::Operation(JStarInstruction::Cop)),
+        ("engag",     TokenCategory::Operation(JStarInstruction::Engag)),
+        ("engagement", TokenCategory::Operation(JStarInstruction::Engag)),
+        ("screen",    TokenCategory::Operation(JStarInstruction::Screen)),
+        ("doom",      TokenCategory::Operation(JStarInstruction::Doom)),
+        ("doomscroll", TokenCategory::Operation(JStarInstruction::Doom)),
+        ("hint",      TokenCategory::Operation(JStarInstruction::Hint)),
+        ("phras",     TokenCategory::Operation(JStarInstruction::Phras)),
+        ("phrase",    TokenCategory::Operation(JStarInstruction::Phras)),
+        ("sensit",    TokenCategory::Operation(JStarInstruction::Sensit)),
+        ("confound",  TokenCategory::Operation(JStarInstruction::Confound)),
+        ("lower",     TokenCategory::Operation(JStarInstruction::Lower)),
+        ("slow",      TokenCategory::Operation(JStarInstruction::Slow)),
+        ("awaken",    TokenCategory::Operation(JStarInstruction::Awaken)),
+        ("caregiv",   TokenCategory::Operation(JStarInstruction::Caregiv)),
+        ("aim",       TokenCategory::Operation(JStarInstruction::Aim)),
+        ("satisfi",   TokenCategory::Operation(JStarInstruction::Satisfi)),
+        ("grad",      TokenCategory::Operation(JStarInstruction::Grad)),
+        ("silenc",    TokenCategory::Operation(JStarInstruction::Silenc)),
+        ("block",     TokenCategory::Operation(JStarInstruction::Block)),
+        ("screw",     TokenCategory::Operation(JStarInstruction::Screw)),
+        ("rupt",      TokenCategory::Operation(JStarInstruction::Rupt)),
+        ("synchron",  TokenCategory::Operation(JStarInstruction::Synchron)),
+        ("synchroniz", TokenCategory::Operation(JStarInstruction::Synchron)),
+        ("attend",    TokenCategory::Operation(JStarInstruction::Attend)),
+        ("master",    TokenCategory::Operation(JStarInstruction::Master)),
+        ("scroll",    TokenCategory::Operation(JStarInstruction::Scroll)),
+        ("face",      TokenCategory::Operation(JStarInstruction::Face)),
+        ("hinder",    TokenCategory::Operation(JStarInstruction::Hinder)),
+        ("regulat",   TokenCategory::Operation(JStarInstruction::Regulat)),
+        ("acclimat",  TokenCategory::Operation(JStarInstruction::Acclimat)),
+        ("unawar",    TokenCategory::Operation(JStarInstruction::Unawar)),
+        ("trauma",    TokenCategory::Operation(JStarInstruction::Trauma)),
+        ("hesit",     TokenCategory::Operation(JStarInstruction::Hesit)),
+        ("detect",    TokenCategory::Operation(JStarInstruction::Detect)),
+        ("emit",      TokenCategory::Operation(JStarInstruction::Emit)),
+        ("nudge",     TokenCategory::Operation(JStarInstruction::Nudge)),
         // ── Scope (explicit keyword — not a determiner) ──
         ("global", TokenCategory::Scope(ScopeKind::Global)),
         // ── Data (type primitives and common nouns) ──
@@ -413,6 +503,43 @@ fn resolve_verb(lemma: &str) -> JStarInstruction {
         "syscall" | "interrupt" | "signal" => JStarInstruction::Syscall,
         "allocate" | "alloc" | "reserve" => JStarInstruction::Allocate,
 
+        // Living-system / epiphany / behavioral neuro-hint primitives (promoted from 1011 relaxed candidates)
+        // cop/engag/screen/doom/hint/phras + low-freq sensit/confound/lower/slow/awaken/caregiv/aim/satisfi/grad/silenc/block/screw/rupt/synchron/attend/master + scroll/face/hinder/regulat/acclimat/unawar/trauma/hesit/detect/emit/nudge
+        // All map to Nop in IR (effect via LLM patterns + kernel filter_neuro + data.jstr hint transform on neuro morph bits).
+        "cop" | "coping" => JStarInstruction::Cop,
+        "engag" | "engagement" => JStarInstruction::Engag,
+        "screen" => JStarInstruction::Screen,
+        "doom" | "doomscroll" => JStarInstruction::Doom,
+        "hint" => JStarInstruction::Hint,
+        "phras" | "phrase" => JStarInstruction::Phras,
+        "sensit" => JStarInstruction::Sensit,
+        "confound" => JStarInstruction::Confound,
+        "lower" => JStarInstruction::Lower,
+        "slow" => JStarInstruction::Slow,
+        "awaken" => JStarInstruction::Awaken,
+        "caregiv" => JStarInstruction::Caregiv,
+        "aim" => JStarInstruction::Aim,
+        "satisfi" => JStarInstruction::Satisfi,
+        "grad" => JStarInstruction::Grad,
+        "silenc" => JStarInstruction::Silenc,
+        "block" => JStarInstruction::Block,
+        "screw" => JStarInstruction::Screw,
+        "rupt" => JStarInstruction::Rupt,
+        "synchron" | "synchroniz" => JStarInstruction::Synchron,
+        "attend" => JStarInstruction::Attend,
+        "master" => JStarInstruction::Master,
+        "scroll" => JStarInstruction::Scroll,
+        "face" => JStarInstruction::Face,
+        "hinder" => JStarInstruction::Hinder,
+        "regulat" => JStarInstruction::Regulat,
+        "acclimat" => JStarInstruction::Acclimat,
+        "unawar" => JStarInstruction::Unawar,
+        "trauma" => JStarInstruction::Trauma,
+        "hesit" => JStarInstruction::Hesit,
+        "detect" => JStarInstruction::Detect,
+        "emit" => JStarInstruction::Emit,
+        "nudge" => JStarInstruction::Nudge,
+
         // Default: treat unknown verbs as no-op
         _ => JStarInstruction::Nop,
     }
@@ -484,6 +611,23 @@ fn resolve_pronoun(lemma: &str) -> RegAlias {
         "this" => RegAlias::Counter,
         _ => RegAlias::Default,
     }
+}
+
+/// Returns the set of base verb forms that are already known JStar operations.
+/// Used by the primitives pull (crit 4) to avoid re-promoting synonyms or conflicts.
+/// Includes core architecture verbs + manually promoted living-system / epiphany
+/// behavioral neuro-hint primitives (the full relevant + low-freq set from the 1011).
+pub fn known_operation_verbs() -> std::collections::HashSet<&'static str> {
+    let mut s = std::collections::HashSet::new();
+    // core
+    for v in &["return", "add", "sum", "subtract", "multiply", "divide", "store", "save", "load", "fetch", "move", "copy", "jump", "goto", "call", "invoke", "halt", "exit", "end", "compare", "equal", "equals", "less", "greater", "print", "push", "pop", "negate", "syscall", "bitand", "bitor", "bitxor", "bitnot", "shift", "allocate", "addressof", "open", "close", "length", "strcmp", "strlen", "strcopy", "hash", "define", "function"] {
+        s.insert(*v);
+    }
+    // neuro / living-system promoted (strict core + relaxed epiphany path)
+    for v in &["train", "mask", "optimize", "neuro", "habit", "stack", "focus", "body", "double", "externalize", "validate", "pattern", "quantize", "adapt", "merge", "evaluate", "instruct", "doomscroll", "engagement", "cop", "coping", "engag", "screen", "doom", "hint", "phras", "phrase", "sensit", "confound", "lower", "slow", "awaken", "caregiv", "aim", "satisfi", "grad", "silenc", "block", "screw", "rupt", "synchron", "synchroniz", "attend", "master", "scroll", "face", "hinder", "regulat", "acclimat", "unawar", "trauma", "hesit", "detect", "emit", "nudge"] {
+        s.insert(*v);
+    }
+    s
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
