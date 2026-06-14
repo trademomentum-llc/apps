@@ -1,0 +1,703 @@
+# =============================================================================
+# drivers.jstr — Hardware Device Drivers Module
+# Jasterish Microkernel
+#
+# Provides low-level drivers for essential x86-64 hardware:
+#   - 8259 PIC    : Programmable Interrupt Controller (cascade setup,
+#                   IRQ masking/unmasking, End-of-Interrupt signalling)
+#   - PIT 8253/8254: Programmable Interval Timer (kernel tick source)
+#   - PS/2 Keyboard: Scan-code reading and ASCII translation
+#
+# All I/O is performed via x86 port instructions (inb/outb).
+# These are represented as 'port_read' and 'port_write' in Jasterish.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 8259 PIC Constants
+# ---------------------------------------------------------------------------
+global PIC1_COMMAND  int    # 0x20 — Master PIC command port
+global PIC1_DATA     int    # 0x21 — Master PIC data port
+global PIC2_COMMAND  int    # 0xA0 — Slave PIC command port
+global PIC2_DATA     int    # 0xA1 — Slave PIC data port
+global ICW1_INIT     int    # 0x11 — Start initialization (cascade mode)
+global ICW4_8086     int    # 0x01 — 8086/88 mode (not MCS-80/85)
+global IRQ_OFFSET    int    # 0x20 — Vector offset for master IRQs (IRQ0 = 0x20)
+global IRQ2_OFFSET   int    # 0x28 — Vector offset for slave IRQs (IRQ8 = 0x28)
+
+# ---------------------------------------------------------------------------
+# PIT (Programmable Interval Timer) Constants
+# ---------------------------------------------------------------------------
+global PIT_CHANNEL0  int    # 0x40 — PIT channel 0 data port (IRQ0)
+global PIT_CHANNEL1  int    # 0x41 — PIT channel 1 (deprecated PC speaker)
+global PIT_CHANNEL2  int    # 0x42 — PIT channel 2 (PC speaker)
+global PIT_COMMAND   int    # 0x43 — PIT command/mode register
+global PIT_FREQUENCY int    # 1193182 — PIT input crystal frequency in Hz
+global PIT_TARGET_HZ int    # 1000 — Desired interrupt frequency (1ms ticks)
+
+# ---------------------------------------------------------------------------
+# PS/2 Keyboard Constants
+# ---------------------------------------------------------------------------
+global KB_DATA_PORT   int    # 0x60 — Keyboard scan code / data port
+global KB_STATUS_PORT int    # 0x64 — Keyboard controller status/command
+global KB_BUFFER_SIZE int    # 128 — Ring buffer size for typed characters
+global KB_CMD_LED     int    # 0xED — Command to set keyboard LEDs
+global KB_ACK         int    # 0xFA — Keyboard acknowledgment byte
+
+# ---------------------------------------------------------------------------
+# Keyboard global state
+# ---------------------------------------------------------------------------
+global keyboard_buffer   array 128 byte   # Ring buffer of typed characters
+global keyboard_head     int              # Read index (consumer)
+global keyboard_tail     int              # Write index (producer)
+global scancode_table    array 128 byte   # Scancode -> ASCII lookup table
+
+
+# =============================================================================
+# PIC (8259 Programmable Interrupt Controller) Driver
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# pic_init — Initialize the 8259 PIC controllers
+#
+# Performs a full initialization sequence (ICW1-ICW4) on both the
+# master and slave PICs.  Remaps hardware IRQs to software interrupt
+# vectors 0x20-0x2F to avoid conflicts with CPU exception vectors
+# (0x00-0x1F).  After initialization, ALL interrupts are masked
+# (disabled); individual drivers must call pic_unmask_irq() to enable
+# the IRQs they handle.
+#
+# Cascade setup: the slave PIC is connected to the master's IRQ2.
+# ---------------------------------------------------------------------------
+function pic_init:
+    # Initialize PIC port constants
+    store 0x20 into PIC1_COMMAND
+    store 0x21 into PIC1_DATA
+    store 0xA0 into PIC2_COMMAND
+    store 0xA1 into PIC2_DATA
+    store 0x11 into ICW1_INIT
+    store 0x01 into ICW4_8086
+    store 0x20 into IRQ_OFFSET
+    store 0x28 into IRQ2_OFFSET
+
+    # --- ICW1: Start initialization ---
+    # Bit 4 = 1 (ICW1), Bit 0 = 1 (ICW4 needed), Bit 1 = 0 (cascade mode)
+    # Value 0x11 = 0001 0001: init + expect ICW4
+    port_write PIC1_COMMAND ICW1_INIT
+    port_write PIC2_COMMAND ICW1_INIT
+
+    # --- ICW2: Set vector offsets ---
+    # Master IRQ0-7  -> vectors 0x20-0x27
+    # Slave  IRQ8-15 -> vectors 0x28-0x2F
+    port_write PIC1_DATA IRQ_OFFSET
+    port_write PIC2_DATA IRQ2_OFFSET
+
+    # --- ICW3: Configure cascade wiring ---
+    # Master: bit 2 set means slave on IRQ2  -> 0x04
+    # Slave:  identity 2 means connected to master's IRQ2 -> 0x02
+    port_write PIC1_DATA 0x04
+    port_write PIC2_DATA 0x02
+
+    # --- ICW4: Set operating mode ---
+    # 0x01 = 8086/88 mode (not 8085), normal EOI, non-buffered, no SFNM
+    port_write PIC1_DATA ICW4_8086
+    port_write PIC2_DATA ICW4_8086
+
+    # --- OCW1: Mask ALL interrupts initially ---
+    # 0xFF on both PICs = all IRQ lines disabled.
+    # Each device driver will unmask its own IRQ when ready.
+    port_write PIC1_DATA 0xFF
+    port_write PIC2_DATA 0xFF
+
+    print "PIC: 8259 initialized, IRQs mapped to 0x20-0x2F"
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# pic_unmask_irq — Enable (unmask) a specific IRQ line
+#
+# irq: IRQ number to enable (0-15)
+#
+# Reads the current mask from the appropriate PIC data port,
+# clears the corresponding bit (0 = enabled), and writes it back.
+# IRQs 0-7 are on the master PIC; 8-15 on the slave.
+# ---------------------------------------------------------------------------
+function pic_unmask_irq:
+    a irq
+    a mask
+
+    # Validate IRQ number
+    if greater irq 15:
+        print "PIC: error — cannot unmask IRQ > 15"
+        return -1
+    end
+    if less irq 0:
+        print "PIC: error — cannot unmask negative IRQ"
+        return -1
+    end
+
+    # Master PIC handles IRQs 0-7
+    if less irq 8:
+        # Read current mask from master PIC
+        port_read PIC1_DATA
+        store it into mask
+
+        # Clear the bit for this IRQ (bit = 0 means unmasked/enabled)
+        a bit
+        shift_left 1 irq
+        store it into bit
+        bitwise_not bit
+        store it into bit
+        bitwise_and mask bit
+        store it into mask
+
+        # Write updated mask back
+        port_write PIC1_DATA mask
+    end
+
+    # Slave PIC handles IRQs 8-15
+    if greater_or_equal irq 8:
+        # Read current mask from slave PIC
+        port_read PIC2_DATA
+        store it into mask
+
+        # Clear the bit for this IRQ (irq - 8 gives 0-7 for slave)
+        a bit
+        subtract irq 8
+        store it into bit
+        shift_left 1 bit
+        store it into bit
+        bitwise_not bit
+        store it into bit
+        bitwise_and mask bit
+        store it into mask
+
+        # Write updated mask back to slave PIC
+        port_write PIC2_DATA mask
+    end
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# pic_mask_irq — Disable (mask) a specific IRQ line
+#
+# irq: IRQ number to disable (0-15)
+#
+# Reads the current mask, sets the corresponding bit (1 = disabled),
+# and writes it back.  Complement of pic_unmask_irq.
+# ---------------------------------------------------------------------------
+function pic_mask_irq:
+    a irq
+    a mask
+
+    # Validate IRQ number
+    if greater irq 15:
+        print "PIC: error — cannot mask IRQ > 15"
+        return -1
+    end
+    if less irq 0:
+        print "PIC: error — cannot mask negative IRQ"
+        return -1
+    end
+
+    # Master PIC: IRQs 0-7
+    if less irq 8:
+        # Read current mask
+        port_read PIC1_DATA
+        store it into mask
+
+        # Set the bit for this IRQ (bit = 1 means masked/disabled)
+        a bit
+        shift_left 1 irq
+        store it into bit
+        bitwise_or mask bit
+        store it into mask
+
+        # Write updated mask
+        port_write PIC1_DATA mask
+    end
+
+    # Slave PIC: IRQs 8-15
+    if greater_or_equal irq 8:
+        # Read current mask
+        port_read PIC2_DATA
+        store it into mask
+
+        # Set the bit (irq - 8 for slave offset)
+        a bit
+        subtract irq 8
+        store it into bit
+        shift_left 1 bit
+        store it into bit
+        bitwise_or mask bit
+        store it into mask
+
+        # Write updated mask
+        port_write PIC2_DATA mask
+    end
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# pic_eoi — Send End-of-Interrupt signal to the PIC
+#
+# irq: IRQ number that was just serviced (0-15)
+#
+# Must be called at the end of every hardware interrupt handler to
+# tell the PIC that the interrupt has been handled.  If the IRQ came
+# from the slave PIC (IRQ >= 8), we must send EOI to BOTH the slave
+# AND the master.  For master IRQs (0-7), only the master needs EOI.
+#
+# Sending EOI is what allows the PIC to re-prioritize and deliver
+# the next pending interrupt.
+# ---------------------------------------------------------------------------
+function pic_eoi:
+    a irq
+
+    # If the IRQ came from the slave PIC (IRQ 8-15), we must send
+    # EOI to the slave first, then cascade up to the master.
+    if greater_or_equal irq 8:
+        port_write PIC2_COMMAND 0x20
+    end
+
+    # Always send EOI to the master PIC (required for ALL IRQs).
+    # For slave IRQs, this acknowledges the cascade path (IRQ2).
+    port_write PIC1_COMMAND 0x20
+
+    return
+
+
+# =============================================================================
+# PIT (Programmable Interval Timer) Driver
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# pit_init — Configure the PIT for periodic timer interrupts
+#
+# Programs PIT channel 0 in rate-generator mode (mode 2) to fire
+# at approximately 1000 Hz, giving us 1-millisecond timer ticks.
+# The divisor is calculated as:
+#   divisor = PIT_FREQUENCY / target_hz = 1193182 / 1000 = 1193
+#
+# After configuration, IRQ0 is unmasked so timer interrupts reach
+# the CPU.  The pit_handler() services each tick.
+# ---------------------------------------------------------------------------
+function pit_init:
+    # Initialize PIT port constants
+    store 0x40 into PIT_CHANNEL0
+    store 0x41 into PIT_CHANNEL1
+    store 0x42 into PIT_CHANNEL2
+    store 0x43 into PIT_COMMAND
+    store 1193182 into PIT_FREQUENCY
+    store 1000 into PIT_TARGET_HZ
+
+    # Calculate the divisor: 1193182 / 1000 = 1193 (truncated)
+    # This gives us approximately 1000.15 Hz — close enough to 1ms.
+    a divisor
+    divide PIT_FREQUENCY PIT_TARGET_HZ
+    store it into divisor
+
+    # --- Send command byte to PIT ---
+    # 0x36 = 0011 0110:
+    #   Bits 7-6: channel select    = 00 (channel 0)
+    #   Bits 5-4: access mode       = 11 (lobyte/hibyte)
+    #   Bits 3-1: operating mode    = 011 (square wave / rate generator)
+    #   Bit 0:    BCD/binary        = 0 (16-bit binary)
+    port_write PIT_COMMAND 0x36
+
+    # --- Send divisor low byte ---
+    a divisor_low
+    bitwise_and divisor 0xFF
+    store it into divisor_low
+    port_write PIT_CHANNEL0 divisor_low
+
+    # --- Send divisor high byte ---
+    a divisor_high
+    shift_right divisor 8
+    store it into divisor_high
+    bitwise_and divisor_high 0xFF
+    store it into divisor_high
+    port_write PIT_CHANNEL0 divisor_high
+
+    # Enable timer interrupts (unmask IRQ0)
+    call pic_unmask_irq 0
+
+    print "PIT: timer configured for 1000Hz"
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# pit_handler — Timer interrupt handler (called on every PIT tick)
+#
+# This is the most frequently-executed code in the kernel.  It runs
+# on every timer tick (approx. every 1 millisecond) and performs:
+#   1. Increments the global tick_count
+#   2. Wakes any sleeping processes whose timers have expired
+#   3. Every 10 ticks (10ms): calls schedule() for preemption
+#   4. Sends End-of-Interrupt to the PIC
+#
+# The handler must be fast — it is effectively the kernel heartbeat.
+# ---------------------------------------------------------------------------
+function pit_handler:
+    # Increment the global millisecond counter
+    load tick_count
+    add it 1
+    store it into tick_count
+
+    # Check if any sleeping processes should be woken
+    call wake_sleepers
+
+    # Every 10 ticks (~10ms), invoke the scheduler for round-robin
+    # preemption.  This ensures no process monopolizes the CPU.
+    a current_tick
+    load tick_count
+    store it into current_tick
+
+    a tick_mod
+    modulo current_tick 10
+    store it into tick_mod
+
+    if compare tick_mod 0:
+        call schedule
+    end
+
+    # Acknowledge the interrupt to the PIC so the next IRQ can fire
+    call pic_eoi 0
+
+    return
+
+
+# =============================================================================
+# PS/2 Keyboard Driver
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# keyboard_init — Initialize the PS/2 keyboard driver
+#
+# Sets up the scan-code-to-ASCII translation table, initializes the
+# ring buffer head/tail pointers, and unmasks IRQ1 so keyboard
+# interrupts are delivered to keyboard_handler().
+# ---------------------------------------------------------------------------
+function keyboard_init:
+    # Initialize keyboard port constants
+    store 0x60 into KB_DATA_PORT
+    store 0x64 into KB_STATUS_PORT
+    store 128 into KB_BUFFER_SIZE
+    store 0xED into KB_CMD_LED
+    store 0xFA into KB_ACK
+
+    # Initialize ring buffer state
+    store 0 into keyboard_head
+    store 0 into keyboard_tail
+
+    # -------------------------------------------------------------------
+    # Build the scancode-to-ASCII lookup table.
+    # This table maps set-1 scancodes (without break bit 0x80)
+    # to ASCII characters for a US QWERTY layout.
+    # Scancodes not in this table map to 0 (unknown).
+    #
+    # Scancode layout (set 1, make codes only):
+    #   0x01 = Esc        0x02 = '1'      0x03 = '2'
+    #   0x04 = '3'        0x05 = '4'      0x06 = '5'
+    #   0x07 = '6'        0x08 = '7'      0x09 = '8'
+    #   0x0A = '9'        0x0B = '0'      0x0C = '-'
+    #   0x0D = '='        0x0E = Backspace 0x0F = Tab
+    #   0x10 = 'q'        0x11 = 'w'      0x12 = 'e'
+    #   0x13 = 'r'        0x14 = 't'      0x15 = 'y'
+    #   0x16 = 'u'        0x17 = 'i'      0x18 = 'o'
+    #   0x19 = 'p'        0x1A = '['      0x1B = ']'
+    #   0x1C = Enter      0x1E = 'a'      0x1F = 's'
+    #   0x20 = 'd'        0x21 = 'f'      0x22 = 'g'
+    #   0x23 = 'h'        0x24 = 'j'      0x25 = 'k'
+    #   0x26 = 'l'        0x27 = ';'      0x28 = "'"
+    #   0x29 = '`'        0x2B = '\'      0x2C = 'z'
+    #   0x2D = 'x'        0x2E = 'c'      0x2F = 'v'
+    #   0x30 = 'b'        0x31 = 'n'      0x32 = 'm'
+    #   0x33 = ','        0x34 = '.'      0x35 = '/'
+    #   0x39 = Space
+    # -------------------------------------------------------------------
+
+    # Initialize entire table to 0 (unknown scancode)
+    a i
+    for i from 0 to 127:
+        store 0 into scancode_table at i
+    end
+
+    # Number row: scancodes 0x02-0x0D -> '1' through '='
+    store 49  into scancode_table at 0x02   # '1'
+    store 50  into scancode_table at 0x03   # '2'
+    store 51  into scancode_table at 0x04   # '3'
+    store 52  into scancode_table at 0x05   # '4'
+    store 53  into scancode_table at 0x06   # '5'
+    store 54  into scancode_table at 0x07   # '6'
+    store 55  into scancode_table at 0x08   # '7'
+    store 56  into scancode_table at 0x09   # '8'
+    store 57  into scancode_table at 0x0A   # '9'
+    store 48  into scancode_table at 0x0B   # '0'
+    store 45  into scancode_table at 0x0C   # '-'
+    store 61  into scancode_table at 0x0D   # '='
+
+    # QWERTY row: scancodes 0x10-0x1C
+    store 113 into scancode_table at 0x10   # 'q'
+    store 119 into scancode_table at 0x11   # 'w'
+    store 101 into scancode_table at 0x12   # 'e'
+    store 114 into scancode_table at 0x13   # 'r'
+    store 116 into scancode_table at 0x14   # 't'
+    store 121 into scancode_table at 0x15   # 'y'
+    store 117 into scancode_table at 0x16   # 'u'
+    store 105 into scancode_table at 0x17   # 'i'
+    store 111 into scancode_table at 0x18   # 'o'
+    store 112 into scancode_table at 0x19   # 'p'
+    store 91  into scancode_table at 0x1A   # '['
+    store 93  into scancode_table at 0x1B   # ']'
+    store 10  into scancode_table at 0x1C   # Enter (newline)
+
+    # ASDF row: scancodes 0x1E-0x28
+    store 97  into scancode_table at 0x1E   # 'a'
+    store 115 into scancode_table at 0x1F   # 's'
+    store 100 into scancode_table at 0x20   # 'd'
+    store 102 into scancode_table at 0x21   # 'f'
+    store 103 into scancode_table at 0x22   # 'g'
+    store 104 into scancode_table at 0x23   # 'h'
+    store 106 into scancode_table at 0x24   # 'j'
+    store 107 into scancode_table at 0x25   # 'k'
+    store 108 into scancode_table at 0x26   # 'l'
+    store 59  into scancode_table at 0x27   # ';'
+    store 39  into scancode_table at 0x28   # '''
+
+    # ZXCV row: scancodes 0x2C-0x35
+    store 122 into scancode_table at 0x2C   # 'z'
+    store 120 into scancode_table at 0x2D   # 'x'
+    store 99  into scancode_table at 0x2E   # 'c'
+    store 118 into scancode_table at 0x2F   # 'v'
+    store 98  into scancode_table at 0x30   # 'b'
+    store 110 into scancode_table at 0x31   # 'n'
+    store 109 into scancode_table at 0x32   # 'm'
+    store 44  into scancode_table at 0x33   # ','
+    store 46  into scancode_table at 0x34   # '.'
+    store 47  into scancode_table at 0x35   # '/'
+
+    # Special keys
+    store 96  into scancode_table at 0x29   # '`'
+    store 92  into scancode_table at 0x2B   # '\'
+    store 32  into scancode_table at 0x39   # Space
+    store 8   into scancode_table at 0x0E   # Backspace
+    store 9   into scancode_table at 0x0F   # Tab
+    store 27  into scancode_table at 0x01   # Escape
+
+    # Enable keyboard interrupts (unmask IRQ1)
+    call pic_unmask_irq 1
+
+    print "Keyboard: PS/2 driver initialized"
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# keyboard_handler — Keyboard interrupt service routine
+#
+# Called on every key press and release (IRQ1).  Reads the scan code
+# from the keyboard data port.  Make codes (< 0x80) are translated
+# to ASCII and added to the ring buffer.  Break codes (>= 0x80,
+# which have bit 7 set) are ignored in this simple driver.
+#
+# Must send EOI to the PIC before returning.
+# ---------------------------------------------------------------------------
+function keyboard_handler:
+    a scancode
+    a ascii_char
+
+    # Read scan code from keyboard data port
+    port_read KB_DATA_PORT
+    store it into scancode
+
+    # Check if this is a break code (key release).
+    # Break codes have bit 7 set (value >= 0x80 = 128).
+    # We only care about make codes (key presses) for now.
+    if greater_or_equal scancode 0x80:
+        # This is a break code — ignore it and acknowledge
+        call pic_eoi 1
+        return
+    end
+
+    # -------------------------------------------------------------------
+    # Handle extended scancode prefix 0xE0 (extended keys like arrow
+    # keys, function keys, etc.).  This simple driver does not
+    # decode extended sequences but consumes the prefix byte.
+    # -------------------------------------------------------------------
+    if compare scancode 0xE0:
+        # Extended prefix — read the actual extended scancode.
+        # A full implementation would handle arrow keys, keypad, etc.
+        port_read KB_DATA_PORT
+        store it into scancode
+        call pic_eoi 1
+        return
+    end
+
+    # Translate scancode to ASCII using our lookup table
+    call keyboard_scancode_to_ascii scancode
+    store it into ascii_char
+
+    # Only buffer the character if we have a valid translation
+    if compare ascii_char 0:
+        # Unknown scancode — no character to buffer
+        call pic_eoi 1
+        return
+    end
+
+    # -------------------------------------------------------------------
+    # Add the ASCII character to the ring buffer if not full.
+    # Full condition: (tail + 1) % KB_BUFFER_SIZE == head
+    # -------------------------------------------------------------------
+    a next_tail
+    add keyboard_tail 1
+    store it into next_tail
+    modulo next_tail KB_BUFFER_SIZE
+    store it into next_tail
+
+    # Check if buffer would overflow
+    if compare next_tail keyboard_head:
+        # Ring buffer is full — drop the character
+        print "Keyboard: buffer overflow, character dropped"
+        call pic_eoi 1
+        return
+    end
+
+    # Store character and advance tail
+    store ascii_char into keyboard_buffer at keyboard_tail
+    store next_tail into keyboard_tail
+
+    # Acknowledge the interrupt
+    call pic_eoi 1
+    return
+
+
+# ---------------------------------------------------------------------------
+# keyboard_getc — Read a character from the keyboard buffer
+#
+# Non-blocking: returns 0 immediately if no character is available.
+# Otherwise removes and returns the oldest character from the ring
+# buffer.  This is the function that user processes (and the kernel
+# shell) call to get keyboard input.
+#
+# Returns: ASCII character (1-255), or 0 if buffer empty.
+# ---------------------------------------------------------------------------
+function keyboard_getc:
+    a ch
+
+    # Check if ring buffer is empty (head == tail)
+    if compare keyboard_head keyboard_tail:
+        return 0
+    end
+
+    # Read character at head position
+    load keyboard_buffer at keyboard_head
+    store it into ch
+
+    # Advance head pointer with wraparound
+    a next_head
+    add keyboard_head 1
+    store it into next_head
+    modulo next_head KB_BUFFER_SIZE
+    store it into next_head
+    store next_head into keyboard_head
+
+    return ch
+
+
+# ---------------------------------------------------------------------------
+# keyboard_scancode_to_ascii — Convert a raw scan code to ASCII
+#
+# scancode: raw 8-bit scan code from the keyboard (set 1, make code)
+#
+# Looks up the scancode in the pre-built translation table.
+# Returns 0 for any scancode not in the table.
+#
+# This is a simple US QWERTY mapping.  It does NOT handle:
+#   - Shift state (uppercase letters, shifted symbols)
+#   - Caps Lock
+#   - Num Lock / Scroll Lock
+#   - Extended scancodes (arrow keys, function keys, etc.)
+#
+# Returns: ASCII character code, or 0 if unknown.
+# ---------------------------------------------------------------------------
+function keyboard_scancode_to_ascii:
+    a scancode
+
+    # Bounds-check: scancode must be within table range [0, 127]
+    if greater scancode 127:
+        return 0
+    end
+    if less scancode 0:
+        return 0
+    end
+
+    # Look up the ASCII translation
+    load scancode_table at scancode
+    return it
+
+
+# =============================================================================
+# Timer Utility Functions
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# msleep — Sleep for a specified number of milliseconds
+#
+# milliseconds: duration to sleep (each ms = 1 tick at 1000Hz PIT)
+#
+# Wrapper around the process module's sleep() function.
+# A value of 0 or negative returns immediately.
+# ---------------------------------------------------------------------------
+function msleep:
+    a milliseconds
+
+    # Zero or negative sleep is a no-op
+    if less_or_equal milliseconds 0:
+        return 0
+    end
+
+    # Since PIT is configured for 1000Hz, 1 tick = 1 millisecond.
+    # Direct passthrough to the scheduler's sleep function.
+    call sleep milliseconds
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# get_uptime — Get the system uptime in milliseconds
+#
+# Returns the global tick_count, which is incremented every
+# millisecond by the PIT timer handler.
+#
+# Returns: milliseconds elapsed since system boot.
+# ---------------------------------------------------------------------------
+function get_uptime:
+    load tick_count
+    return it
+
+
+# =============================================================================
+# Unified Driver Initialization
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# drivers_init — Initialize all hardware drivers
+#
+# Called once during kernel boot.  Initializes the PIC, PIT timer,
+# and PS/2 keyboard in the correct order (PIC must be first since
+# the other drivers depend on it for IRQ management).
+# ---------------------------------------------------------------------------
+function drivers_init:
+    print "DRIVERS: initializing hardware subsystem"
+
+    # Step 1: Initialize the interrupt controller (must be first)
+    call pic_init
+
+    # Step 2: Initialize the timer (depends on PIC for IRQ0)
+    call pit_init
+
+    # Step 3: Initialize the keyboard (depends on PIC for IRQ1)
+    call keyboard_init
+
+    print "DRIVERS: all hardware drivers initialized"
+    return 0
