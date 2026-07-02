@@ -48,7 +48,7 @@ use sha3::Sha3_512;
 use ml_kem::MlKem1024;
 use ml_kem::kem::{Decapsulate, Encapsulate, Kem};
 
-use ml_dsa::KeyGen;
+use ml_dsa::{Generate, Keypair as DsaKeypair};
 
 use crate::types::*;
 
@@ -240,10 +240,10 @@ pub fn encrypt(path: &Path, output_path: &Path) -> MorphResult<PqcKeyBundle> {
 
     // Step 5: Sign with ML-DSA-87 (FIPS 204) -- primary signature
     let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
-    let dsa_keypair = ml_dsa::MlDsa87::key_gen(&mut rng);
+    let dsa_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::generate_from_rng(&mut rng);
 
     use ml_dsa::signature::Signer;
-    let dsa_signature = dsa_keypair.signing_key().sign(&encrypted_payload);
+    let dsa_signature = dsa_sk.sign(&encrypted_payload);
 
     // Step 6: Sign with SLH-DSA-SHAKE-256s (FIPS 205) -- dual signature
     let slh_sk = slh_dsa::SigningKey::<slh_dsa::Shake256s>::new(&mut rng);
@@ -284,10 +284,10 @@ pub fn encrypt(path: &Path, output_path: &Path) -> MorphResult<PqcKeyBundle> {
     let dk_seed = dk.to_bytes();
     let dk_bytes: Vec<u8> = AsRef::<[u8]>::as_ref(&dk_seed).to_vec();
 
-    // ML-DSA-87: use seed from keypair, encoded form for verifying key
-    let sk_seed = dsa_keypair.to_seed();
+    // ML-DSA-87: use seed from signing key, encoded form for verifying key
+    let sk_seed = dsa_sk.to_seed();
     let sk_bytes: Vec<u8> = AsRef::<[u8]>::as_ref(&sk_seed).to_vec();
-    let vk_encoded = dsa_keypair.verifying_key().encode();
+    let vk_encoded = dsa_sk.verifying_key().encode();
     let vk_bytes: Vec<u8> = AsRef::<[u8]>::as_ref(&vk_encoded).to_vec();
 
     // SLH-DSA: serialize signing and verifying keys
