@@ -396,8 +396,7 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
             size,
             ..
         } = stmt
-        {
-            if *scope == ScopeKind::Global {
+            && *scope == ScopeKind::Global {
                 let alloc_size = match size {
                     Some(n) => *n * ty.size_bytes(),
                     None => ty.size_bytes().max(8),
@@ -415,7 +414,6 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
                 lowerer.global_vregs.insert(dest, offset);
                 lowerer.variables.insert(name.clone(), dest);
             }
-        }
     }
 
     // Lower function definitions (globals are already registered)
@@ -907,6 +905,7 @@ impl Lowerer {
         }
     }
 
+    #[allow(dead_code)]
     fn lower_statement_to_insts(&mut self, stmt: &TypedStatement) -> MorphResult<Vec<IrInst>> {
         match stmt {
             TypedStatement::Execute {

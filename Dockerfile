@@ -1,0 +1,32 @@
+FROM ubuntu:22.04
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Set working directory
+WORKDIR /app
+
+# Copy source code
+COPY . .
+
+# Build the project
+RUN cargo build --release
+
+# Test the return42 binary
+RUN ./target/release/morphlex tokenize "return 42"
+
+# Create a simple test
+RUN echo "return 42" > test.jstr
+RUN ./target/release/morphlex compile test.jstr -o test_output.bin
+RUN chmod +x test_output.bin
+RUN ./test_output.bin
+RUN echo "Exit code: $?"
+

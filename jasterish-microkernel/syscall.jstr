@@ -1,0 +1,791 @@
+# =============================================================================
+# syscall.jstr — System Call Interface and Dispatch Module
+# Jasterish Microkernel
+#
+# This module provides the gateway between user-space processes and the
+# kernel.  User processes invoke system calls through the syscallN
+# wrapper functions, which trap into the kernel via interrupt 0x80.
+# The syscall_handler dispatches to the appropriate kernel function
+# based on the syscall number in RAX.
+#
+# Syscall ABI:
+#   RAX = syscall number
+#   RDI = argument 1
+#   RSI = argument 2
+#   RDX = argument 3
+#   Return value placed in RAX by the handler
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# System call number constants
+# These must match the values expected by user-space libc/shim layers.
+# ---------------------------------------------------------------------------
+global SYS_EXIT      int   # 0 — terminate current process
+global SYS_FORK      int   # 1 — create a copy of current process
+global SYS_YIELD     int   # 2 — voluntarily relinquish CPU
+global SYS_SEND      int   # 3 — send IPC message
+global SYS_RECV      int   # 4 — receive IPC message
+global SYS_SLEEP     int   # 5 — sleep for N timer ticks
+global SYS_GETPID    int   # 6 — get current process PID
+global SYS_PUTS      int   # 7 — print string to serial console
+global SYS_BRK       int   # 8 — adjust program break (heap)
+global SYS_KILL      int   # 9 — terminate another process
+global SYS_GETTICKS  int   # 10 — get timer tick count
+
+# ---------------------------------------------------------------------------
+# syscall_numbers_init — Initialize the syscall number constants
+#
+# Called during early kernel boot to populate the global constants.
+# In a real implementation these would be assembler equates; here we
+# use globals for documentation and introspection.
+# ---------------------------------------------------------------------------
+function syscall_numbers_init:
+    store 0  into SYS_EXIT
+    store 1  into SYS_FORK
+    store 2  into SYS_YIELD
+    store 3  into SYS_SEND
+    store 4  into SYS_RECV
+    store 5  into SYS_SLEEP
+    store 6  into SYS_GETPID
+    store 7  into SYS_PUTS
+    store 8  into SYS_BRK
+    store 9  into SYS_KILL
+    store 10 into SYS_GETTICKS
+    return
+
+
+# ---------------------------------------------------------------------------
+# syscall_handler — Central system call dispatcher
+#
+# Entry point for all system calls from user space (via int 0x80).
+# Preserves all general-purpose registers, reads the syscall number
+# from RAX, reads up to three arguments from RDI/RSI/RDX, dispatches
+# to the appropriate sys_* implementation, stores the return value
+# back into RAX, restores registers, and returns from interrupt.
+#
+# This is the MOST CRITICAL function for system security — it is the
+# sole controlled entry point from unprivileged user code into the
+# kernel.  All arguments must be validated before use.
+# ---------------------------------------------------------------------------
+function syscall_handler:
+    # -------------------------------------------------------------------
+    # Save all general-purpose registers on the kernel stack so the
+    # interrupted process context is fully preserved.
+    # In x86-64 assembly this would be:
+    #   push rax; push rbx; push rcx; push rdx
+    #   push rsi; push rdi; push rbp; push r8-r15
+    # Here we denote the save operation conceptually.
+    # -------------------------------------------------------------------
+    # save_registers
+
+    # Read the syscall number from RAX (set by caller before int 0x80)
+    a syscall_num
+    # syscall_num = rax (read from saved context)
+    load syscall_num
+    store it into syscall_num
+
+    # Read arguments from the calling convention registers
+    a arg1  # RDI
+    a arg2  # RSI
+    a arg3  # RDX
+    # arg1 = rdi; arg2 = rsi; arg3 = rdx
+
+    # Return value accumulator — stored back into RAX at the end
+    a retval
+    store 0 into retval
+
+    # -------------------------------------------------------------------
+    # Dispatch table: branch to the appropriate handler based on
+    # the syscall number.  Unknown syscalls return -1 (ENOSYS).
+    # -------------------------------------------------------------------
+
+    # SYS_EXIT — terminate current process with given exit code
+    if compare syscall_num SYS_EXIT:
+        call sys_exit arg1
+        # sys_exit never returns
+        return
+    end
+
+    # SYS_FORK — create a child process as copy of current
+    if compare syscall_num SYS_FORK:
+        call sys_fork
+        store it into retval
+    end
+
+    # SYS_YIELD — voluntarily give up the CPU
+    if compare syscall_num SYS_YIELD:
+        call sys_yield
+        store it into retval
+    end
+
+    # SYS_SEND — send an IPC message to another process
+    if compare syscall_num SYS_SEND:
+        call sys_send arg1 arg2 arg3
+        store it into retval
+    end
+
+    # SYS_RECV — receive an IPC message (blocking)
+    if compare syscall_num SYS_RECV:
+        call sys_recv arg1 arg2
+        store it into retval
+    end
+
+    # SYS_SLEEP — sleep for N timer ticks
+    if compare syscall_num SYS_SLEEP:
+        call sys_sleep arg1
+        store it into retval
+    end
+
+    # SYS_GETPID — return current process ID
+    if compare syscall_num SYS_GETPID:
+        call sys_getpid
+        store it into retval
+    end
+
+    # SYS_PUTS — print a null-terminated string to serial
+    if compare syscall_num SYS_PUTS:
+        call sys_puts arg1
+        store it into retval
+    end
+
+    # SYS_BRK — adjust the program break (heap end address)
+    if compare syscall_num SYS_BRK:
+        call sys_brk arg1
+        store it into retval
+    end
+
+    # SYS_KILL — terminate another process by PID
+    if compare syscall_num SYS_KILL:
+        call sys_kill arg1
+        store it into retval
+    end
+
+    # SYS_GETTICKS — return the number of timer ticks since boot
+    if compare syscall_num SYS_GETTICKS:
+        call sys_getticks
+        store it into retval
+    end
+
+    # If none of the above matched, the syscall number is invalid.
+    # Return -1 to indicate ENOSYS (function not implemented).
+    a checked
+    store 0 into checked
+    if compare syscall_num 0:  add checked 1; store it into checked; end
+    if compare syscall_num 1:  add checked 1; store it into checked; end
+    if compare syscall_num 2:  add checked 1; store it into checked; end
+    if compare syscall_num 3:  add checked 1; store it into checked; end
+    if compare syscall_num 4:  add checked 1; store it into checked; end
+    if compare syscall_num 5:  add checked 1; store it into checked; end
+    if compare syscall_num 6:  add checked 1; store it into checked; end
+    if compare syscall_num 7:  add checked 1; store it into checked; end
+    if compare syscall_num 8:  add checked 1; store it into checked; end
+    if compare syscall_num 9:  add checked 1; store it into checked; end
+    if compare syscall_num 10: add checked 1; store it into checked; end
+
+    if compare checked 0:
+        # No valid syscall matched — return error
+        store -1 into retval
+        print "SYSCALL: unknown syscall number"
+    end
+
+    # -------------------------------------------------------------------
+    # Store return value into RAX (in the saved register frame),
+    # restore all general-purpose registers, and return from interrupt.
+    # -------------------------------------------------------------------
+    # rax = retval
+    # restore_registers
+    # iretq
+
+    return retval
+
+
+# =============================================================================
+# Syscall Wrapper Functions
+#
+# These are the functions that user-space code calls.  They load the
+# syscall number and arguments into the proper registers and issue
+# the trap instruction (int 0x80) that enters the kernel.
+#
+# In a real build these would be small assembly stubs in libc; here
+# they are shown as Jasterish functions with inline register ops.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# syscall0 — Invoke a system call with zero arguments
+#
+# num: system call number
+#
+# Returns: value from the kernel handler (via RAX).
+# ---------------------------------------------------------------------------
+function syscall0:
+    a num
+    # rax = num
+    # int 0x80
+    # return rax
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# syscall1 — Invoke a system call with one argument
+#
+# num: system call number
+# a:   first argument (placed in RDI)
+#
+# Returns: value from the kernel handler (via RAX).
+# ---------------------------------------------------------------------------
+function syscall1:
+    a num
+    a a
+    # rax = num; rdi = a
+    # int 0x80
+    # return rax
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# syscall2 — Invoke a system call with two arguments
+#
+# num: system call number
+# a:   first argument  (RDI)
+# b:   second argument (RSI)
+#
+# Returns: value from the kernel handler (via RAX).
+# ---------------------------------------------------------------------------
+function syscall2:
+    a num
+    a a
+    a b
+    # rax = num; rdi = a; rsi = b
+    # int 0x80
+    # return rax
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# syscall3 — Invoke a system call with three arguments
+#
+# num: system call number
+# a:   first argument  (RDI)
+# b:   second argument (RSI)
+# c:   third argument  (RDX)
+#
+# Returns: value from the kernel handler (via RAX).
+# ---------------------------------------------------------------------------
+function syscall3:
+    a num
+    a a
+    a b
+    a c
+    # rax = num; rdi = a; rsi = b; rdx = c
+    # int 0x80
+    # return rax
+    return 0
+
+
+# =============================================================================
+# Individual System Call Implementations
+#
+# Each sys_* function is called by syscall_handler with arguments
+# already extracted from the user register frame.  These run in
+# kernel mode with full privileges.  All user-provided pointers
+# must be validated before dereferencing.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# sys_exit — Terminate the current process
+#
+# code: exit status code to store for the parent
+#
+# This function does NOT return.  It calls process_exit which
+# cleans up the process and switches to another ready process.
+# ---------------------------------------------------------------------------
+function sys_exit:
+    a code
+
+    # Store the exit code in the current process's control block
+    a current_slot
+    load current_process
+    store it into current_slot
+    store code into proc_exit_code at current_slot
+
+    # Terminate the process — this never returns
+    call process_exit code
+
+    # Safety: if process_exit somehow returned, halt the CPU
+    call panic
+    return
+
+
+# ---------------------------------------------------------------------------
+# sys_fork — Create a child process as a copy of the current process
+#
+# Creates a new process with:
+#   - Duplicate page table (copy-on-write or full copy)
+#   - Copied stack contents
+#   - Same instruction pointer (RIP) as parent
+#   - Same priority and time slice
+#
+# Returns in parent: child's PID (positive integer)
+# Returns in child:  0
+# Returns on error:  -1
+# ---------------------------------------------------------------------------
+function sys_fork:
+    a parent_slot
+    a parent_pid
+    a child_slot
+    a child_pid
+
+    # Get the current (parent) process information
+    load current_process
+    store it into parent_slot
+
+    load proc_pid at parent_slot
+    store it into parent_pid
+
+    # Read parent's execution context
+    a parent_rip
+    a parent_rsp
+    a parent_cr3
+    a parent_priority
+    load proc_rip at parent_slot
+    store it into parent_rip
+    load proc_rsp at parent_slot
+    store it into parent_rsp
+    load proc_cr3 at parent_slot
+    store it into parent_cr3
+    load proc_priority at parent_slot
+    store it into parent_priority
+
+    # Create a new process using the parent's RIP as entry point
+    call process_create parent_rip
+    store it into child_slot
+
+    # process_create returns a slot index, or -1 on failure
+    if compare child_slot -1:
+        print "FORK: failed to allocate child process"
+        return -1
+    end
+
+    # Allocate a new page table for the child
+    a child_cr3
+    call vmm_new_page_table
+    store it into child_cr3
+
+    if compare child_cr3 0:
+        print "FORK: failed to allocate page table for child"
+        # Clean up the partially-created child process
+        store PROC_UNUSED into proc_state at child_slot
+        return -1
+    end
+
+    # Copy parent's page table mappings into child's page table.
+    # In a full implementation this would set up copy-on-write.
+    # Here we duplicate the mappings (sharing physical frames).
+    call vmm_copy_mappings parent_cr3 child_cr3
+
+    # Copy the parent's stack to the child's stack area.
+    # Stack grows downward; copy from the current RSP to stack top.
+    a stack_size
+    subtract parent_rsp proc_stack_base
+    store it into stack_size
+
+    if greater stack_size 0:
+        call memcpy child_stack_top_minus_size parent_rsp stack_size
+    end
+
+    # Configure the child's process control block
+    load proc_pid at child_slot
+    store it into child_pid
+
+    store parent_priority into proc_priority at child_slot
+
+    # Set up the child's stack pointer (same offset from its stack base)
+    a child_rsp
+    a child_stack_base
+    load proc_rsp at child_slot
+    store it into child_rsp
+    # child_rsp = child_stack_base - stack_size (same layout as parent)
+
+    # Set the child's CR3 to its new page table
+    store child_cr3 into proc_cr3 at child_slot
+
+    # Set child state to READY so the scheduler can run it
+    store PROC_READY into proc_state at child_slot
+    call enqueue_ready child_slot
+
+    # -------------------------------------------------------------------
+    # Arrange return values:
+#   - In the child's saved register frame, set RAX = 0 so the child
+    #     sees a return value of 0 from fork().
+    #   - In the parent (current context), return the child's PID.
+    # -------------------------------------------------------------------
+    # child_regs.rax = 0  (child returns 0)
+    store 0 into proc_fork_retval at child_slot
+
+    print "FORK: parent "
+    print parent_pid
+    print " created child "
+    print child_pid
+
+    # Parent returns child's PID
+    return child_pid
+
+
+# ---------------------------------------------------------------------------
+# sys_yield — Voluntarily relinquish the CPU
+#
+# The current process remains in READY state but is moved to the
+# tail of the ready queue, allowing other processes of the same
+# priority to run.
+#
+# Returns: always 0.
+# ---------------------------------------------------------------------------
+function sys_yield:
+    call yield
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# sys_send — Send an IPC message to another process
+#
+# dest:  destination process PID
+# buf:   pointer to caller's message buffer
+# size:  number of bytes to send (0-48)
+#
+# Validates the buffer pointer (non-null, in user address space)
+# then delegates to ipc_send.
+#
+# Returns: 0 on success, negative error code on failure.
+# ---------------------------------------------------------------------------
+function sys_send:
+    a dest
+    a buf
+    a size
+
+    # Validate buffer pointer — must not be null
+    if compare buf 0:
+        print "SYSCALL: send with null buffer"
+        return -1
+    end
+
+    # Validate buffer is in user address space (below kernel space).
+    # Kernel space starts at 0xFFFF800000000000 on x86-64.
+    if greater buf 0xFFFF800000000000:
+        print "SYSCALL: send buffer in kernel space"
+        return -1
+    end
+
+    # Validate size is non-negative and within IPC limit
+    if less size 0:
+        return -1
+    end
+    if greater size 48:
+        return -1
+    end
+
+    # All validations passed — delegate to the IPC subsystem
+    call ipc_send dest buf size
+    return it
+
+
+# ---------------------------------------------------------------------------
+# sys_recv — Receive an IPC message (blocking)
+#
+# buf:      pointer to caller's receive buffer
+# max_size: maximum number of bytes to copy into buf
+#
+# Validates the buffer pointer then delegates to ipc_receive.
+#
+# Returns: number of bytes received, or negative error code.
+# ---------------------------------------------------------------------------
+function sys_recv:
+    a buf
+    a max_size
+
+    # Validate buffer pointer
+    if compare buf 0:
+        print "SYSCALL: recv with null buffer"
+        return -1
+    end
+
+    # Validate buffer is in user address space
+    if greater buf 0xFFFF800000000000:
+        print "SYSCALL: recv buffer in kernel space"
+        return -1
+    end
+
+    # Validate max_size
+    if less max_size 0:
+        return -1
+    end
+
+    # Delegate to IPC receive (blocking)
+    call ipc_receive buf max_size
+    return it
+
+
+# ---------------------------------------------------------------------------
+# sys_sleep — Sleep for a specified number of timer ticks
+#
+# ticks: number of timer ticks to sleep (each tick = 1 ms with PIT)
+#
+# If ticks <= 0, returns immediately without blocking.
+# Otherwise marks the process as sleeping and yields the CPU.
+#
+# Returns: always 0.
+# ---------------------------------------------------------------------------
+function sys_sleep:
+    a ticks
+
+    # Zero or negative sleep is a no-op
+    if less_or_equal ticks 0:
+        return 0
+    end
+
+    # Set the process's sleep counter and block
+    call sleep ticks
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# sys_getpid — Get the current process ID
+#
+# Returns: PID of the calling process.
+# ---------------------------------------------------------------------------
+function sys_getpid:
+    call get_current_pid
+    return it
+
+
+# ---------------------------------------------------------------------------
+# sys_puts — Print a null-terminated string to the serial console
+#
+# str: pointer to null-terminated ASCII string in user space
+#
+# Reads bytes one at a time from the user's buffer and sends each
+# to the serial port via serial_putc.  Stops at the first null byte.
+#
+# Returns: always 0.
+# ---------------------------------------------------------------------------
+function sys_puts:
+    a str
+    a idx
+    a ch
+
+    # Validate pointer
+    if compare str 0:
+        print "SYSCALL: puts with null string"
+        return -1
+    end
+
+    # Validate pointer is in user address space
+    if greater str 0xFFFF800000000000:
+        print "SYSCALL: puts string in kernel space"
+        return -1
+    end
+
+    store 0 into idx
+
+    # Read and print characters until null terminator
+    while greater 1 0:
+        load str at idx
+        store it into ch
+
+        # Null terminator ends the string
+        if compare ch 0:
+            break
+        end
+
+        # Send character to serial port
+        call serial_putc ch
+
+        # Advance to next character
+        add idx 1
+        store it into idx
+
+        # Safety: prevent runaway strings by limiting to 4096 chars
+        if greater idx 4096:
+            print "SYSCALL: puts truncated at 4096 characters"
+            break
+        end
+    end
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# sys_brk — Adjust the program break (end of the heap)
+#
+# new_end: requested new end address of the data segment
+#          (0 = query current break without changing)
+#
+# If new_end is 0, returns the current heap end without modifying it.
+# If new_end is valid and greater than current break, allocates pages.
+# If new_end is valid and less than current break, frees pages.
+#
+# Returns: new heap end on success, 0 on failure.
+# ---------------------------------------------------------------------------
+function sys_brk:
+    a new_end
+    a current_slot
+    a current_heap_end
+    a page_align_mask
+
+    # Get the current process slot
+    load current_process
+    store it into current_slot
+
+    # Read current heap end from the process control block
+    # proc_heap_end is a per-process field
+    load proc_heap_end at current_slot
+    store it into current_heap_end
+
+    # new_end == 0 means "query only" — return current break
+    if compare new_end 0:
+        return current_heap_end
+    end
+
+    # Validate: new_end must be above the process's data segment base
+    a data_segment_base
+    load proc_data_base at current_slot
+    store it into data_segment_base
+
+    if less new_end data_segment_base:
+        print "SYSCALL: brk below data segment base"
+        return 0
+    end
+
+    # Calculate page-aligned addresses for mapping/unmapping
+    store 0xFFFFFFFFFFFFF000 into page_align_mask
+
+    # Case 1: Expanding the heap (new_end > current_heap_end)
+    if greater new_end current_heap_end:
+        a addr
+        store current_heap_end into addr
+
+        # Page-align up to the next page boundary
+        add addr 0xFFF
+        store it into addr
+        bitwise_and addr page_align_mask
+        store it into addr
+
+        # Map each new page needed
+        a new_addr_aligned
+        add new_end 0xFFF
+        store it into new_addr_aligned
+        bitwise_and new_addr_aligned page_align_mask
+        store it into new_addr_aligned
+
+        while greater new_addr_aligned addr:
+            call vmm_map_page addr 0x3  # 0x3 = present + writable
+            add addr 4096
+            store it into addr
+        end
+
+        # Update the heap end in the process control block
+        store new_end into proc_heap_end at current_slot
+        return new_end
+    end
+
+    # Case 2: Shrinking the heap (new_end < current_heap_end)
+    if less new_end current_heap_end:
+        a addr
+        # Page-align the new end down
+        bitwise_and new_end page_align_mask
+        store it into addr
+
+        a end_unmap
+        add current_heap_end 0xFFF
+        store it into end_unmap
+        bitwise_and end_unmap page_align_mask
+        store it into end_unmap
+
+        # Unmap pages that are no longer needed
+        while greater end_unmap addr:
+            subtract end_unmap 4096
+            store it into end_unmap
+            call vmm_unmap_page end_unmap
+        end
+
+        # Update heap end
+        store new_end into proc_heap_end at current_slot
+        return new_end
+    end
+
+    # Case 3: new_end == current_heap_end — no change needed
+    return current_heap_end
+
+
+# ---------------------------------------------------------------------------
+# sys_kill — Terminate another process by PID
+#
+# pid: process ID of the target to terminate
+#
+# Delegates to process_kill from the process management module.
+#
+# Returns: 0 on success, -1 if target not found.
+# ---------------------------------------------------------------------------
+function sys_kill:
+    a pid
+
+    # Cannot kill the idle process (PID 0) or init (PID 1)
+    if compare pid 0:
+        print "SYSCALL: cannot kill idle process"
+        return -1
+    end
+    if compare pid 1:
+        print "SYSCALL: cannot kill init process"
+        return -1
+    end
+
+    # Cannot kill self via sys_kill (use sys_exit instead)
+    a self_pid
+    call get_current_pid
+    store it into self_pid
+    if compare pid self_pid:
+        print "SYSCALL: use exit() to terminate self"
+        return -1
+    end
+
+    # Delegate to the process manager
+    call process_kill pid
+    return it
+
+
+# ---------------------------------------------------------------------------
+# sys_getticks — Get the number of timer ticks since boot
+#
+# Returns the global tick_count, incremented by the PIT timer handler
+# approximately every 1 millisecond.
+#
+# Returns: tick count (unsigned long).
+# ---------------------------------------------------------------------------
+function sys_getticks:
+    load tick_count
+    return it
+
+
+# ---------------------------------------------------------------------------
+# syscall_init — Register the system call handler
+#
+# Installs syscall_handler as the handler for interrupt 0x80,
+# the traditional Linux int 0x80 syscall mechanism.  Also sets
+# up the MSR_LSTAR register if using syscall/sysret (fast path).
+#
+# Called once during kernel initialization.
+# ---------------------------------------------------------------------------
+function syscall_init:
+    # Install int 0x80 handler in the IDT at vector 0x80
+    # idt_set_gate(0x80, syscall_handler_asm, 0x08, 0x8E);
+    # (In real code this would be an assembly stub that saves state
+    #  and calls syscall_handler above.)
+
+    # If using the fast syscall/sysret mechanism:
+    #   wrmsr(MSR_STAR,   (0x08ULL << 32) | (0x1BULL << 48));
+    #   wrmsr(MSR_LSTAR,  &syscall_handler_asm);
+    #   wrmsr(MSR_CSTAR,  0);
+    #   wrmsr(MSR_SFMASK, RFLAGS_IF);
+
+    call syscall_numbers_init
+    print "SYSCALL: system call interface initialized (int 0x80)"
+    return 0

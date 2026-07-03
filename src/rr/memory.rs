@@ -6,7 +6,6 @@
 //! - **Episodic Memory**: Timestamped interaction history
 //! - **Semantic Memory**: Extracted patterns and learnings
 
-use crate::MorphlexError;
 use crate::types::MorphResult;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -191,13 +190,13 @@ impl LongTermMemory {
     pub fn save_to_path(&self, path: &Path) -> MorphResult<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| crate::MorphlexError::DatabaseError(e.to_string()))?;
-        std::fs::write(path, json).map_err(|e| crate::MorphlexError::IoError(e))?;
+        std::fs::write(path, json).map_err(crate::MorphlexError::IoError)?;
         Ok(())
     }
 
     /// Load from disk
     pub fn load_from_path(path: &Path) -> MorphResult<Self> {
-        let json = std::fs::read_to_string(path).map_err(|e| crate::MorphlexError::IoError(e))?;
+        let json = std::fs::read_to_string(path).map_err(crate::MorphlexError::IoError)?;
         let memory = serde_json::from_str(&json)
             .map_err(|e| crate::MorphlexError::DatabaseError(e.to_string()))?;
         Ok(memory)
@@ -549,11 +548,10 @@ impl MemorySystem {
         let mut memory = Self::new(short_term_capacity);
 
         // Load long-term memory from disk if path provided
-        if let Some(path) = long_term_path {
-            if path.exists() {
+        if let Some(path) = long_term_path
+            && path.exists() {
                 memory.long_term = LongTermMemory::load_from_path(path)?;
             }
-        }
 
         Ok(memory)
     }
@@ -590,7 +588,7 @@ impl MemorySystem {
     }
 
     /// Get context for reasoning (combines relevant memories)
-    pub fn get_context(&self, query: &str, recent_count: usize) -> MemoryContext {
+    pub fn get_context(&self, query: &str, recent_count: usize) -> MemoryContext<'_> {
         MemoryContext {
             recent: self.short_term.get_recent(recent_count),
             relevant_knowledge: self.long_term.search(query),

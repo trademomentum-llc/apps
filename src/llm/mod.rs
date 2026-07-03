@@ -214,14 +214,14 @@ impl EmbeddingProjector {
         let mut embedding = vec![0.0; d_model];
 
         // Add token embedding (by ID hash)
-        let token_idx = (token.vector.id.abs() as usize) % self.token_embeddings.len();
+        let token_idx = (token.vector.id as u32 as usize) % self.token_embeddings.len();
         for (i, &val) in self.token_embeddings[token_idx].iter().enumerate() {
             embedding[i] += val;
         }
 
         // Add lemma embedding
         if let Some(ref lemma_emb) = self.lemma_embeddings {
-            let lemma_idx = (token.vector.lemma_id.abs() as usize) % lemma_emb.len();
+            let lemma_idx = (token.vector.lemma_id as u32 as usize) % lemma_emb.len();
             for (i, &val) in lemma_emb[lemma_idx].iter().enumerate() {
                 embedding[i] += val * 0.5; // Weighted contribution
             }
@@ -333,7 +333,7 @@ impl MultiHeadAttention {
     /// Forward pass through attention
     pub fn forward(&self, x: &[Vec<f32>], mask: Option<&[bool]>) -> Vec<Vec<f32>> {
         let batch_size = x.len();
-        let d_model = x[0].len();
+        let _d_model = x[0].len();
 
         // Project Q, K, V
         let q = self.project_qkv(x, &self.w_q);
@@ -346,12 +346,11 @@ impl MultiHeadAttention {
 
         for i in 0..batch_size {
             for j in 0..batch_size {
-                if let Some(m) = mask {
-                    if !m[j] {
+                if let Some(m) = mask
+                    && !m[j] {
                         attention_scores[i][j] = -1e9;
                         continue;
                     }
-                }
                 let score: f32 = q[i].iter().zip(k[j].iter()).map(|(a, b)| a * b).sum();
                 attention_scores[i][j] = score * scale;
             }
@@ -454,7 +453,7 @@ impl FeedForward {
     /// Forward pass
     pub fn forward(&self, x: &[f32]) -> Vec<f32> {
         // First linear + ReLU
-        let mut hidden: Vec<f32> = self
+        let hidden: Vec<f32> = self
             .w1
             .iter()
             .map(|row| {
@@ -508,7 +507,7 @@ impl TransformerLayer {
 
     /// Forward pass through layer
     pub fn forward(&self, x: &[Vec<f32>], mask: Option<&[bool]>) -> Vec<Vec<f32>> {
-        let d_model = x[0].len();
+        let _d_model = x[0].len();
 
         // Attention with residual
         let attn_out = self.attention.forward(x, mask);
@@ -701,13 +700,13 @@ impl MorphlexLLM {
     pub fn save(&self, path: &std::path::Path) -> MorphResult<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| MorphlexError::DatabaseError(e.to_string()))?;
-        std::fs::write(path, json).map_err(|e| MorphlexError::IoError(e))?;
+        std::fs::write(path, json).map_err(MorphlexError::IoError)?;
         Ok(())
     }
 
     /// Load model from file
     pub fn load(path: &std::path::Path) -> MorphResult<Self> {
-        let json = std::fs::read_to_string(path).map_err(|e| MorphlexError::IoError(e))?;
+        let json = std::fs::read_to_string(path).map_err(MorphlexError::IoError)?;
         let model =
             serde_json::from_str(&json).map_err(|e| MorphlexError::DatabaseError(e.to_string()))?;
         Ok(model)

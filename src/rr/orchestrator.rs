@@ -9,7 +9,7 @@ use crate::rr::comms::*;
 use crate::rr::hierarchy::*;
 use crate::rr::memory::*;
 use crate::rr::mission::*;
-use crate::types::{MorphResult, MorphlexError as MorphError};
+use crate::types::MorphResult;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -397,11 +397,10 @@ impl SwarmOrchestrator {
             .get(&sitrep.header.from)
             .ok_or_else(|| crate::MorphlexError::DatabaseError("Agent not found".to_string()))?;
 
-        if let Some(swarm_id) = &agent_record.swarm_id {
-            if let Some(swarm) = self.swarms.get_mut(swarm_id) {
+        if let Some(swarm_id) = &agent_record.swarm_id
+            && let Some(swarm) = self.swarms.get_mut(swarm_id) {
                 swarm.record_communication(Communication::SitRep(sitrep.clone()));
             }
-        }
 
         self.comm_log.push(Communication::SitRep(sitrep));
         Ok(())

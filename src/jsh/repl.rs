@@ -51,14 +51,13 @@ pub fn run() -> MorphResult<()> {
         let expanded = expanded.trim();
 
         // Variable assignment commands (set/unset/export) at top level only
-        if nesting == 0 {
-            if let Some(msg) = state.try_set_var(expanded) {
+        if nesting == 0
+            && let Some(msg) = state.try_set_var(expanded) {
                 if !msg.is_empty() {
                     println!("{}", msg);
                 }
                 continue;
             }
-        }
 
         // Parse pipeline and redirection
         let pipeline = shell::parse_pipeline(expanded);
@@ -105,11 +104,10 @@ pub fn run() -> MorphResult<()> {
 
                 match super::execute_jstar(&source) {
                     Ok(result) => {
-                        if !result.stdout.is_empty() {
-                            if let Err(e) = shell::write_output(&result.stdout, seg) {
+                        if !result.stdout.is_empty()
+                            && let Err(e) = shell::write_output(&result.stdout, seg) {
                                 eprintln!("Redirect error: {}", e);
                             }
-                        }
                         if !result.stderr.is_empty() {
                             eprint!("{}", result.stderr);
                         }
@@ -184,11 +182,10 @@ fn execute_pipeline(pipeline: &shell::Pipeline, state: &mut ShellState) {
         match super::execute_jstar(cmd) {
             Ok(result) => {
                 if is_last {
-                    if !result.stdout.is_empty() {
-                        if let Err(e) = shell::write_output(&result.stdout, seg) {
+                    if !result.stdout.is_empty()
+                        && let Err(e) = shell::write_output(&result.stdout, seg) {
                             eprintln!("Redirect error: {}", e);
                         }
-                    }
                     if !result.stderr.is_empty() {
                         eprint!("{}", result.stderr);
                     }
