@@ -48,6 +48,14 @@ crawl_data/
 *.out
 a.out
 
+# Compiled / bootstrap / debug ELF binaries — keep sources only
+*.elf
+apps.zip
+jstar/jstar[0-9]
+jstar/jstar_c
+jstar/jstar_canonical
+jstar_bootstrap_out/jstar[123]
+
 # Deep agent config — not part of this project
 agent.py
 .claude/
