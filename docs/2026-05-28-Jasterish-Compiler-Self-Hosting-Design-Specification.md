@@ -13,32 +13,32 @@ The pipeline is deliberately modeled on Clang phases but adapted to a natural-la
 
 ```
 Raw Text
-  │
-  ▼
+  
+  
 Lexer (words → morphlex; numbers/strings → synthetic literals)
-  │
-  ▼
+  
+  
 TokenVector Stream (12-byte packed: i32 id + i8 pos/role + i16 morph + ...)
-  │
-  ▼
+  
+  
 Parser (POS-driven recursive descent)
-  │
-  ▼
+  
+  
 AST (grammar.rs algebraic data types)
-  │
-  ▼
+  
+  
 Typechecker (adjective-driven primitive mapping: unsigned long → u64, etc.)
-  │
-  ▼
+  
+  
 IR (three-address, SSA form for optimization)
-  │
-  ▼
+  
+  
 Codegen (direct x86-64, linear-scan register allocation, System V ABI)
-  │
-  ▼
+  
+  
 Linker (ELF-64: header + program headers + .text + .data)
-  │
-  ▼
+  
+  
 Executable Binary
 ```
 
