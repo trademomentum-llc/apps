@@ -34,43 +34,43 @@ This document outlines the architecture for building a custom large language mod
 ### 2.1 Hybrid Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Input Text                                │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Morphlex Lexer → Morphology → AST → Semantics → Vectors   │
-│  Output: Vec<TokenVector> (12-byte integer structs)         │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Vector → Embedding Projection                   │
-│  12-byte vector → Dense embedding (256-512 dims)            │
-│  Learned projection matrix W_v [12 × d_model]               │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│           Morphlex-Aware Transformer Encoder                 │
-│  - Position encoding from vector order                       │
-│  - Role-aware attention (POS + semantic role bias)          │
-│  - Morphological feature gates                              │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Jasterish IR Generation                         │
-│  Transformer output → Jasterish IR instructions             │
-│  Type-checked, deterministic compilation                    │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Native Code Generation                          │
-│  Jasterish IR → x86-64 assembly → ELF binary                │
-└─────────────────────────────────────────────────────────────┘
+
+                    Input Text                                
+
+                            
+                            
+
+  Morphlex Lexer → Morphology → AST → Semantics → Vectors   
+  Output: Vec<TokenVector> (12-byte integer structs)         
+
+                            
+                            
+
+              Vector → Embedding Projection                   
+  12-byte vector → Dense embedding (256-512 dims)            
+  Learned projection matrix W_v [12 × d_model]               
+
+                            
+                            
+
+           Morphlex-Aware Transformer Encoder                 
+  - Position encoding from vector order                       
+  - Role-aware attention (POS + semantic role bias)          
+  - Morphological feature gates                              
+
+                            
+                            
+
+              Jasterish IR Generation                         
+  Transformer output → Jasterish IR instructions             
+  Type-checked, deterministic compilation                    
+
+                            
+                            
+
+              Native Code Generation                          
+  Jasterish IR → x86-64 assembly → ELF binary                
+
 ```
 
 ### 2.2 Token Representation
@@ -202,30 +202,30 @@ pub fn training_step(
 ### 4.1 Hybrid Inference Strategy
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    User Query                                │
-└─────────────────────────────────────────────────────────────┘
-                            │
-            ┌───────────────┴───────────────┐
-            │                               │
-            ▼                               ▼
-┌──────────────────────┐        ┌──────────────────────┐
-│   Morphlex-LLM       │        │   llama.cpp          │
-│   (deterministic)    │        │   (generative)       │
-│   - Parsing          │        │   - Creativity       │
-│   - Code gen         │        │   - Open-ended       │
-│   - Structured out   │        │   - Conversation     │
-└──────────────────────┘        └──────────────────────┘
-            │                               │
-            └───────────────┬───────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Convergence Manager                             │
-│  - Aggregate outputs                                         │
-│  - Validate consistency                                      │
-│  - Select best response                                      │
-└─────────────────────────────────────────────────────────────┘
+
+                    User Query                                
+
+                            
+            
+                                           
+                                           
+        
+   Morphlex-LLM                  llama.cpp          
+   (deterministic)               (generative)       
+   - Parsing                     - Creativity       
+   - Code gen                    - Open-ended       
+   - Structured out              - Conversation     
+        
+                                           
+            
+                            
+                            
+
+              Convergence Manager                             
+  - Aggregate outputs                                         
+  - Validate consistency                                      
+  - Select best response                                      
+
 ```
 
 ### 4.2 Model Export Format

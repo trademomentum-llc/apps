@@ -56,19 +56,19 @@
 | jstar3 | Self-hosted (gen 2) | 70,925 B | [DONE] Fixpoint reached |
 | jstar4 | Self-hosted (gen 3) | 70,925 B | [DONE] Stable |
 
-### 🎯 Next Steps
+###  Next Steps
 
 1. **NNOS Port Validation** - Test TP-HCF integration
 2. **MorphlexLLM Training** - Complete full training run
 3. **Audio Pipeline** - Port ultrasonic processing
 4. **System Integration** - Connect daemon coordination
 
-### 📦 Ready for Commit
+###  Ready for Commit
 
-- ✅ Rational Reserve daemon system
-- ✅ MorphlexLLM training pipeline
-- ✅ Jasterish compiler (self-hosting verified)
-- ✅ Parser improvements (Register tokens, scope keywords)
+-  Rational Reserve daemon system
+-  MorphlexLLM training pipeline
+-  Jasterish compiler (self-hosting verified)
+-  Parser improvements (Register tokens, scope keywords)
 
 ---
 
