@@ -1,15 +1,18 @@
-//! AArch64 Code Generation — low-level instruction encoder.
+//! AArch64 Code Generation — low-level instruction encoder and IR emitter.
 //!
 //! Provides the AArch64 register enum (`Aarch64Reg`), condition-code enum,
 //! a minimal system-register wrapper, and `Aarch64Emitter`: a byte-buffer
 //! emitter for the instruction categories used by the JStar ARM64 backend.
 //!
-//! This file intentionally implements only instruction encoding.  IR-to-
-//! machine-code translation lives in the caller (Task 4).
+//! The IR-to-machine-code translation implemented here is an MVP that covers
+//! the JStar integer subset used by the bootstrap tests: arithmetic, calls,
+//! control flow, and function prologue/epilogue using the AAPCS64 convention.
 
 use super::MachineCode;
-use crate::jstar::ir::IrProgram;
+use crate::jstar::grammar::JStarType;
+use crate::jstar::ir::*;
 use crate::types::{MorphResult, MorphlexError};
+use std::collections::{HashMap, HashSet};
 
 // ─── AArch64 Register Encoding ──────────────────────────────────────────────
 
@@ -211,6 +214,31 @@ impl Aarch64Emitter {
         self.emit_movz(rd, imm16, 0);
     }
 
+    /// Load an arbitrary 64-bit immediate into `rd` using `movz`/`movk`.
+    pub fn emit_load_imm64(&mut self, rd: Aarch64Reg, imm: i64) {
+        let bits = imm as u64;
+        let chunks = [
+            (bits & 0xFFFF) as u16,
+            ((bits >> 16) & 0xFFFF) as u16,
+            ((bits >> 32) & 0xFFFF) as u16,
+            ((bits >> 48) & 0xFFFF) as u16,
+        ];
+        let mut emitted = false;
+        for (i, chunk) in chunks.iter().enumerate() {
+            if !emitted {
+                if *chunk != 0 || (imm == 0 && i == 0) {
+                    self.emit_movz(rd, *chunk, (i * 16) as u8);
+                    emitted = true;
+                }
+            } else if *chunk != 0 {
+                self.emit_movk(rd, *chunk, (i * 16) as u8);
+            }
+        }
+        if !emitted {
+            self.emit_movz(rd, 0, 0);
+        }
+    }
+
     // ── Integer arithmetic (register) ──────────────────────────────────────
 
     /// `add  xd, xn, xm` (shifted register, LSL #0).
@@ -295,6 +323,26 @@ impl Aarch64Emitter {
         self.emit_u32(insn);
     }
 
+    /// `cmp  xn, xm` — alias for `subs xzr, xn, xm`.
+    pub fn emit_cmp(&mut self, rn: Aarch64Reg, rm: Aarch64Reg) {
+        let insn = 0xEB000000
+            | ((rm.encoding() as u32) << 16)
+            | ((rn.encoding() as u32) << 5)
+            | Aarch64Reg::Xzr.encoding() as u32;
+        self.emit_u32(insn);
+    }
+
+    /// `cset  xd, <cond>` — alias for `csinc xd, xzr, xzr, invert(cond)`.
+    pub fn emit_cset(&mut self, rd: Aarch64Reg, cond: Aarch64Cond) {
+        let inv = ((cond as u8) ^ 1) as u32;
+        let insn = 0x9A800400
+            | (Aarch64Reg::Xzr.encoding() as u32) << 16
+            | (inv << 12)
+            | (Aarch64Reg::Xzr.encoding() as u32) << 5
+            | rd.encoding() as u32;
+        self.emit_u32(insn);
+    }
+
     // ── Bitwise and shifts ─────────────────────────────────────────────────
 
     /// `and  xd, xn, xm` (shifted register, LSL #0).
@@ -320,6 +368,15 @@ impl Aarch64Emitter {
         let insn = 0xCA000000
             | ((rm.encoding() as u32) << 16)
             | ((rn.encoding() as u32) << 5)
+            | rd.encoding() as u32;
+        self.emit_u32(insn);
+    }
+
+    /// `mvn  xd, xm` — alias for `orn xd, xzr, xm`.
+    pub fn emit_mvn(&mut self, rd: Aarch64Reg, rm: Aarch64Reg) {
+        let insn = 0xAA200000
+            | ((rm.encoding() as u32) << 16)
+            | (Aarch64Reg::Xzr.encoding() as u32) << 5
             | rd.encoding() as u32;
         self.emit_u32(insn);
     }
@@ -484,6 +541,14 @@ impl Aarch64Emitter {
         self.emit_u32(insn);
     }
 
+    // ── System call ────────────────────────────────────────────────────────
+
+    /// `svc  #imm`.
+    pub fn emit_svc(&mut self, imm: u16) {
+        let insn = 0xD4000001 | ((imm as u32 & 0xFFFF) << 5);
+        self.emit_u32(insn);
+    }
+
     // ── Procedure return ───────────────────────────────────────────────────
 
     /// `ret`.
@@ -492,15 +557,644 @@ impl Aarch64Emitter {
     }
 }
 
+// ─── IR-to-machine-code translation ─────────────────────────────────────────
+
 /// Generate AArch64 machine code from IR.
-///
-/// This is intentionally a placeholder: IR lowering is Task 4.  The function
-/// remains so that the architecture-neutral `codegen::generate` dispatcher
-/// compiles.
-pub fn generate(_program: &IrProgram) -> MorphResult<MachineCode> {
-    Err(MorphlexError::CodegenError(
-        "AArch64 backend not yet implemented".to_string(),
-    ))
+pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
+    let mut cg = CodeGen::new();
+
+    // .data section: string literals (initialized) + global variable data (BSS).
+    cg.emitter.data = program.string_data.clone();
+    let global_base = cg.emitter.data.len();
+    cg.emitter.bss_size = program.global_data.len();
+
+    // Build the global_vregs map with absolute offsets into .data.
+    for (&vreg, &offset) in &program.global_vregs {
+        let abs_offset = global_base + offset;
+        cg.global_vregs.insert(vreg, abs_offset);
+        let is_direct_storage = program
+            .global_vars
+            .values()
+            .find(|(var_offset, _, _)| *var_offset == offset)
+            .map(|(_, alloc_size, ty)| *alloc_size > ty.size_bytes())
+            .unwrap_or(false);
+        if is_direct_storage {
+            cg.direct_storage_vregs.insert(vreg);
+        }
+    }
+
+    for func in &program.functions {
+        cg.emit_function(func)?;
+    }
+
+    cg.apply_call_fixups()?;
+
+    Ok(MachineCode {
+        text: cg.emitter.text,
+        data: cg.emitter.data,
+        bss_size: cg.emitter.bss_size,
+        stack_size: cg.stack_size,
+        data_vaddr: 0,
+        data_fixups: cg.emitter.data_fixups,
+    })
+}
+
+/// AArch64 argument registers (AAPCS64).
+const ARG_REGS: [Aarch64Reg; 8] = [
+    Aarch64Reg::X0,
+    Aarch64Reg::X1,
+    Aarch64Reg::X2,
+    Aarch64Reg::X3,
+    Aarch64Reg::X4,
+    Aarch64Reg::X5,
+    Aarch64Reg::X6,
+    Aarch64Reg::X7,
+];
+
+/// Scratch registers used internally by the emitter.
+const SCRATCH: Aarch64Reg = Aarch64Reg::X9;
+const SCRATCH2: Aarch64Reg = Aarch64Reg::X10;
+const SCRATCH3: Aarch64Reg = Aarch64Reg::X11;
+const ADDR_REG: Aarch64Reg = Aarch64Reg::X16;
+const ADDR_REG2: Aarch64Reg = Aarch64Reg::X17;
+
+#[derive(Debug, Clone, Copy)]
+enum BranchKind {
+    B,
+    Cbnz,
+}
+
+struct CodeGen {
+    emitter: Aarch64Emitter,
+    /// Map virtual register -> stack offset from `sp`.
+    vreg_offsets: HashMap<VReg, u32>,
+    next_stack_offset: u32,
+    /// Label name -> byte offset in .text (within the current function).
+    label_offsets: HashMap<String, usize>,
+    /// Branch fixups to resolve after a function is emitted.
+    fixups: Vec<(usize, String, BranchKind)>,
+    /// Function name -> byte offset in .text.
+    function_offsets: HashMap<String, usize>,
+    /// Call fixups to resolve after all functions are emitted.
+    call_fixups: Vec<(usize, String)>,
+    /// Whether the current function is `_start`.
+    is_entry_point: bool,
+    /// Global vregs: vreg -> absolute offset in .data section.
+    global_vregs: HashMap<VReg, usize>,
+    /// Vregs whose identity is the storage object itself.
+    direct_storage_vregs: HashSet<VReg>,
+    /// Frame size of the current/last function.
+    frame_size: u32,
+    /// Stack size reported in the output (frame size of the last function).
+    stack_size: usize,
+}
+
+impl CodeGen {
+    fn new() -> Self {
+        Self {
+            emitter: Aarch64Emitter::new(),
+            vreg_offsets: HashMap::new(),
+            next_stack_offset: 0,
+            label_offsets: HashMap::new(),
+            fixups: Vec::new(),
+            function_offsets: HashMap::new(),
+            call_fixups: Vec::new(),
+            is_entry_point: false,
+            global_vregs: HashMap::new(),
+            direct_storage_vregs: HashSet::new(),
+            frame_size: 0,
+            stack_size: 0,
+        }
+    }
+
+    fn alloc_stack_slot(&mut self, vreg: VReg, size: usize) -> u32 {
+        let aligned_size = ((size + 7) / 8 * 8).max(8) as u32;
+        let offset = self.next_stack_offset;
+        self.next_stack_offset += aligned_size;
+        self.vreg_offsets.insert(vreg, offset);
+        offset
+    }
+
+    fn vreg_offset(&self, vreg: VReg) -> u32 {
+        *self.vreg_offsets.get(&vreg).unwrap_or_else(|| {
+            panic!(
+                "codegen: vreg {} has no stack slot (allocated vregs: {:?})",
+                vreg,
+                self.vreg_offsets.keys().collect::<Vec<_>>()
+            )
+        })
+    }
+
+    fn is_global_vreg(&self, vreg: VReg) -> bool {
+        self.global_vregs.contains_key(&vreg)
+    }
+
+    #[allow(dead_code)]
+    fn is_direct_storage_vreg(&self, vreg: VReg) -> bool {
+        self.direct_storage_vregs.contains(&vreg)
+    }
+
+    fn instruction_allocates_direct_storage(&self, inst: &IrInst) -> bool {
+        match inst {
+            IrInst::Alloca { size, ty, .. } => *size > ty.size_bytes(),
+            IrInst::ArrayAlloc { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn is_byte_type(ty: &JStarType) -> bool {
+        matches!(ty, JStarType::Boolean | JStarType::Byte)
+    }
+
+    fn emit_function(&mut self, func: &IrFunction) -> MorphResult<()> {
+        // Reset per-function state.
+        self.vreg_offsets.clear();
+        self.next_stack_offset = 0;
+        self.label_offsets.clear();
+        self.fixups.clear();
+        self.is_entry_point = func.name == "_start";
+
+        // Record function offset for call resolution.
+        self.function_offsets
+            .insert(func.name.clone(), self.emitter.len());
+
+        // Pre-allocate stack slots for all virtual registers.
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    IrInst::Alloca { dest, size, .. } => {
+                        if self.instruction_allocates_direct_storage(inst) {
+                            self.direct_storage_vregs.insert(*dest);
+                        }
+                        self.alloc_stack_slot(*dest, *size);
+                    }
+                    IrInst::BinOp { dest, ty, .. }
+                    | IrInst::UnaryOp { dest, ty, .. }
+                    | IrInst::Copy { dest, ty, .. }
+                    | IrInst::Load { dest, ty, .. } => {
+                        self.alloc_stack_slot(*dest, ty.size_bytes().max(8));
+                    }
+                    IrInst::Compare { dest, .. }
+                    | IrInst::Call { dest, .. }
+                    | IrInst::Syscall { dest, .. }
+                    | IrInst::AddressOf { dest, .. } => {
+                        self.alloc_stack_slot(*dest, 8);
+                    }
+                    IrInst::LoadIndexed { dest, .. } => {
+                        self.alloc_stack_slot(*dest, 8);
+                    }
+                    IrInst::ArrayAlloc { dest, count } => {
+                        self.alloc_stack_slot(*dest, *count * 8);
+                    }
+                    IrInst::ArrayLoad { dest, .. }
+                    | IrInst::ArrayLength { dest, .. }
+                    | IrInst::HashOp { dest, .. }
+                    | IrInst::FileOpen { dest, .. }
+                    | IrInst::FileRead { dest, .. }
+                    | IrInst::StrCmp { dest, .. }
+                    | IrInst::StrLen { dest, .. } => {
+                        self.alloc_stack_slot(*dest, 8);
+                    }
+                    IrInst::Store { .. }
+                    | IrInst::StoreIndexed { .. }
+                    | IrInst::Print { .. }
+                    | IrInst::PrintStr { .. }
+                    | IrInst::Nop
+                    | IrInst::ArrayStore { .. }
+                    | IrInst::FileClose { .. }
+                    | IrInst::StrCopy { .. } => {}
+                }
+            }
+        }
+
+        // Frame size must be 16-byte aligned per AAPCS64.
+        self.frame_size = ((self.next_stack_offset + 15) / 16) * 16;
+        self.stack_size = self.frame_size as usize;
+
+        // Function prologue: save x29/x30 and allocate the frame.
+        self.emitter
+            .emit_stp(Aarch64Reg::X29, Aarch64Reg::X30, Aarch64Reg::Sp, -16);
+        self.emitter
+            .emit_mov(Aarch64Reg::X29, Aarch64Reg::Sp);
+        self.emit_frame_adjust(true);
+
+        // Store incoming arguments into their parameter stack slots.
+        if !self.is_entry_point && func.param_count > 0 {
+            let mut param_vregs: Vec<VReg> = Vec::new();
+            if let Some(entry_block) = func.blocks.first() {
+                for inst in &entry_block.instructions {
+                    if let IrInst::Alloca { dest, .. } = inst
+                        && param_vregs.len() < func.param_count
+                    {
+                        param_vregs.push(*dest);
+                    }
+                }
+            }
+            if param_vregs.len() != func.param_count {
+                return Err(MorphlexError::CodegenError(format!(
+                    "function '{}': expected {} parameter allocas in entry block, found {}",
+                    func.name,
+                    func.param_count,
+                    param_vregs.len()
+                )));
+            }
+            for (i, vreg) in param_vregs.iter().enumerate() {
+                if i >= ARG_REGS.len() {
+                    break;
+                }
+                let offset = self.vreg_offset(*vreg);
+                self.emitter
+                    .emit_str(ARG_REGS[i], Aarch64Reg::Sp, offset);
+            }
+        }
+
+        // Emit each basic block, recording label offsets.
+        for block in &func.blocks {
+            self.label_offsets
+                .insert(block.label.clone(), self.emitter.len());
+            self.emit_block(block)?;
+        }
+
+        // Resolve all local branch fixups.
+        self.apply_local_fixups()?;
+
+        Ok(())
+    }
+
+    fn emit_block(&mut self, block: &BasicBlock) -> MorphResult<()> {
+        for inst in &block.instructions {
+            self.emit_instruction(inst)?;
+        }
+        self.emit_terminator(&block.terminator)?;
+        Ok(())
+    }
+
+    fn emit_frame_adjust(&mut self, subtract: bool) {
+        if self.frame_size == 0 {
+            return;
+        }
+        if self.frame_size <= 4095 {
+            if subtract {
+                self.emitter
+                    .emit_sub_imm(Aarch64Reg::Sp, Aarch64Reg::Sp, self.frame_size as u16, false);
+            } else {
+                self.emitter
+                    .emit_add_imm(Aarch64Reg::Sp, Aarch64Reg::Sp, self.frame_size as u16, false);
+            }
+        } else {
+            self.emitter
+                .emit_load_imm64(Aarch64Reg::X16, self.frame_size as i64);
+            if subtract {
+                self.emitter
+                    .emit_sub(Aarch64Reg::Sp, Aarch64Reg::Sp, Aarch64Reg::X16);
+            } else {
+                self.emitter
+                    .emit_add(Aarch64Reg::Sp, Aarch64Reg::Sp, Aarch64Reg::X16);
+            }
+        }
+    }
+
+    fn emit_epilogue(&mut self) {
+        self.emit_frame_adjust(false);
+        self.emitter
+            .emit_ldp(Aarch64Reg::X29, Aarch64Reg::X30, Aarch64Reg::Sp, 16);
+        self.emitter.emit_ret();
+    }
+
+    fn emit_instruction(&mut self, inst: &IrInst) -> MorphResult<()> {
+        match inst {
+            IrInst::BinOp {
+                dest, op, lhs, rhs, ..
+            } => {
+                self.emit_load_value(SCRATCH, lhs)?;
+                self.emit_load_value(SCRATCH2, rhs)?;
+                match op {
+                    IrBinOp::Add => self.emitter.emit_add(SCRATCH, SCRATCH, SCRATCH2),
+                    IrBinOp::Sub => self.emitter.emit_sub(SCRATCH, SCRATCH, SCRATCH2),
+                    IrBinOp::Mul => self
+                        .emitter
+                        .emit_madd(SCRATCH, SCRATCH, SCRATCH2, Aarch64Reg::Xzr),
+                    IrBinOp::Div => self.emitter.emit_sdiv(SCRATCH, SCRATCH, SCRATCH2),
+                    IrBinOp::Mod => {
+                        self.emitter.emit_sdiv(SCRATCH3, SCRATCH, SCRATCH2);
+                        self.emitter
+                            .emit_msub(SCRATCH, SCRATCH3, SCRATCH2, SCRATCH);
+                    }
+                    IrBinOp::And => self.emitter.emit_and(SCRATCH, SCRATCH, SCRATCH2),
+                    IrBinOp::Or => self.emitter.emit_orr(SCRATCH, SCRATCH, SCRATCH2),
+                    IrBinOp::Xor => self.emitter.emit_eor(SCRATCH, SCRATCH, SCRATCH2),
+                    IrBinOp::Shl => self.emitter.emit_lsl(SCRATCH, SCRATCH, SCRATCH2),
+                    IrBinOp::Shr => self.emitter.emit_lsr(SCRATCH, SCRATCH, SCRATCH2),
+                }
+                let offset = self.vreg_offset(*dest);
+                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+            }
+
+            IrInst::UnaryOp { dest, op, src, .. } => {
+                self.emit_load_value(SCRATCH, src)?;
+                match op {
+                    IrUnaryOp::Neg => {
+                        self.emitter
+                            .emit_sub(SCRATCH, Aarch64Reg::Xzr, SCRATCH);
+                    }
+                    IrUnaryOp::Not => self.emitter.emit_mvn(SCRATCH, SCRATCH),
+                }
+                let offset = self.vreg_offset(*dest);
+                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+            }
+
+            IrInst::Copy { dest, src, .. } => {
+                self.emit_load_value(SCRATCH, src)?;
+                let offset = self.vreg_offset(*dest);
+                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+            }
+
+            IrInst::Compare {
+                dest, lhs, rhs, kind, ..
+            } => {
+                self.emit_load_value(SCRATCH, lhs)?;
+                self.emit_load_value(SCRATCH2, rhs)?;
+                self.emitter.emit_cmp(SCRATCH, SCRATCH2);
+                let cond = match kind {
+                    CmpKind::Eq => Aarch64Cond::Eq,
+                    CmpKind::Ne => Aarch64Cond::Ne,
+                    CmpKind::Lt => Aarch64Cond::Lt,
+                    CmpKind::Le => Aarch64Cond::Le,
+                    CmpKind::Gt => Aarch64Cond::Gt,
+                    CmpKind::Ge => Aarch64Cond::Ge,
+                };
+                self.emitter.emit_cset(SCRATCH, cond);
+                let offset = self.vreg_offset(*dest);
+                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+            }
+
+            IrInst::Load { dest, addr, ty } => {
+                let byte = Self::is_byte_type(ty);
+                match addr {
+                    IrValue::Reg(vreg) if self.is_global_vreg(*vreg) => {
+                        let data_offset = self.global_vregs[vreg];
+                        self.emit_load_global_value(SCRATCH, data_offset);
+                    }
+                    IrValue::Reg(vreg) => {
+                        let src_offset = self.vreg_offset(*vreg);
+                        if byte {
+                            self.emitter.emit_ldrb(SCRATCH, Aarch64Reg::Sp, src_offset);
+                        } else {
+                            self.emitter.emit_ldr(SCRATCH, Aarch64Reg::Sp, src_offset);
+                        }
+                    }
+                    _ => {
+                        self.emit_load_value(ADDR_REG, addr)?;
+                        if byte {
+                            self.emitter.emit_ldrb(SCRATCH, ADDR_REG, 0);
+                        } else {
+                            self.emitter.emit_ldr(SCRATCH, ADDR_REG, 0);
+                        }
+                    }
+                }
+                let offset = self.vreg_offset(*dest);
+                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+            }
+
+            IrInst::Store { addr, value, ty } => {
+                self.emit_load_value(SCRATCH, value)?;
+                let byte = Self::is_byte_type(ty);
+                match addr {
+                    IrValue::Reg(vreg) if self.is_global_vreg(*vreg) => {
+                        let data_offset = self.global_vregs[vreg];
+                        self.emit_store_global_value(SCRATCH, data_offset);
+                    }
+                    IrValue::Reg(vreg) => {
+                        let dst_offset = self.vreg_offset(*vreg);
+                        if byte {
+                            self.emitter.emit_strb(SCRATCH, Aarch64Reg::Sp, dst_offset);
+                        } else {
+                            self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, dst_offset);
+                        }
+                    }
+                    _ => {
+                        self.emit_load_value(ADDR_REG, addr)?;
+                        if byte {
+                            self.emitter.emit_strb(SCRATCH, ADDR_REG, 0);
+                        } else {
+                            self.emitter.emit_str(SCRATCH, ADDR_REG, 0);
+                        }
+                    }
+                }
+            }
+
+            IrInst::AddressOf { dest, src } => {
+                if self.is_global_vreg(*src) {
+                    let data_offset = self.global_vregs[src];
+                    self.emit_literal_address(SCRATCH, data_offset);
+                } else {
+                    let src_offset = self.vreg_offset(*src);
+                    self.emit_local_address(SCRATCH, src_offset);
+                }
+                let offset = self.vreg_offset(*dest);
+                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+            }
+
+            IrInst::Call {
+                dest, name, args, ..
+            } => {
+                for (i, arg) in args.iter().enumerate() {
+                    if i < ARG_REGS.len() {
+                        self.emit_load_value(ARG_REGS[i], arg)?;
+                    }
+                }
+                let pos = self.emitter.len();
+                self.emitter.emit_bl(0);
+                self.call_fixups.push((pos, name.clone()));
+                let offset = self.vreg_offset(*dest);
+                self.emitter.emit_str(Aarch64Reg::X0, Aarch64Reg::Sp, offset);
+            }
+
+            IrInst::Syscall { dest, number, args } => {
+                self.emit_load_value(Aarch64Reg::X8, number)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i < 6 {
+                        self.emit_load_value(ARG_REGS[i], arg)?;
+                    }
+                }
+                self.emitter.emit_svc(0);
+                let offset = self.vreg_offset(*dest);
+                self.emitter.emit_str(Aarch64Reg::X0, Aarch64Reg::Sp, offset);
+            }
+
+            IrInst::ArrayLength { dest, count } => {
+                self.emitter.emit_load_imm64(SCRATCH, *count as i64);
+                let offset = self.vreg_offset(*dest);
+                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+            }
+
+            IrInst::Alloca { .. } | IrInst::ArrayAlloc { .. } | IrInst::Nop => {
+                // Stack space already allocated; nothing to emit.
+            }
+
+            unsupported => {
+                return Err(MorphlexError::CodegenError(format!(
+                    "AArch64 backend does not yet support IR instruction: {:?}",
+                    unsupported
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_terminator(&mut self, term: &Terminator) -> MorphResult<()> {
+        match term {
+            Terminator::Return(value) => {
+                if let Some(val) = value {
+                    self.emit_load_value(Aarch64Reg::X0, val)?;
+                }
+                if self.is_entry_point {
+                    // _start: exit via syscall (x8 = 93, x0 = exit code).
+                    self.emitter.emit_load_imm64(Aarch64Reg::X8, 93);
+                    self.emitter.emit_svc(0);
+                } else {
+                    self.emit_epilogue();
+                }
+            }
+
+            Terminator::Halt(code) => {
+                if self.is_entry_point {
+                    self.emit_load_value(Aarch64Reg::X0, code)?;
+                    self.emitter.emit_load_imm64(Aarch64Reg::X8, 93);
+                    self.emitter.emit_svc(0);
+                } else {
+                    self.emitter.emit_load_imm64(Aarch64Reg::X0, 0);
+                    self.emit_epilogue();
+                }
+            }
+
+            Terminator::Jump(label) => {
+                self.emit_branch_b(label);
+            }
+
+            Terminator::Branch {
+                cond,
+                true_label,
+                false_label,
+            } => {
+                let cond_offset = self.vreg_offset(*cond);
+                self.emitter.emit_ldr(SCRATCH, Aarch64Reg::Sp, cond_offset);
+                self.emit_branch_cbnz(SCRATCH, true_label);
+                self.emit_branch_b(false_label);
+            }
+
+            Terminator::Unreachable => {
+                self.emitter.emit_u32(0xD4200000); // brk #0
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_load_value(&mut self, dest: Aarch64Reg, value: &IrValue) -> MorphResult<()> {
+        match value {
+            IrValue::Imm(imm) => self.emitter.emit_load_imm64(dest, *imm),
+            IrValue::Reg(vreg) => {
+                if let Some(&data_offset) = self.global_vregs.get(vreg) {
+                    self.emit_load_global_value(dest, data_offset);
+                } else {
+                    let offset = self.vreg_offset(*vreg);
+                    self.emitter.emit_ldr(dest, Aarch64Reg::Sp, offset);
+                }
+            }
+            IrValue::Named(_) => self.emitter.emit_load_imm64(dest, 0),
+        }
+        Ok(())
+    }
+
+    fn emit_local_address(&mut self, rd: Aarch64Reg, offset: u32) {
+        let tmp = if rd == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+        if offset <= 4095 {
+            self.emitter.emit_add_imm(rd, Aarch64Reg::Sp, offset as u16, false);
+        } else {
+            self.emitter.emit_load_imm64(tmp, offset as i64);
+            self.emitter.emit_add(rd, Aarch64Reg::Sp, tmp);
+        }
+    }
+
+    fn emit_literal_address(&mut self, rd: Aarch64Reg, data_offset: usize) {
+        // ldr rd, [pc, #4] followed by the 64-bit address placeholder.
+        let insn = 0x58000000 | (1u32 << 5) | rd.encoding() as u32;
+        self.emitter.emit_u32(insn);
+        let fixup_pos = self.emitter.len();
+        self.emitter
+            .text
+            .extend_from_slice(&(data_offset as u64).to_le_bytes());
+        self.emitter.data_fixups.push(fixup_pos);
+    }
+
+    fn emit_load_global_value(&mut self, dest: Aarch64Reg, data_offset: usize) {
+        let addr_reg = if dest == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+        self.emit_literal_address(addr_reg, data_offset);
+        self.emitter.emit_ldr(dest, addr_reg, 0);
+    }
+
+    fn emit_store_global_value(&mut self, src: Aarch64Reg, data_offset: usize) {
+        let addr_reg = if src == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+        self.emit_literal_address(addr_reg, data_offset);
+        self.emitter.emit_str(src, addr_reg, 0);
+    }
+
+    fn emit_branch_b(&mut self, label: &str) {
+        let pos = self.emitter.len();
+        self.emitter.emit_b(0);
+        self.fixups.push((pos, label.to_string(), BranchKind::B));
+    }
+
+    fn emit_branch_cbnz(&mut self, rt: Aarch64Reg, label: &str) {
+        let pos = self.emitter.len();
+        self.emitter.emit_cbnz(rt, 0);
+        self.fixups.push((pos, label.to_string(), BranchKind::Cbnz));
+    }
+
+    fn apply_local_fixups(&mut self) -> MorphResult<()> {
+        for (pos, label, kind) in self.fixups.drain(..) {
+            let target = self.label_offsets.get(label.as_str()).ok_or_else(|| {
+                MorphlexError::CodegenError(format!(
+                    "AArch64 backend: unresolved local label '{}'",
+                    label
+                ))
+            })?;
+            let offset = (*target as i64 - pos as i64) as i32;
+            match kind {
+                BranchKind::B => Self::patch_imm26(&mut self.emitter.text, pos, offset),
+                BranchKind::Cbnz => Self::patch_imm19(&mut self.emitter.text, pos, offset),
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_call_fixups(&mut self) -> MorphResult<()> {
+        for (pos, name) in self.call_fixups.drain(..) {
+            let target = self.function_offsets.get(&name).ok_or_else(|| {
+                MorphlexError::CodegenError(format!(
+                    "AArch64 backend: unresolved function '{}'",
+                    name
+                ))
+            })?;
+            let offset = (*target as i64 - pos as i64) as i32;
+            Self::patch_imm26(&mut self.emitter.text, pos, offset);
+        }
+        Ok(())
+    }
+
+    fn patch_imm19(text: &mut [u8], pos: usize, offset: i32) {
+        let word = u32::from_le_bytes(text[pos..pos + 4].try_into().unwrap());
+        let imm19 = ((offset as u32) >> 2) & 0x7FFFF;
+        let patched = (word & !(0x7FFFF << 5)) | (imm19 << 5);
+        text[pos..pos + 4].copy_from_slice(&patched.to_le_bytes());
+    }
+
+    fn patch_imm26(text: &mut [u8], pos: usize, offset: i32) {
+        let word = u32::from_le_bytes(text[pos..pos + 4].try_into().unwrap());
+        let imm26 = ((offset as u32) >> 2) & 0x3FFFFFF;
+        let patched = (word & !0x3FFFFFF) | imm26;
+        text[pos..pos + 4].copy_from_slice(&patched.to_le_bytes());
+    }
 }
 
 // ─── Unit tests ─────────────────────────────────────────────────────────────

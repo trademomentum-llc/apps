@@ -1,0 +1,12 @@
+define add with integer a integer b
+add a to b
+return it
+end
+
+define main
+call add 3 4
+return it
+end
+
+call add 3 4
+return it
