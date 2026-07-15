@@ -163,22 +163,34 @@ impl Aarch64Emitter {
 
     /// `movz  xd, #imm16, lsl #shift`  (shift must be 0, 16, 32 or 48).
     pub fn emit_movz(&mut self, rd: Aarch64Reg, imm16: u16, shift: u8) {
+        assert!(
+            shift % 16 == 0 && shift <= 48,
+            "movz shift must be 0, 16, 32 or 48"
+        );
         let hw = ((shift / 16) & 0x3) as u32;
         let imm = (imm16 as u32) & 0xFFFF;
         let insn = 0xD2800000 | (hw << 21) | (imm << 5) | rd.encoding() as u32;
         self.emit_u32(insn);
     }
 
-    /// `movn  xd, #imm16, lsl #shift`.
+    /// `movn  xd, #imm16, lsl #shift`  (shift must be 0, 16, 32 or 48).
     pub fn emit_movn(&mut self, rd: Aarch64Reg, imm16: u16, shift: u8) {
+        assert!(
+            shift % 16 == 0 && shift <= 48,
+            "movn shift must be 0, 16, 32 or 48"
+        );
         let hw = ((shift / 16) & 0x3) as u32;
         let imm = (imm16 as u32) & 0xFFFF;
         let insn = 0x92800000 | (hw << 21) | (imm << 5) | rd.encoding() as u32;
         self.emit_u32(insn);
     }
 
-    /// `movk  xd, #imm16, lsl #shift`.
+    /// `movk  xd, #imm16, lsl #shift`  (shift must be 0, 16, 32 or 48).
     pub fn emit_movk(&mut self, rd: Aarch64Reg, imm16: u16, shift: u8) {
+        assert!(
+            shift % 16 == 0 && shift <= 48,
+            "movk shift must be 0, 16, 32 or 48"
+        );
         let hw = ((shift / 16) & 0x3) as u32;
         let imm = (imm16 as u32) & 0xFFFF;
         let insn = 0xF2800000 | (hw << 21) | (imm << 5) | rd.encoding() as u32;
@@ -351,6 +363,10 @@ impl Aarch64Emitter {
             offset % scale == 0,
             "load/store offset must be aligned to access size"
         );
+        assert!(
+            (offset / scale) <= 0xFFF,
+            "load/store offset out of range"
+        );
         let imm12 = (offset / scale) & 0xFFF;
         let mut insn = ((size as u32 & 0x3) << 30) | 0x39000000;
         if load {
@@ -383,6 +399,7 @@ impl Aarch64Emitter {
     /// `ldp  xt1, xt2, [xn, #offset]` (signed offset, multiple of 8).
     pub fn emit_ldp(&mut self, rt1: Aarch64Reg, rt2: Aarch64Reg, rn: Aarch64Reg, offset: i32) {
         assert!(offset % 8 == 0, "ldp offset must be a multiple of 8");
+        assert!(-512 <= offset && offset <= 504, "ldp offset out of range");
         let imm7 = ((offset / 8) as u32) & 0x7F;
         let insn = 0xA9400000
             | (imm7 << 15)
@@ -395,6 +412,7 @@ impl Aarch64Emitter {
     /// `stp  xt1, xt2, [xn, #offset]` (signed offset, multiple of 8).
     pub fn emit_stp(&mut self, rt1: Aarch64Reg, rt2: Aarch64Reg, rn: Aarch64Reg, offset: i32) {
         assert!(offset % 8 == 0, "stp offset must be a multiple of 8");
+        assert!(-512 <= offset && offset <= 504, "stp offset out of range");
         let imm7 = ((offset / 8) as u32) & 0x7F;
         let insn = 0xA9000000
             | (imm7 << 15)
@@ -408,11 +426,19 @@ impl Aarch64Emitter {
 
     fn encode_imm19(offset: i32) -> u32 {
         assert!(offset % 4 == 0, "branch offset must be a multiple of 4");
+        assert!(
+            -(1 << 18) * 4 <= offset && offset <= ((1 << 18) - 1) * 4,
+            "branch offset out of range for imm19"
+        );
         ((offset / 4) as u32) & 0x7FFFF
     }
 
     fn encode_imm26(offset: i32) -> u32 {
         assert!(offset % 4 == 0, "branch offset must be a multiple of 4");
+        assert!(
+            -(1 << 25) * 4 <= offset && offset <= ((1 << 25) - 1) * 4,
+            "branch offset out of range for imm26"
+        );
         ((offset / 4) as u32) & 0x3FFFFFF
     }
 
@@ -616,5 +642,33 @@ mod tests {
             0x40, 0xD0, 0x1B, 0xD5, // msr TPIDR_EL0, x0
         ];
         assert_eq!(e.text, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "movz shift must be 0, 16, 32 or 48")]
+    fn test_movz_rejects_bad_shift() {
+        let mut e = Aarch64Emitter::new();
+        e.emit_movz(Aarch64Reg::X0, 42, 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "load/store offset out of range")]
+    fn test_ldr_rejects_out_of_range_offset() {
+        let mut e = Aarch64Emitter::new();
+        e.emit_ldr(Aarch64Reg::X0, Aarch64Reg::X1, 8 * (0xFFF + 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "ldp offset out of range")]
+    fn test_ldp_rejects_out_of_range_offset() {
+        let mut e = Aarch64Emitter::new();
+        e.emit_ldp(Aarch64Reg::X0, Aarch64Reg::X1, Aarch64Reg::X2, 512);
+    }
+
+    #[test]
+    #[should_panic(expected = "branch offset out of range for imm26")]
+    fn test_b_rejects_out_of_range_offset() {
+        let mut e = Aarch64Emitter::new();
+        e.emit_b(((1 << 25) - 1) * 4 + 4);
     }
 }
