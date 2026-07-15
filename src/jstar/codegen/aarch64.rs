@@ -802,9 +802,7 @@ impl CodeGen {
                 if i >= ARG_REGS.len() {
                     break;
                 }
-                let offset = self.vreg_offset(*vreg);
-                self.emitter
-                    .emit_str(ARG_REGS[i], Aarch64Reg::Sp, offset);
+                self.emit_store_vreg(ARG_REGS[i], *vreg);
             }
         }
 
@@ -886,8 +884,7 @@ impl CodeGen {
                     IrBinOp::Shl => self.emitter.emit_lsl(SCRATCH, SCRATCH, SCRATCH2),
                     IrBinOp::Shr => self.emitter.emit_lsr(SCRATCH, SCRATCH, SCRATCH2),
                 }
-                let offset = self.vreg_offset(*dest);
-                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+                self.emit_store_vreg(SCRATCH, *dest);
             }
 
             IrInst::UnaryOp { dest, op, src, .. } => {
@@ -899,14 +896,12 @@ impl CodeGen {
                     }
                     IrUnaryOp::Not => self.emitter.emit_mvn(SCRATCH, SCRATCH),
                 }
-                let offset = self.vreg_offset(*dest);
-                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+                self.emit_store_vreg(SCRATCH, *dest);
             }
 
             IrInst::Copy { dest, src, .. } => {
                 self.emit_load_value(SCRATCH, src)?;
-                let offset = self.vreg_offset(*dest);
-                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+                self.emit_store_vreg(SCRATCH, *dest);
             }
 
             IrInst::Compare {
@@ -924,8 +919,7 @@ impl CodeGen {
                     CmpKind::Ge => Aarch64Cond::Ge,
                 };
                 self.emitter.emit_cset(SCRATCH, cond);
-                let offset = self.vreg_offset(*dest);
-                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+                self.emit_store_vreg(SCRATCH, *dest);
             }
 
             IrInst::Load { dest, addr, ty } => {
@@ -936,11 +930,10 @@ impl CodeGen {
                         self.emit_load_global_value(SCRATCH, data_offset);
                     }
                     IrValue::Reg(vreg) => {
-                        let src_offset = self.vreg_offset(*vreg);
                         if byte {
-                            self.emitter.emit_ldrb(SCRATCH, Aarch64Reg::Sp, src_offset);
+                            self.emit_loadb_vreg(SCRATCH, *vreg);
                         } else {
-                            self.emitter.emit_ldr(SCRATCH, Aarch64Reg::Sp, src_offset);
+                            self.emit_load_vreg(SCRATCH, *vreg);
                         }
                     }
                     _ => {
@@ -952,8 +945,7 @@ impl CodeGen {
                         }
                     }
                 }
-                let offset = self.vreg_offset(*dest);
-                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+                self.emit_store_vreg(SCRATCH, *dest);
             }
 
             IrInst::Store { addr, value, ty } => {
@@ -965,11 +957,10 @@ impl CodeGen {
                         self.emit_store_global_value(SCRATCH, data_offset);
                     }
                     IrValue::Reg(vreg) => {
-                        let dst_offset = self.vreg_offset(*vreg);
                         if byte {
-                            self.emitter.emit_strb(SCRATCH, Aarch64Reg::Sp, dst_offset);
+                            self.emit_storeb_vreg(SCRATCH, *vreg);
                         } else {
-                            self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, dst_offset);
+                            self.emit_store_vreg(SCRATCH, *vreg);
                         }
                     }
                     _ => {
@@ -991,41 +982,51 @@ impl CodeGen {
                     let src_offset = self.vreg_offset(*src);
                     self.emit_local_address(SCRATCH, src_offset);
                 }
-                let offset = self.vreg_offset(*dest);
-                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+                self.emit_store_vreg(SCRATCH, *dest);
             }
 
             IrInst::Call {
                 dest, name, args, ..
             } => {
+                if args.len() > ARG_REGS.len() {
+                    return Err(MorphlexError::CodegenError(format!(
+                        "AArch64 backend: function call to '{}' has {} integer arguments; \
+                         AAPCS64 supports at most {} via registers (stack passing not implemented)",
+                        name,
+                        args.len(),
+                        ARG_REGS.len()
+                    )));
+                }
                 for (i, arg) in args.iter().enumerate() {
-                    if i < ARG_REGS.len() {
-                        self.emit_load_value(ARG_REGS[i], arg)?;
-                    }
+                    self.emit_load_value(ARG_REGS[i], arg)?;
                 }
                 let pos = self.emitter.len();
                 self.emitter.emit_bl(0);
                 self.call_fixups.push((pos, name.clone()));
-                let offset = self.vreg_offset(*dest);
-                self.emitter.emit_str(Aarch64Reg::X0, Aarch64Reg::Sp, offset);
+                self.emit_store_vreg(Aarch64Reg::X0, *dest);
             }
 
             IrInst::Syscall { dest, number, args } => {
+                const MAX_SYSCALL_ARGS: usize = 6;
+                if args.len() > MAX_SYSCALL_ARGS {
+                    return Err(MorphlexError::CodegenError(format!(
+                        "AArch64 backend: syscall has {} arguments; \
+                         AArch64 supports at most {}",
+                        args.len(),
+                        MAX_SYSCALL_ARGS
+                    )));
+                }
                 self.emit_load_value(Aarch64Reg::X8, number)?;
                 for (i, arg) in args.iter().enumerate() {
-                    if i < 6 {
-                        self.emit_load_value(ARG_REGS[i], arg)?;
-                    }
+                    self.emit_load_value(ARG_REGS[i], arg)?;
                 }
                 self.emitter.emit_svc(0);
-                let offset = self.vreg_offset(*dest);
-                self.emitter.emit_str(Aarch64Reg::X0, Aarch64Reg::Sp, offset);
+                self.emit_store_vreg(Aarch64Reg::X0, *dest);
             }
 
             IrInst::ArrayLength { dest, count } => {
                 self.emitter.emit_load_imm64(SCRATCH, *count as i64);
-                let offset = self.vreg_offset(*dest);
-                self.emitter.emit_str(SCRATCH, Aarch64Reg::Sp, offset);
+                self.emit_store_vreg(SCRATCH, *dest);
             }
 
             IrInst::Alloca { .. } | IrInst::ArrayAlloc { .. } | IrInst::Nop => {
@@ -1077,8 +1078,7 @@ impl CodeGen {
                 true_label,
                 false_label,
             } => {
-                let cond_offset = self.vreg_offset(*cond);
-                self.emitter.emit_ldr(SCRATCH, Aarch64Reg::Sp, cond_offset);
+                self.emit_load_vreg(SCRATCH, *cond);
                 self.emit_branch_cbnz(SCRATCH, true_label);
                 self.emit_branch_b(false_label);
             }
@@ -1097,8 +1097,7 @@ impl CodeGen {
                 if let Some(&data_offset) = self.global_vregs.get(vreg) {
                     self.emit_load_global_value(dest, data_offset);
                 } else {
-                    let offset = self.vreg_offset(*vreg);
-                    self.emitter.emit_ldr(dest, Aarch64Reg::Sp, offset);
+                    self.emit_load_vreg(dest, *vreg);
                 }
             }
             IrValue::Named(_) => self.emitter.emit_load_imm64(dest, 0),
@@ -1113,6 +1112,61 @@ impl CodeGen {
         } else {
             self.emitter.emit_load_imm64(tmp, offset as i64);
             self.emitter.emit_add(rd, Aarch64Reg::Sp, tmp);
+        }
+    }
+
+    /// Maximum unsigned immediate offset for 64-bit load/store (scaled by 8).
+    const MAX_UIMM12_64: u32 = 0xFFF * 8; // 32760
+    /// Maximum unsigned immediate offset for byte load/store (scaled by 1).
+    const MAX_UIMM12_8: u32 = 0xFFF; // 4095
+
+    /// Load a 64-bit value from `vreg`'s stack slot, materializing the address
+    /// in a scratch register if the offset exceeds the unsigned immediate range.
+    fn emit_load_vreg(&mut self, dest: Aarch64Reg, vreg: VReg) {
+        let offset = self.vreg_offset(vreg);
+        if offset <= Self::MAX_UIMM12_64 {
+            self.emitter.emit_ldr(dest, Aarch64Reg::Sp, offset);
+        } else {
+            let addr = if dest == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+            self.emit_local_address(addr, offset);
+            self.emitter.emit_ldr(dest, addr, 0);
+        }
+    }
+
+    /// Store a 64-bit value to `vreg`'s stack slot, materializing the address
+    /// in a scratch register if the offset exceeds the unsigned immediate range.
+    fn emit_store_vreg(&mut self, src: Aarch64Reg, vreg: VReg) {
+        let offset = self.vreg_offset(vreg);
+        if offset <= Self::MAX_UIMM12_64 {
+            self.emitter.emit_str(src, Aarch64Reg::Sp, offset);
+        } else {
+            let addr = if src == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+            self.emit_local_address(addr, offset);
+            self.emitter.emit_str(src, addr, 0);
+        }
+    }
+
+    /// Load a byte from `vreg`'s stack slot, materializing the address if needed.
+    fn emit_loadb_vreg(&mut self, dest: Aarch64Reg, vreg: VReg) {
+        let offset = self.vreg_offset(vreg);
+        if offset <= Self::MAX_UIMM12_8 {
+            self.emitter.emit_ldrb(dest, Aarch64Reg::Sp, offset);
+        } else {
+            let addr = if dest == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+            self.emit_local_address(addr, offset);
+            self.emitter.emit_ldrb(dest, addr, 0);
+        }
+    }
+
+    /// Store a byte to `vreg`'s stack slot, materializing the address if needed.
+    fn emit_storeb_vreg(&mut self, src: Aarch64Reg, vreg: VReg) {
+        let offset = self.vreg_offset(vreg);
+        if offset <= Self::MAX_UIMM12_8 {
+            self.emitter.emit_strb(src, Aarch64Reg::Sp, offset);
+        } else {
+            let addr = if src == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+            self.emit_local_address(addr, offset);
+            self.emitter.emit_strb(src, addr, 0);
         }
     }
 
@@ -1202,6 +1256,21 @@ impl CodeGen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jstar::grammar::JStarType;
+    use crate::jstar::ir::{
+        BasicBlock, IrFunction, IrInst, IrProgram, IrValue, Terminator,
+    };
+    use std::collections::HashMap;
+
+    fn empty_program(functions: Vec<IrFunction>) -> IrProgram {
+        IrProgram {
+            functions,
+            string_data: Vec::new(),
+            global_data: Vec::new(),
+            global_vars: HashMap::new(),
+            global_vregs: HashMap::new(),
+        }
+    }
 
     #[test]
     fn test_movz_x0_42() {
@@ -1364,5 +1433,93 @@ mod tests {
     fn test_b_rejects_out_of_range_offset() {
         let mut e = Aarch64Emitter::new();
         e.emit_b(((1 << 25) - 1) * 4 + 4);
+    }
+
+    /// A stack slot beyond the 64-bit unsigned immediate range (32760 bytes)
+    /// must not panic; the backend should materialize the address in a scratch
+    /// register and use an offset-0 load/store.
+    #[test]
+    fn test_large_stack_frame_no_panic() {
+        // ArrayAlloc of 4097 64-bit elements consumes 32768 bytes, so the next
+        // vreg lives at offset 32768 (> 32760).
+        let func = IrFunction {
+            name: "large_frame".to_string(),
+            return_type: JStarType::Int,
+            param_vregs: vec![],
+            param_count: 0,
+            next_vreg: 2,
+            blocks: vec![BasicBlock {
+                label: "entry".to_string(),
+                instructions: vec![
+                    IrInst::ArrayAlloc { dest: 0, count: 4097 },
+                    IrInst::Copy {
+                        dest: 1,
+                        src: IrValue::Imm(42),
+                        ty: JStarType::Int,
+                    },
+                ],
+                terminator: Terminator::Return(Some(IrValue::Reg(1))),
+            }],
+        };
+        let program = empty_program(vec![func]);
+        let code = generate(&program).expect("large stack frame should not panic");
+        assert!(!code.text.is_empty(), "backend produced no machine code");
+    }
+
+    /// A function call with more than 8 integer arguments is unsupported.
+    #[test]
+    fn test_call_too_many_args_errors() {
+        let func = IrFunction {
+            name: "caller".to_string(),
+            return_type: JStarType::Int,
+            param_vregs: vec![],
+            param_count: 0,
+            next_vreg: 2,
+            blocks: vec![BasicBlock {
+                label: "entry".to_string(),
+                instructions: vec![IrInst::Call {
+                    dest: 0,
+                    name: "callee".to_string(),
+                    args: (1..=9).map(IrValue::Imm).collect(),
+                    ty: JStarType::Int,
+                }],
+                terminator: Terminator::Return(Some(IrValue::Reg(0))),
+            }],
+        };
+        let program = empty_program(vec![func]);
+        let err = generate(&program).expect_err("call with >8 args should error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("9 integer arguments"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    /// A syscall with more than 6 arguments is unsupported.
+    #[test]
+    fn test_syscall_too_many_args_errors() {
+        let func = IrFunction {
+            name: "_start".to_string(),
+            return_type: JStarType::Void,
+            param_vregs: vec![],
+            param_count: 0,
+            next_vreg: 1,
+            blocks: vec![BasicBlock {
+                label: "entry".to_string(),
+                instructions: vec![IrInst::Syscall {
+                    dest: 0,
+                    number: IrValue::Imm(93),
+                    args: (0..7).map(IrValue::Imm).collect(),
+                }],
+                terminator: Terminator::Halt(IrValue::Imm(0)),
+            }],
+        };
+        let program = empty_program(vec![func]);
+        let err = generate(&program).expect_err("syscall with >6 args should error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("7 arguments"),
+            "unexpected error message: {msg}"
+        );
     }
 }
