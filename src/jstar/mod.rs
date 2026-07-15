@@ -382,45 +382,45 @@ pub fn tokenize_jstar_raw(input: &str) -> MorphResult<(Vec<String>, Vec<TokenVec
 }
 
 /// Compile JStar source text to a native ELF binary using raw tokenization.
-pub fn compile_source_raw(source: &str, output_path: &Path) -> MorphResult<()> {
+pub fn compile_source_raw(source: &str, output_path: &Path, arch: Arch) -> MorphResult<()> {
     let (lemmas, vectors) = tokenize_jstar_raw(source)?;
     let ast = parser::parse(&lemmas, &lemmas, &vectors)?;
     let typed_ast = typechecker::check(&ast)?;
     let mut ir_program = ir::lower(&typed_ast)?;
     optimizer::optimize(&mut ir_program);
-    let machine_code = codegen::generate(Arch::X86_64, &ir_program)?;
+    let machine_code = codegen::generate(arch, &ir_program)?;
     linker::link(&machine_code, output_path)?;
     Ok(())
 }
 
 /// Compile a .jstr source file using raw tokenization.
-pub fn compile_file_raw(source_path: &Path, output_path: &Path) -> MorphResult<()> {
+pub fn compile_file_raw(source_path: &Path, output_path: &Path, arch: Arch) -> MorphResult<()> {
     let source = std::fs::read_to_string(source_path).map_err(MorphlexError::IoError)?;
-    compile_source_raw(&source, output_path)
+    compile_source_raw(&source, output_path, arch)
 }
 
 // ─── Compiler Pipeline ─────────────────────────────────────────────────────
 
 /// Compile a .jstr source file to a native ELF binary.
-pub fn compile_file(source_path: &Path, output_path: &Path) -> MorphResult<()> {
+pub fn compile_file(source_path: &Path, output_path: &Path, arch: Arch) -> MorphResult<()> {
     let source = std::fs::read_to_string(source_path).map_err(MorphlexError::IoError)?;
-    compile_source(&source, output_path)
+    compile_source(&source, output_path, arch)
 }
 
 /// Compile multiple .jstr source files into a single native ELF binary.
 /// Sources are concatenated in order before compilation.
-pub fn compile_multi(sources: &[&Path], output_path: &Path) -> MorphResult<()> {
+pub fn compile_multi(sources: &[&Path], output_path: &Path, arch: Arch) -> MorphResult<()> {
     let mut combined = String::new();
     for path in sources {
         let src = std::fs::read_to_string(path).map_err(MorphlexError::IoError)?;
         combined.push_str(&src);
         combined.push('\n');
     }
-    compile_source(&combined, output_path)
+    compile_source(&combined, output_path, arch)
 }
 
 /// Compile JStar source text to a native ELF binary.
-pub fn compile_source(source: &str, output_path: &Path) -> MorphResult<()> {
+pub fn compile_source(source: &str, output_path: &Path, arch: Arch) -> MorphResult<()> {
     // Phase 0: Tokenize (morphlex + number literals)
     let (originals, lemmas, vectors) = tokenize_jstar(source)?;
 
@@ -436,8 +436,8 @@ pub fn compile_source(source: &str, output_path: &Path) -> MorphResult<()> {
     // Phase 4.5: Optimize IR
     optimizer::optimize(&mut ir_program);
 
-    // Phase 5: Generate x86-64 machine code
-    let machine_code = codegen::generate(Arch::X86_64, &ir_program)?;
+    // Phase 5: Generate machine code for the selected architecture
+    let machine_code = codegen::generate(arch, &ir_program)?;
 
     // Phase 6: Link into ELF binary
     linker::link(&machine_code, output_path)?;
@@ -534,7 +534,7 @@ mod tests {
         let binary = dir.join(format!("t_{}", n));
         // Remove stale binary if it exists from a previous test run
         let _ = std::fs::remove_file(&binary);
-        compile_source(source, &binary).unwrap();
+        compile_source(source, &binary, Arch::X86_64).unwrap();
         let output = run_binary(&binary);
         let _ = std::fs::remove_file(&binary);
         output.status.code().unwrap_or(-1)
@@ -568,7 +568,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let binary = dir.join(format!("tc_{}", n));
         let _ = std::fs::remove_file(&binary);
-        compile_source(source, &binary).unwrap();
+        compile_source(source, &binary, Arch::X86_64).unwrap();
         let output = run_binary(&binary);
         let _ = std::fs::remove_file(&binary);
         String::from_utf8_lossy(&output.stdout).to_string()
@@ -801,7 +801,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let binary = dir.join(format!("test_dbg_{:016x}", hasher.finish()));
         let _ = std::fs::remove_file(&binary);
-        compile_source(source, &binary).unwrap();
+        compile_source(source, &binary, Arch::X86_64).unwrap();
 
         let output = std::process::Command::new(&binary).output().unwrap();
         eprintln!(
@@ -1333,7 +1333,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let binary = dir.join(format!("tr_{}", n));
         let _ = std::fs::remove_file(&binary);
-        compile_source_raw(source, &binary).unwrap();
+        compile_source_raw(source, &binary, Arch::X86_64).unwrap();
         let output = run_binary(&binary);
         let _ = std::fs::remove_file(&binary);
         output.status.code().unwrap_or(-1)
@@ -1402,9 +1402,9 @@ mod tests {
         let binary = dir.join(format!("elf_{}", n));
         let _ = std::fs::remove_file(&binary);
         if raw {
-            compile_source_raw(source, &binary).unwrap();
+            compile_source_raw(source, &binary, Arch::X86_64).unwrap();
         } else {
-            compile_source(source, &binary).unwrap();
+            compile_source(source, &binary, Arch::X86_64).unwrap();
         }
         let bytes = std::fs::read(&binary).unwrap();
         let _ = std::fs::remove_file(&binary);
@@ -1510,7 +1510,7 @@ mod tests {
         let compiler_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("jstar")
             .join("compiler.jstr");
-        compile_file_raw(&compiler_src, &compiler_bin)
+        compile_file_raw(&compiler_src, &compiler_bin, Arch::X86_64)
             .expect("Failed to compile compiler.jstr with Rust bootstrap");
         compiler_bin
     }
@@ -1794,6 +1794,7 @@ return total\n";
         compile_source_raw(
             "a byte buf 256\na nread\na ptr\naddressof buf\nstore it into ptr\nsyscall 0 0 ptr 256\nstore it into nread\nreturn nread",
             &binary,
+            Arch::X86_64,
         ).unwrap();
 
         let mut child = Command::new(&binary)
@@ -1997,7 +1998,7 @@ return tok_count";
         let binary = dir.join(format!("phase1_{}", n));
         let _ = std::fs::remove_file(&binary);
 
-        compile_source_raw(source, &binary).unwrap();
+        compile_source_raw(source, &binary, Arch::X86_64).unwrap();
 
         let mut child = Command::new(&binary)
             .stdin(Stdio::piped())
@@ -2136,7 +2137,7 @@ return it";
         let binary = dir.join(format!("phase1b_{}", n));
         let _ = std::fs::remove_file(&binary);
 
-        compile_source_raw(source, &binary).unwrap();
+        compile_source_raw(source, &binary, Arch::X86_64).unwrap();
 
         let mut child = Command::new(&binary)
             .stdin(Stdio::piped())
@@ -2438,7 +2439,7 @@ return ok";
         let _ = std::fs::remove_file(&binary);
 
         let paths: Vec<&Path> = vec![file1.as_path(), file2.as_path()];
-        compile_multi(&paths, &binary).unwrap();
+        compile_multi(&paths, &binary, Arch::X86_64).unwrap();
 
         let output = run_binary(&binary);
         let _ = std::fs::remove_file(&binary);

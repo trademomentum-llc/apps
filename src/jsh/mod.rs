@@ -46,7 +46,7 @@ pub fn execute_jstar(source: &str) -> MorphResult<ExecutionResult> {
     let _ = std::fs::remove_file(&binary);
 
     // Compile through the full JStar pipeline
-    crate::jstar::compile_source(source, &binary)?;
+    crate::jstar::compile_source(source, &binary, crate::jstar::codegen::Arch::X86_64)?;
 
     // Execute the compiled binary
     let output = std::process::Command::new(&binary)

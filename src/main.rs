@@ -170,6 +170,10 @@ enum JStarAction {
         #[arg(short, long, default_value = "a.out")]
         output: PathBuf,
 
+        /// Target architecture: x86_64 or aarch64
+        #[arg(long, value_name = "ARCH", default_value = "x86_64")]
+        target: String,
+
         /// Use raw tokenization (bypass NLP pipeline, for self-hosting verification)
         #[arg(long)]
         raw: bool,
@@ -641,21 +645,34 @@ fn main() {
                 input,
                 include,
                 output,
+                target,
                 raw,
             } => {
+                let arch = match target.as_str() {
+                    "x86_64" => morphlex::jstar::codegen::Arch::X86_64,
+                    "aarch64" => morphlex::jstar::codegen::Arch::Aarch64,
+                    _ => {
+                        eprintln!(
+                            "error: unsupported target '{}', expected 'x86_64' or 'aarch64'",
+                            target
+                        );
+                        std::process::exit(1);
+                    }
+                };
                 let mode = if raw { "raw" } else { "nlp" };
                 if include.is_empty() {
                     println!(
-                        "Compiling {} -> {} ({})",
+                        "Compiling {} -> {} ({}, target={})",
                         input.display(),
                         output.display(),
-                        mode
+                        mode,
+                        target
                     );
                     if raw {
-                        morphlex::jstar::compile_file_raw(&input, &output)
+                        morphlex::jstar::compile_file_raw(&input, &output, arch)
                             .expect("JStar compilation failed");
                     } else {
-                        morphlex::jstar::compile_file(&input, &output)
+                        morphlex::jstar::compile_file(&input, &output, arch)
                             .expect("JStar compilation failed");
                     }
                 } else {
@@ -664,12 +681,13 @@ fn main() {
                     let paths: Vec<&std::path::Path> =
                         sources.iter().map(|p| p.as_path()).collect();
                     println!(
-                        "Compiling {} files -> {} ({})",
+                        "Compiling {} files -> {} ({}, target={})",
                         paths.len(),
                         output.display(),
-                        mode
+                        mode,
+                        target
                     );
-                    morphlex::jstar::compile_multi(&paths, &output)
+                    morphlex::jstar::compile_multi(&paths, &output, arch)
                         .expect("JStar compilation failed");
                 }
                 println!("Binary written to {}", output.display());
