@@ -18,6 +18,7 @@ fn test_compile_simple_math_aarch64() {
 }
 
 #[test]
+#[ignore = "requires aarch64-linux-gnu-objdump"]
 fn test_aarch64_disassembly_has_add_mov_ret() {
     let source = include_str!("data/simple_math.jstr");
     let program = compile_to_ir(source).unwrap();
@@ -28,7 +29,7 @@ fn test_aarch64_disassembly_has_add_mov_ret() {
     let bin_path = dir.join("text.bin");
     std::fs::write(&bin_path, &code.text).unwrap();
 
-    let output = match std::process::Command::new("aarch64-linux-gnu-objdump")
+    let output = std::process::Command::new("aarch64-linux-gnu-objdump")
         .args([
             "-D",
             "-b",
@@ -38,14 +39,7 @@ fn test_aarch64_disassembly_has_add_mov_ret() {
             bin_path.to_str().unwrap(),
         ])
         .output()
-    {
-        Ok(out) => out,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("skipping disassembly test: aarch64-linux-gnu-objdump not found");
-            return;
-        }
-        Err(e) => panic!("failed to run aarch64-linux-gnu-objdump: {e}"),
-    };
+        .expect("failed to run aarch64-linux-gnu-objdump");
 
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
