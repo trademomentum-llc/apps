@@ -687,8 +687,13 @@ fn main() {
                         mode,
                         target
                     );
-                    morphlex::jstar::compile_multi(&paths, &output, arch)
-                        .expect("JStar compilation failed");
+                    if raw {
+                        morphlex::jstar::compile_multi_raw(&paths, &output, arch)
+                            .expect("JStar compilation failed");
+                    } else {
+                        morphlex::jstar::compile_multi(&paths, &output, arch)
+                            .expect("JStar compilation failed");
+                    }
                 }
                 println!("Binary written to {}", output.display());
             }

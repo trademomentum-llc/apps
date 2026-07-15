@@ -419,6 +419,20 @@ pub fn compile_multi(sources: &[&Path], output_path: &Path, arch: Arch) -> Morph
     compile_source(&combined, output_path, arch)
 }
 
+/// Compile multiple .jstr source files into a single native ELF binary using
+/// raw tokenization (no NLP pipeline). Sources are concatenated in order so
+/// that functions and globals defined in included files end up in the same
+/// program/IR as the main file.
+pub fn compile_multi_raw(sources: &[&Path], output_path: &Path, arch: Arch) -> MorphResult<()> {
+    let mut combined = String::new();
+    for path in sources {
+        let src = std::fs::read_to_string(path).map_err(MorphlexError::IoError)?;
+        combined.push_str(&src);
+        combined.push('\n');
+    }
+    compile_source_raw(&combined, output_path, arch)
+}
+
 /// Compile JStar source text to a native ELF binary.
 pub fn compile_source(source: &str, output_path: &Path, arch: Arch) -> MorphResult<()> {
     // Phase 0: Tokenize (morphlex + number literals)
@@ -451,7 +465,7 @@ pub fn compile_source(source: &str, output_path: &Path, arch: Arch) -> MorphResu
 mod tests {
     use super::token_map::*;
     use super::*;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Monotonic counter to guarantee unique binary names across parallel tests.
     #[allow(dead_code)]
@@ -2451,6 +2465,50 @@ return ok";
             Some(42),
             "multi-file: double(21) = 42"
         );
+    }
+
+    /// Regression test for the `--include` multi-file path.
+    ///
+    /// A function defined in an included file must be registered in the same
+    /// IR program as the main file so that call fixups resolve at codegen time.
+    /// This test does not require executing the ELF (which is Linux-only), so it
+    /// runs on any host and simply verifies that compilation succeeds and emits
+    /// a non-empty binary.
+    #[test]
+    fn test_compile_multi_merges_included_function() {
+        use std::path::Path;
+
+        let dir = std::env::temp_dir().join("jstar_include_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let lib = dir.join("lib.jstr");
+        let main = dir.join("main.jstr");
+        std::fs::write(&lib, "define helper\nreturn 42\nend\n").unwrap();
+        std::fs::write(&main, "call helper\nreturn it\n").unwrap();
+
+        for (raw, label) in [(false, "nlp"), (true, "raw")] {
+            let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let binary = dir.join(format!("include_{}_{}", label, n));
+            let _ = std::fs::remove_file(&binary);
+
+            let paths: Vec<&Path> = vec![lib.as_path(), main.as_path()];
+            if raw {
+                compile_multi_raw(&paths, &binary, Arch::X86_64).unwrap();
+            } else {
+                compile_multi(&paths, &binary, Arch::X86_64).unwrap();
+            }
+
+            let meta = std::fs::metadata(&binary).expect("binary should exist");
+            assert!(
+                meta.len() > 0,
+                "{}: included function 'helper' must resolve and produce non-empty machine code",
+                label
+            );
+            let _ = std::fs::remove_file(&binary);
+        }
+
+        let _ = std::fs::remove_file(&lib);
+        let _ = std::fs::remove_file(&main);
     }
 
     // ─── v0.9.0: T-diagram self-hosting verification ────────────────────────
