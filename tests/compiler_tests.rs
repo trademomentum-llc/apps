@@ -16,3 +16,48 @@ fn test_compile_simple_math_aarch64() {
     let code = codegen::generate(Arch::Aarch64, &program).unwrap();
     assert!(!code.text.is_empty(), "AArch64 backend produced no machine code");
 }
+
+#[test]
+fn test_aarch64_disassembly_has_add_mov_ret() {
+    let source = include_str!("data/simple_math.jstr");
+    let program = compile_to_ir(source).unwrap();
+    let code = codegen::generate(Arch::Aarch64, &program).unwrap();
+
+    let dir = std::env::temp_dir().join("jstar_aarch64_disasm_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin_path = dir.join("text.bin");
+    std::fs::write(&bin_path, &code.text).unwrap();
+
+    let output = match std::process::Command::new("aarch64-linux-gnu-objdump")
+        .args([
+            "-D",
+            "-b",
+            "binary",
+            "-m",
+            "aarch64",
+            bin_path.to_str().unwrap(),
+        ])
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping disassembly test: aarch64-linux-gnu-objdump not found");
+            return;
+        }
+        Err(e) => panic!("failed to run aarch64-linux-gnu-objdump: {e}"),
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("add"),
+        "expected add instruction, got:\n{text}"
+    );
+    assert!(
+        text.contains("mov"),
+        "expected mov instruction, got:\n{text}"
+    );
+    assert!(
+        text.contains("ret"),
+        "expected ret instruction, got:\n{text}"
+    );
+}
