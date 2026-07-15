@@ -20,6 +20,7 @@ pub mod token_map;
 pub mod typechecker;
 
 use crate::types::*;
+use codegen::Arch;
 use std::path::Path;
 
 // ─── JStar-Specific Tokenization ───────────────────────────────────────────
@@ -387,7 +388,7 @@ pub fn compile_source_raw(source: &str, output_path: &Path) -> MorphResult<()> {
     let typed_ast = typechecker::check(&ast)?;
     let mut ir_program = ir::lower(&typed_ast)?;
     optimizer::optimize(&mut ir_program);
-    let machine_code = codegen::generate(&ir_program)?;
+    let machine_code = codegen::generate(Arch::X86_64, &ir_program)?;
     linker::link(&machine_code, output_path)?;
     Ok(())
 }
@@ -436,7 +437,7 @@ pub fn compile_source(source: &str, output_path: &Path) -> MorphResult<()> {
     optimizer::optimize(&mut ir_program);
 
     // Phase 5: Generate x86-64 machine code
-    let machine_code = codegen::generate(&ir_program)?;
+    let machine_code = codegen::generate(Arch::X86_64, &ir_program)?;
 
     // Phase 6: Link into ELF binary
     linker::link(&machine_code, output_path)?;
@@ -773,7 +774,7 @@ mod tests {
         let ast = parser::parse(&_originals, &lemmas, &vectors).unwrap();
         let typed = typechecker::check(&ast).unwrap();
         let ir_prog = ir::lower(&typed).unwrap();
-        let mc = codegen::generate(&ir_prog).unwrap();
+        let mc = codegen::generate(Arch::X86_64, &ir_prog).unwrap();
 
         eprintln!(
             "string_data: {:?}",
