@@ -1,0 +1,21 @@
+project: morphlex
+language: rust
+git:
+  enabled: true
+test:
+  - name: cargo-test
+    command:
+      - cargo
+      - test
+    parser: cargo-test
+    timeout: 300
+build:
+  - name: cargo-build
+    command:
+      - cargo
+      - build
+    parser: shell-exit
+    timeout: 300
+artifacts:
+  - name: morphlex-debug-binary
+    path: target/debug/morphlex
