@@ -13,8 +13,8 @@
 //! Register allocation: simple linear mapping from virtual registers.
 //! SSA form from IR makes this straightforward.
 
-use super::grammar::JStarType;
-use super::ir::*;
+use crate::jstar::grammar::JStarType;
+use crate::jstar::ir::*;
 use crate::types::{MorphResult, MorphlexError};
 
 // ─── x86-64 Register Encoding ───────────────────────────────────────────────
@@ -1568,7 +1568,7 @@ mod tests {
         pattern.extend_from_slice(&offset.to_le_bytes());
         text.windows(pattern.len()).any(|w| w == pattern.as_slice())
     }
-    use super::super::grammar::JStarType;
+    use crate::jstar::grammar::JStarType;
 
     #[test]
     fn test_generate_empty_program() {
