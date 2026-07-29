@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -156,3 +158,41 @@ def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
             )
 
     return Result(case.name, arch, "PASS", time.monotonic() - t0, "")
+
+
+def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
+    """Placeholder for the self-hosting compiler regression runner (Task 5)."""
+    raise NotImplementedError("run_self_host_case is not implemented yet")
+
+
+def report(results: list[Result], json_mode: bool) -> int:
+    if json_mode:
+        print(json.dumps([{"name": r.name, "arch": r.arch, "status": r.status, "duration": r.duration, "detail": r.detail} for r in results], indent=2))
+    else:
+        for r in results:
+            print(f"{r.status:<8} {r.name:<30} {r.arch:<8} {r.duration:.3f}s")
+            if r.detail:
+                for line in r.detail.splitlines():
+                    print(f"         {line}")
+        total = len(results)
+        passed = sum(1 for r in results if r.status == "PASS")
+        failed = sum(1 for r in results if r.status in ("FAIL", "TIMEOUT"))
+        skipped = sum(1 for r in results if r.status == "SKIP")
+        updated = sum(1 for r in results if r.status == "UPDATED")
+        print(f"\nTotal: {total}  Pass: {passed}  Fail: {failed}  Skip: {skipped}  Updated: {updated}")
+
+    return 0 if all(r.status in ("PASS", "SKIP", "UPDATED") for r in results) else 1
+
+
+def run_cases(cases: list[Case], archs: list[str] | None, update: bool, runner: Callable[[Case, str, bool], Result]) -> list[Result]:
+    results: list[Result] = []
+    for case in cases:
+        for arch in archs or case.archs:
+            if arch not in case.archs:
+                continue
+            skip_marker = case.root / f"skip.{arch}"
+            if skip_marker.exists():
+                results.append(Result(case.name, arch, "SKIP", 0.0, f"skip marker present"))
+                continue
+            results.append(runner(case, arch, update))
+    return results
