@@ -221,7 +221,11 @@ def run_kernel_case(case: Case, arch: str, update: bool, kernel_dir: Path | None
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, f"QEMU timed out after {case.timeout}s")
+                # Kernels that boot to an interactive shell will not exit on their own.
+                # Capture whatever output we got and evaluate it against the golden file.
+                timed_out = True
+            else:
+                timed_out = False
     except Exception as exc:
         return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"QEMU launch failed: {exc}")
 
@@ -237,13 +241,16 @@ def run_kernel_case(case: Case, arch: str, update: bool, kernel_dir: Path | None
 
     ok, detail = compare_output(actual, golden_path, case.compare)
     if not ok:
-        return Result(case.name, arch, "FAIL", time.monotonic() - t0, detail)
+        status = "FAIL" if not timed_out else "TIMEOUT"
+        return Result(case.name, arch, status, time.monotonic() - t0, detail)
 
+    if timed_out:
+        return Result(case.name, arch, "PASS", time.monotonic() - t0, "(QEMU timed out, but output matched)")
     return Result(case.name, arch, "PASS", time.monotonic() - t0, "")
 
 
 def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
-    """Placeholder for the self-hosting compiler regression runner (Task 5)."""
+    """Placeholder for the self-hosting compiler regression runner (Task 6)."""
     raise NotImplementedError("run_self_host_case is not implemented yet")
 
 

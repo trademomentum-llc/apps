@@ -8,13 +8,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jasterish_regression import (
-    Case,
-    Result,
     discover_cases,
     report,
     run_cases,
     run_compiler_case,
-    run_self_host_case,
 )
 
 
