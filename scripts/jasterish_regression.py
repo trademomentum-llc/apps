@@ -304,6 +304,8 @@ def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
         except subprocess.TimeoutExpired:
             return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, f"{stage_out.name} generation timed out")
         except OSError as exc:
+            if exc.errno == errno.ENOEXEC:
+                return Result(case.name, arch, "SKIP", time.monotonic() - t0, f"cannot execute {arch} ELF on this host: {exc}")
             return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"{stage_out.name} generation launch failed: {exc}")
         if run.returncode != 0:
             return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"{stage_out.name} generation failed:\n{run.stderr.decode('utf-8', errors='replace')}")
