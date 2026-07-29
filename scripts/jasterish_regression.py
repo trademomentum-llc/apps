@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -136,6 +137,8 @@ def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
     except subprocess.TimeoutExpired:
         return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "run timed out")
     except OSError as exc:
+        if exc.errno == errno.ENOEXEC:
+            return Result(case.name, arch, "SKIP", time.monotonic() - t0, f"cannot execute {arch} ELF on this host: {exc}")
         return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"run launch failed: {exc}")
 
     actual = run.stdout
