@@ -1,0 +1,7 @@
+a counter
+store 0 into counter
+while compare counter 3
+add counter 1
+store it into counter
+end
+return counter

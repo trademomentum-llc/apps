@@ -1,0 +1,5 @@
+define answer
+return 42
+end
+call answer
+return it
