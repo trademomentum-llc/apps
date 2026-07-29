@@ -41,12 +41,8 @@ def discover_cases(root: Path) -> list[Case]:
     cases: list[Case] = []
     if not root.exists():
         return cases
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir():
-            continue
-        manifest = entry / "test.toml"
-        if not manifest.exists():
-            continue
+    for manifest in sorted(root.rglob("test.toml")):
+        entry = manifest.parent
         data = tomllib.loads(manifest.read_text())
         cases.append(
             Case(
@@ -59,6 +55,19 @@ def discover_cases(root: Path) -> list[Case]:
             )
         )
     return cases
+
+
+def _resolve_compiler() -> str:
+    env = os.environ.get("JASTERISH_COMPILER", "").strip()
+    if env:
+        return env
+    local = Path(__file__).resolve().parent.parent / "target" / "debug" / "morphlex"
+    if local.exists():
+        return str(local)
+    found = shutil.which("morphlex")
+    if found:
+        return found
+    return "morphlex"
 
 
 def _normalize_trailing_newlines(text: str) -> str:
@@ -87,7 +96,11 @@ def compare_output(actual: str, golden_path: Path, mode: str) -> tuple[bool, str
         for line in golden.splitlines():
             if not line:
                 continue
-            if not re.search(line, actual):
+            try:
+                matched = re.search(line, actual)
+            except re.error as exc:
+                return False, f"invalid regex in golden file: {line!r} ({exc})"
+            if not matched:
                 missing.append(line)
         if not missing:
             return True, ""
@@ -97,7 +110,7 @@ def compare_output(actual: str, golden_path: Path, mode: str) -> tuple[bool, str
 
 
 def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
-    compiler = os.environ.get("JASTERISH_COMPILER", "morphlex")
+    compiler = _resolve_compiler()
     elf_path = case.root / f"{case.name}.{arch}.elf"
     golden_path = case.root / f"expected.{arch}"
 
@@ -270,7 +283,7 @@ def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
     stage2 = work / "stage2.elf"
 
     # Stage 0: reference compiler from Rust toolchain
-    compiler = os.environ.get("JASTERISH_COMPILER", "morphlex")
+    compiler = _resolve_compiler()
     build_cmd = [
         compiler, "jstar", "compile",
         "--target", arch,
