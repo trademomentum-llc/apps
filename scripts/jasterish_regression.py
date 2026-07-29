@@ -120,6 +120,8 @@ def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
         )
     except subprocess.TimeoutExpired:
         return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "compile timed out")
+    except OSError as exc:
+        return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"compile launch failed: {exc}")
 
     if build.returncode != 0:
         return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"compile failed:\n{build.stderr}")
@@ -133,6 +135,8 @@ def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
         )
     except subprocess.TimeoutExpired:
         return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "run timed out")
+    except OSError as exc:
+        return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"run launch failed: {exc}")
 
     actual = run.stdout
     exit_code = run.returncode
