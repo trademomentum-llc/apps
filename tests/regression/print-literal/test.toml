@@ -1,0 +1,5 @@
+name = "print-literal"
+kind = "compiler"
+archs = ["x86_64", "aarch64"]
+timeout = 30
+compare = "exact"

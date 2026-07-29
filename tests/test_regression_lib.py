@@ -1,7 +1,7 @@
 from pathlib import Path
 import tempfile
 
-from scripts.jasterish_regression import compare_output, discover_cases
+from scripts.jasterish_regression import Case, compare_output, discover_cases, run_compiler_case
 
 
 def test_discover_cases_finds_test_toml():
@@ -48,3 +48,13 @@ def test_compare_regex_pass():
         golden.write_text(r"^JMK>\s*$")
         ok, detail = compare_output("JMK> \n", golden, "regex")
         assert ok is True
+
+
+def test_run_compiler_case_skips_without_golden():
+    with tempfile.TemporaryDirectory() as tmp:
+        case_dir = Path(tmp) / "print-literal"
+        case_dir.mkdir()
+        (case_dir / "main.jstr").write_text("print 42")
+        case = Case(root=case_dir, name="print-literal", kind="compiler", archs=["x86_64"], timeout=30, compare="exact")
+        result = run_compiler_case(case, "x86_64", update=False)
+        assert result.status == "SKIP"

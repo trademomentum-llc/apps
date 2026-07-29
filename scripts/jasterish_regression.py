@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +21,15 @@ class Case:
     @property
     def source_path(self) -> Path:
         return self.root / "main.jstr"
+
+
+@dataclass
+class Result:
+    name: str
+    arch: str
+    status: str  # PASS | FAIL | SKIP | TIMEOUT | UPDATED
+    duration: float
+    detail: str = ""
 
 
 def discover_cases(root: Path) -> list[Case]:
@@ -77,3 +89,70 @@ def compare_output(actual: str, golden_path: Path, mode: str) -> tuple[bool, str
         return False, f"unmatched regexes: {missing}"
 
     return False, f"unknown compare mode: {mode}"
+
+
+def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
+    compiler = os.environ.get("JASTERISH_COMPILER", "morphlex")
+    elf_path = case.root / f"{case.name}.{arch}.elf"
+    golden_path = case.root / f"expected.{arch}"
+
+    if not update and not golden_path.exists():
+        return Result(case.name, arch, "SKIP", 0.0, f"missing {golden_path}")
+
+    build_cmd = [
+        compiler, "jstar", "compile",
+        "--target", arch,
+        "--input", str(case.source_path),
+        "--output", str(elf_path),
+    ]
+
+    t0 = time.monotonic()
+    try:
+        build = subprocess.run(
+            build_cmd,
+            capture_output=True,
+            text=True,
+            timeout=case.timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "compile timed out")
+
+    if build.returncode != 0:
+        return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"compile failed:\n{build.stderr}")
+
+    try:
+        run = subprocess.run(
+            [str(elf_path)],
+            capture_output=True,
+            text=True,
+            timeout=case.timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "run timed out")
+
+    actual = run.stdout
+    exit_code = run.returncode
+
+    if update:
+        golden_path.write_text(actual)
+        exit_golden = case.root / f"expected.{arch}.exit"
+        exit_golden.write_text(str(exit_code))
+        return Result(case.name, arch, "UPDATED", time.monotonic() - t0, f"wrote {golden_path}")
+
+    ok, detail = compare_output(actual, golden_path, case.compare)
+    if not ok:
+        return Result(case.name, arch, "FAIL", time.monotonic() - t0, detail)
+
+    exit_golden = case.root / f"expected.{arch}.exit"
+    if exit_golden.exists():
+        expected_exit = int(exit_golden.read_text().strip())
+        if exit_code != expected_exit:
+            return Result(
+                case.name,
+                arch,
+                "FAIL",
+                time.monotonic() - t0,
+                f"exit code mismatch: expected {expected_exit}, got {exit_code}",
+            )
+
+    return Result(case.name, arch, "PASS", time.monotonic() - t0, "")
