@@ -252,7 +252,7 @@ def run_kernel_case(case: Case, arch: str, update: bool, kernel_dir: Path | None
 
 def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
     t0 = time.monotonic()
-    reference = case.root / "main.jstr"
+    reference = case.source_path
     if not reference.exists():
         return Result(case.name, arch, "FAIL", time.monotonic() - t0, "missing compiler.jstr reference")
 
@@ -264,19 +264,27 @@ def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
 
     # Stage 0: reference compiler from Rust toolchain
     compiler = os.environ.get("JASTERISH_COMPILER", "morphlex")
+    build_cmd = [
+        compiler, "jstar", "compile",
+        "--target", arch,
+        "--input", str(reference),
+        "--output", str(stage0),
+    ]
     try:
         build = subprocess.run(
-            [compiler, "jstar", "compile", "--target", arch, "--input", str(reference), "--output", str(stage0)],
+            build_cmd,
             capture_output=True,
             text=True,
             timeout=case.timeout,
         )
     except subprocess.TimeoutExpired:
         return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "stage0 compile timed out")
+    except OSError as exc:
+        return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"stage0 compile launch failed: {exc}")
     if build.returncode != 0:
         return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"stage0 compile failed:\n{build.stderr}")
 
-    # Stage 1: compiler compiled by stage0
+    # Stage 1/2: compiler compiled by stage0
     for stage_in, stage_out in [(stage0, stage1), (stage1, stage2)]:
         try:
             run = subprocess.run(
@@ -288,6 +296,8 @@ def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
             )
         except subprocess.TimeoutExpired:
             return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, f"{stage_out.name} generation timed out")
+        except OSError as exc:
+            return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"{stage_out.name} generation launch failed: {exc}")
         if run.returncode != 0:
             return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"{stage_out.name} generation failed:\n{run.stderr.decode('utf-8', errors='replace')}")
         stage_out.write_bytes(run.stdout)
