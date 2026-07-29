@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -250,8 +251,69 @@ def run_kernel_case(case: Case, arch: str, update: bool, kernel_dir: Path | None
 
 
 def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
-    """Placeholder for the self-hosting compiler regression runner (Task 6)."""
-    raise NotImplementedError("run_self_host_case is not implemented yet")
+    t0 = time.monotonic()
+    reference = case.root / "main.jstr"
+    if not reference.exists():
+        return Result(case.name, arch, "FAIL", time.monotonic() - t0, "missing compiler.jstr reference")
+
+    work = case.root / f"work.{arch}"
+    work.mkdir(exist_ok=True)
+    stage0 = work / "stage0.elf"
+    stage1 = work / "stage1.elf"
+    stage2 = work / "stage2.elf"
+
+    # Stage 0: reference compiler from Rust toolchain
+    compiler = os.environ.get("JASTERISH_COMPILER", "morphlex")
+    try:
+        build = subprocess.run(
+            [compiler, "jstar", "compile", "--target", arch, "--input", str(reference), "--output", str(stage0)],
+            capture_output=True,
+            text=True,
+            timeout=case.timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "stage0 compile timed out")
+    if build.returncode != 0:
+        return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"stage0 compile failed:\n{build.stderr}")
+
+    # Stage 1: compiler compiled by stage0
+    for stage_in, stage_out in [(stage0, stage1), (stage1, stage2)]:
+        try:
+            run = subprocess.run(
+                [str(stage_in)],
+                input=reference.read_bytes(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=case.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, f"{stage_out.name} generation timed out")
+        if run.returncode != 0:
+            return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"{stage_out.name} generation failed:\n{run.stderr.decode('utf-8', errors='replace')}")
+        stage_out.write_bytes(run.stdout)
+        os.chmod(stage_out, 0o755)
+
+    # Byte-identical check
+    s1 = stage1.read_bytes()
+    s2 = stage2.read_bytes()
+    if s1 != s2:
+        return Result(case.name, arch, "FAIL", time.monotonic() - t0, "stage1 and stage2 are not byte-identical")
+
+    digest = hashlib.sha256(s1).hexdigest()
+    golden_path = case.root / f"expected.{arch}"
+
+    if update:
+        golden_path.write_text(digest + "\n")
+        return Result(case.name, arch, "UPDATED", time.monotonic() - t0, f"wrote sha256 {digest}")
+
+    if not golden_path.exists():
+        return Result(case.name, arch, "SKIP", time.monotonic() - t0, f"missing {golden_path}")
+
+    expected = golden_path.read_text().strip()
+    if digest != expected:
+        return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"sha256 mismatch: expected {expected}, got {digest}")
+
+    return Result(case.name, arch, "PASS", time.monotonic() - t0, "")
 
 
 def report(results: list[Result], json_mode: bool) -> int:
