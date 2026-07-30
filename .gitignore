@@ -65,3 +65,9 @@ logs/
 rr_db.json
 .qwen/
 .cache_jstar_target/
+
+# Regression harness artifacts
+tests/regression/**/*.elf
+tests/regression/**/work.*
+tests/regression/**/actual.*.log
+

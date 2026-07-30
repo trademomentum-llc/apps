@@ -1,0 +1,5 @@
+name = "self-host"
+kind = "self-host"
+archs = ["x86_64"]
+timeout = 120
+compare = "exact"

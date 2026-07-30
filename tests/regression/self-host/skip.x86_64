@@ -1,0 +1,4 @@
+Self-host regression skipped on this host because it cannot execute Linux x86_64 ELFs.
+Generate the golden file on an x86_64 Linux runner with:
+
+    python3 scripts/jstar_regression.py tests/regression --update --arch x86_64
