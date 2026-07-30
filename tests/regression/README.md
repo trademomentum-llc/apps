@@ -22,10 +22,14 @@ To run only the compiler/self-host suite directly:
 python3 scripts/jstar_regression.py tests/regression
 ```
 
-To run the combined compiler + kernel suite from the Sovereign root:
+To run the combined compiler + kernel suite:
 
 ```bash
-python3 System/scripts/jasterish_regression.py
+# from System/apps
+python3 scripts/jasterish_orchestrator.py
+
+# from the Sovereign root
+python3 System/apps/scripts/jasterish_orchestrator.py
 ```
 
 ## Case layout

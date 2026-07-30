@@ -33,7 +33,9 @@ System/
 │   │   │   └── expected.aarch64
 │   │   └── ...
 │   └── scripts/
-│       └── jstar_regression.py        # compiler runner
+│       ├── jasterish_regression.py    # shared regression library
+│       ├── jstar_regression.py        # compiler runner
+│       └── jasterish_orchestrator.py  # top-level orchestrator (optional)
 │
 ├── engine/nnos/neurodios/jasterish-microkernel/
 │   ├── tests/regression/              # kernel regression corpus
@@ -44,10 +46,7 @@ System/
 │   │   │   └── expected.aarch64
 │   │   └── ...
 │   └── scripts/
-│       └── jmk_regression.py          # kernel runner
-│
-└── scripts/
-    └── jasterish_regression.py        # top-level orchestrator (optional)
+│       └── jmk_regression.py          # kernel runner (uses shared library)
 ```
 
 ### Components
@@ -194,10 +193,9 @@ regression-update:
 ### Top-level orchestrator (optional)
 
 ```bash
-python3 System/scripts/jasterish_regression.py \
-  --compiler System/apps/tests/regression \
-  --kernel System/engine/nnos/neurodios/jasterish-microkernel/tests/regression \
-  --self-host System/tests/regression/self-host
+python3 System/apps/scripts/jasterish_orchestrator.py \
+  --compiler-corpus tests/regression \
+  --kernel-corpus ../engine/nnos/neurodios/jasterish-microkernel/tests/regression
 ```
 
 ---
