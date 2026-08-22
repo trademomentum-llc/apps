@@ -1,0 +1,171 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "creationInfo": {
+    "created": "2026-08-22T20:58:13Z",
+    "creators": [
+      "Tool: scripts/generate_release_provenance.py"
+    ]
+  },
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://nnos.local/spdx/release/2026-08-22T20:58:13Z",
+  "files": [
+    {
+      "SPDXID": "SPDXRef-File-jstar-compiler-jstr",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "1f95ce9f5ef7a6c2d2a67515cda88db843b302c09ddd607ccf869960475dcff6"
+        }
+      ],
+      "fileName": "jstar/compiler.jstr",
+      "fileTypes": [
+        "SOURCE"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-jstar-jstar2",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "d4619f2370bd5dc0ab554caba99ba2f6c05de9e6b4f5f077806c9675b9a5a0f4"
+        }
+      ],
+      "fileName": "jstar/jstar2",
+      "fileTypes": [
+        "OTHER"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-jstar-jstar3",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "76dabe3d96b8375dd78c5a7d64f51b12a89bb0cbdbbebc009b8cc724f66b568e"
+        }
+      ],
+      "fileName": "jstar/jstar3",
+      "fileTypes": [
+        "OTHER"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-jstar-jstar4",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "d510be40bea44ece8442e66289e39a4f5a89822307316ed80ca84ad969187dc1"
+        }
+      ],
+      "fileName": "jstar/jstar4",
+      "fileTypes": [
+        "OTHER"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-jstar-jstar5",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "d510be40bea44ece8442e66289e39a4f5a89822307316ed80ca84ad969187dc1"
+        }
+      ],
+      "fileName": "jstar/jstar5",
+      "fileTypes": [
+        "OTHER"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-release-provenance-image-digests-json",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "f8d8019bc24e8d606c6afd0bca70d0dfd51af1388f80316b831a4b9b158b8b39"
+        }
+      ],
+      "fileName": "release/provenance/image-digests.json",
+      "fileTypes": [
+        "OTHER"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-release-provenance-release-manifest-pub-pem",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "1bd23d6786e7ffe4a8f2008e31c0b64318b19724d4450d0a0c382bf736a20831"
+        }
+      ],
+      "fileName": "release/provenance/release-manifest.pub.pem",
+      "fileTypes": [
+        "OTHER"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-release-provenance-source-tree-files-sha256",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "f2732d4f118dc64c223271dfa2db3ff072b17fe7939fb0ad12b514bea32ee837"
+        }
+      ],
+      "fileName": "release/provenance/source-tree-files.sha256",
+      "fileTypes": [
+        "OTHER"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-release-security-nnos-sync-plane-firewall-json",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "ae0f6a323c4d92a42ee2c04a904b49ab5bb9564d90af48fd4326feada77bd75f"
+        }
+      ],
+      "fileName": "release/security/nnos-sync-plane.firewall.json",
+      "fileTypes": [
+        "OTHER"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-release-security-node-identity-manifest-json",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "dbf6f819504e20f81debfa55cab5e8acd650be376c75a4da7d80a0a05950085f"
+        }
+      ],
+      "fileName": "release/security/node-identity.manifest.json",
+      "fileTypes": [
+        "OTHER"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-security-provenance-jstar-canonical-baseline-json",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "f4bc4e9e47bc02b14e28e9e4af308641dcbd999f51c09149560e2ac53b6f7fef"
+        }
+      ],
+      "fileName": "security/provenance/jstar-canonical-baseline.json",
+      "fileTypes": [
+        "OTHER"
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-File-target-release-morphlex",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "2dbb6f29b1c9814898ebeef2ea5feee017b18f6761fbee05295bad83972bfe95"
+        }
+      ],
+      "fileName": "target/release/morphlex",
+      "fileTypes": [
+        "OTHER"
+      ]
+    }
+  ],
+  "name": "NNOS Sovereign System release SBOM",
+  "spdxVersion": "SPDX-2.3"
+}
