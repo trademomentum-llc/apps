@@ -1,0 +1,127 @@
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000..cdb858b
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,7 @@
++REGRESSION_DIR := tests/regression
++
++regression:
++	@python3 scripts/jstar_regression.py $(REGRESSION_DIR)
++
++regression-update:
++	@python3 scripts/jstar_regression.py $(REGRESSION_DIR) --update
+diff --git a/scripts/jasterish_regression.py b/scripts/jasterish_regression.py
+index 52bba1f..ac28919 100644
+--- a/scripts/jasterish_regression.py
++++ b/scripts/jasterish_regression.py
+@@ -1,17 +1,19 @@
+ from __future__ import annotations
+ 
++import json
+ import os
+ import re
+ import subprocess
+ import time
+ import tomllib
++from collections.abc import Callable
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+ 
+ @dataclass
+ class Case:
+     root: Path
+     name: str
+     kind: str
+     archs: list[str]
+@@ -149,10 +151,48 @@ def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
+         if exit_code != expected_exit:
+             return Result(
+                 case.name,
+                 arch,
+                 "FAIL",
+                 time.monotonic() - t0,
+                 f"exit code mismatch: expected {expected_exit}, got {exit_code}",
+             )
+ 
+     return Result(case.name, arch, "PASS", time.monotonic() - t0, "")
++
++
++def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
++    """Placeholder for the self-hosting compiler regression runner (Task 5)."""
++    raise NotImplementedError("run_self_host_case is not implemented yet")
++
++
++def report(results: list[Result], json_mode: bool) -> int:
++    if json_mode:
++        print(json.dumps([{"name": r.name, "arch": r.arch, "status": r.status, "duration": r.duration, "detail": r.detail} for r in results], indent=2))
++    else:
++        for r in results:
++            print(f"{r.status:<8} {r.name:<30} {r.arch:<8} {r.duration:.3f}s")
++            if r.detail:
++                for line in r.detail.splitlines():
++                    print(f"         {line}")
++        total = len(results)
++        passed = sum(1 for r in results if r.status == "PASS")
++        failed = sum(1 for r in results if r.status in ("FAIL", "TIMEOUT"))
++        skipped = sum(1 for r in results if r.status == "SKIP")
++        updated = sum(1 for r in results if r.status == "UPDATED")
++        print(f"\nTotal: {total}  Pass: {passed}  Fail: {failed}  Skip: {skipped}  Updated: {updated}")
++
++    return 0 if all(r.status in ("PASS", "SKIP", "UPDATED") for r in results) else 1
++
++
++def run_cases(cases: list[Case], archs: list[str] | None, update: bool, runner: Callable[[Case, str, bool], Result]) -> list[Result]:
++    results: list[Result] = []
++    for case in cases:
++        for arch in archs or case.archs:
++            if arch not in case.archs:
++                continue
++            skip_marker = case.root / f"skip.{arch}"
++            if skip_marker.exists():
++                results.append(Result(case.name, arch, "SKIP", 0.0, f"skip marker present"))
++                continue
++            results.append(runner(case, arch, update))
++    return results
+diff --git a/scripts/jstar_regression.py b/scripts/jstar_regression.py
+new file mode 100644
+index 0000000..fac862d
+--- /dev/null
++++ b/scripts/jstar_regression.py
+@@ -0,0 +1,35 @@
++#!/usr/bin/env python3
++from __future__ import annotations
++
++import argparse
++import sys
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++
++from jasterish_regression import (
++    Case,
++    Result,
++    discover_cases,
++    report,
++    run_cases,
++    run_compiler_case,
++    run_self_host_case,
++)
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description="JStar compiler regression runner")
++    parser.add_argument("corpus", type=Path, help="Path to regression corpus directory")
++    parser.add_argument("--arch", action="append", help="Architecture to test (repeatable; default: all in case)")
++    parser.add_argument("--update", action="store_true", help="Update golden files from current output")
++    parser.add_argument("--json", action="store_true", help="Emit JSON report")
++    args = parser.parse_args()
++
++    cases = [c for c in discover_cases(args.corpus) if c.kind == "compiler"]
++    results = run_cases(cases, args.arch, args.update, run_compiler_case)
++    return report(results, args.json)
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

@@ -1,12 +1,13 @@
 [Unit]
-Description=Rational Reserve - System Integrity Daemon
+Description=Rational Reserve - System Integrity Daemon (NON-PRODUCTION SCAFFOLDING)
 Documentation=https://github.com/morphlex/rational-reserve
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/home/llc/apps/target/release/morphlex daemon integrity --monitor /home/llc/apps
+Environment=RR_MONITOR_PATH=%h/apps
+ExecStart=/usr/bin/env morphlex daemon integrity --monitor ${RR_MONITOR_PATH}
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -18,4 +19,4 @@ MemoryMax=512M
 CPUQuota=25%
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

@@ -73,6 +73,9 @@ pub enum JStarStatement {
         return_type: JStarType,
     },
 
+    /// Raw inline assembly bytes/text.
+    InlineAssembly(String),
+
     /// No-op (unrecognized or ignored tokens)
     Nop,
 }
@@ -95,6 +98,13 @@ pub enum JStarOperand {
     /// A register alias
     /// e.g., "it" (accumulator), "that" (last result)
     Register(RegAlias),
+
+    /// A physical CPU register such as `x0` or `sp`.
+    PhysicalRegister(String),
+
+    /// A reference to the Nth incoming function argument.
+    /// e.g., `argument 0` is the first argument passed to the function.
+    Argument(usize),
 
     /// A string literal
     /// e.g., "hello world"
@@ -226,6 +236,7 @@ pub enum TypedStatement {
         return_type: JStarType,
     },
     Label(String),
+    InlineAssembly(String),
     Nop,
 }
 
@@ -239,6 +250,13 @@ pub enum TypedOperand {
     },
     Immediate(i64, JStarType),
     Register(RegAlias, JStarType),
+    /// A physical CPU register such as `x0` or `sp`.
+    PhysicalRegister {
+        name: String,
+        ty: JStarType,
+    },
+    /// A reference to the Nth incoming function argument.
+    Argument(usize, JStarType),
     StringLiteral(String),
     Addressed {
         mode: AddrMode,
@@ -254,6 +272,8 @@ impl TypedOperand {
             TypedOperand::Variable { ty, .. } => *ty,
             TypedOperand::Immediate(_, ty) => *ty,
             TypedOperand::Register(_, ty) => *ty,
+            TypedOperand::PhysicalRegister { ty, .. } => *ty,
+            TypedOperand::Argument(_, ty) => *ty,
             TypedOperand::StringLiteral(_) => JStarType::Long, // pointer-sized
             TypedOperand::Addressed { ty, .. } => *ty,
         }

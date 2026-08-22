@@ -1,0 +1,29 @@
+title = "Morphlex source secret scanning policy"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated, cache, and vendored artifacts excluded; source remains strict."
+paths = [
+  '''^target/''',
+  '''^\.venv/''',
+  '''^node_modules/''',
+  '''^\.promptfoo/''',
+  '''^promptfoo-results/''',
+  '''^redteam-results/''',
+  '''^\.pytest_cache/''',
+  '''^scripts/__pycache__/''',
+  '''^tests/__pycache__/''',
+  '''^jstar_bootstrap_out/quarantine/''',
+  '''^docs/superpowers/plans/.*\.diff$''',
+]
+
+[[allowlists]]
+description = "False positive: documentation comment naming HKDF-SHA3-512 in source."
+paths = [
+  '''^src/main\.rs$''',
+]
+regexes = [
+  '''Key derivation: HKDF-SHA3-512''',
+]

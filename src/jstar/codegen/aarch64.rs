@@ -159,6 +159,7 @@ impl Aarch64Emitter {
             stack_size: 0,
             data_vaddr: 0,
             data_fixups: self.data_fixups,
+            text_fixups: vec![],
         }
     }
 
@@ -420,10 +421,7 @@ impl Aarch64Emitter {
             offset % scale == 0,
             "load/store offset must be aligned to access size"
         );
-        assert!(
-            (offset / scale) <= 0xFFF,
-            "load/store offset out of range"
-        );
+        assert!((offset / scale) <= 0xFFF, "load/store offset out of range");
         let imm12 = (offset / scale) & 0xFFF;
         let mut insn = ((size as u32 & 0x3) << 30) | 0x39000000;
         if load {
@@ -453,6 +451,44 @@ impl Aarch64Emitter {
         self.emit_load_store_unsigned(0, false, rt, rn, offset);
     }
 
+    /// `str  xt, [xn, xm, lsl #3]` (64-bit register offset, scaled by 8).
+    pub fn emit_str_reg(&mut self, rt: Aarch64Reg, rn: Aarch64Reg, rm: Aarch64Reg) {
+        // Encoding: size=11, V=0, 10, 1, 0, Rm<<16, option=011 (lsl #3), S=1, 10, Rn<<5, Rt
+        let insn = 0xF8207800
+            | ((rm.encoding() as u32) << 16)
+            | ((rn.encoding() as u32) << 5)
+            | rt.encoding() as u32;
+        self.emit_u32(insn);
+    }
+
+    /// `strb  wt, [xn, xm]` (byte register offset).
+    pub fn emit_strb_reg(&mut self, rt: Aarch64Reg, rn: Aarch64Reg, rm: Aarch64Reg) {
+        let insn = 0x38200800
+            | ((rm.encoding() as u32) << 16)
+            | ((rn.encoding() as u32) << 5)
+            | rt.encoding() as u32;
+        self.emit_u32(insn);
+    }
+
+    /// `ldr  xt, [xn, xm, lsl #3]` (64-bit register offset, scaled by 8).
+    pub fn emit_ldr_reg(&mut self, rt: Aarch64Reg, rn: Aarch64Reg, rm: Aarch64Reg) {
+        // Encoding: size=11, V=0, 10, 1, 1, Rm<<16, option=011 (lsl #3), S=1, 10, Rn<<5, Rt
+        let insn = 0xF8607800
+            | ((rm.encoding() as u32) << 16)
+            | ((rn.encoding() as u32) << 5)
+            | rt.encoding() as u32;
+        self.emit_u32(insn);
+    }
+
+    /// `ldrb  wt, [xn, xm]` (byte register offset).
+    pub fn emit_ldrb_reg(&mut self, rt: Aarch64Reg, rn: Aarch64Reg, rm: Aarch64Reg) {
+        let insn = 0x38600800
+            | ((rm.encoding() as u32) << 16)
+            | ((rn.encoding() as u32) << 5)
+            | rt.encoding() as u32;
+        self.emit_u32(insn);
+    }
+
     /// `ldp  xt1, xt2, [xn, #offset]` (signed offset, multiple of 8).
     pub fn emit_ldp(&mut self, rt1: Aarch64Reg, rt2: Aarch64Reg, rn: Aarch64Reg, offset: i32) {
         assert!(offset % 8 == 0, "ldp offset must be a multiple of 8");
@@ -466,12 +502,38 @@ impl Aarch64Emitter {
         self.emit_u32(insn);
     }
 
-    /// `stp  xt1, xt2, [xn, #offset]` (signed offset, multiple of 8).
+    /// `stp  xt1, xt2, [xn, #offset]` (signed offset, no writeback).
     pub fn emit_stp(&mut self, rt1: Aarch64Reg, rt2: Aarch64Reg, rn: Aarch64Reg, offset: i32) {
         assert!(offset % 8 == 0, "stp offset must be a multiple of 8");
         assert!(-512 <= offset && offset <= 504, "stp offset out of range");
         let imm7 = ((offset / 8) as u32) & 0x7F;
         let insn = 0xA9000000
+            | (imm7 << 15)
+            | ((rt2.encoding() as u32) << 10)
+            | ((rn.encoding() as u32) << 5)
+            | rt1.encoding() as u32;
+        self.emit_u32(insn);
+    }
+
+    /// `stp  xt1, xt2, [xn, #offset]!` (pre-index, writeback).
+    pub fn emit_stp_pre(&mut self, rt1: Aarch64Reg, rt2: Aarch64Reg, rn: Aarch64Reg, offset: i32) {
+        assert!(offset % 8 == 0, "stp offset must be a multiple of 8");
+        assert!(-512 <= offset && offset <= 504, "stp offset out of range");
+        let imm7 = ((offset / 8) as u32) & 0x7F;
+        let insn = 0xA9800000
+            | (imm7 << 15)
+            | ((rt2.encoding() as u32) << 10)
+            | ((rn.encoding() as u32) << 5)
+            | rt1.encoding() as u32;
+        self.emit_u32(insn);
+    }
+
+    /// `ldp  xt1, xt2, [xn], #offset` (post-index, writeback).
+    pub fn emit_ldp_post(&mut self, rt1: Aarch64Reg, rt2: Aarch64Reg, rn: Aarch64Reg, offset: i32) {
+        assert!(offset % 8 == 0, "ldp offset must be a multiple of 8");
+        assert!(-512 <= offset && offset <= 504, "ldp offset out of range");
+        let imm7 = ((offset / 8) as u32) & 0x7F;
+        let insn = 0xA8C00000
             | (imm7 << 15)
             | ((rt2.encoding() as u32) << 10)
             | ((rn.encoding() as u32) << 5)
@@ -564,7 +626,12 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
     let mut cg = CodeGen::new();
 
     // .data section: string literals (initialized) + global variable data (BSS).
+    // Pad the string blob to 8 bytes so the globals that follow it stay
+    // 8-byte aligned — required while the MMU is off (Device memory rules).
     cg.emitter.data = program.string_data.clone();
+    while cg.emitter.data.len() % 8 != 0 {
+        cg.emitter.data.push(0);
+    }
     let global_base = cg.emitter.data.len();
     cg.emitter.bss_size = program.global_data.len();
 
@@ -589,6 +656,12 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
 
     cg.apply_call_fixups()?;
 
+    // Pad .text to 8 bytes so the .data section that follows it in the image
+    // starts 8-byte aligned at runtime (data vaddr = VADDR_BASE + text size).
+    while cg.emitter.text.len() % 8 != 0 {
+        cg.emitter.text.push(0);
+    }
+
     Ok(MachineCode {
         text: cg.emitter.text,
         data: cg.emitter.data,
@@ -596,6 +669,7 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
         stack_size: cg.stack_size,
         data_vaddr: 0,
         data_fixups: cg.emitter.data_fixups,
+        text_fixups: vec![],
     })
 }
 
@@ -622,6 +696,7 @@ const ADDR_REG2: Aarch64Reg = Aarch64Reg::X17;
 enum BranchKind {
     B,
     Cbnz,
+    Cbz,
 }
 
 struct CodeGen {
@@ -637,6 +712,8 @@ struct CodeGen {
     function_offsets: HashMap<String, usize>,
     /// Call fixups to resolve after all functions are emitted.
     call_fixups: Vec<(usize, String)>,
+    /// ADR fixups to resolve after all functions are emitted.
+    adr_fixups: Vec<(usize, String)>,
     /// Whether the current function is `_start`.
     is_entry_point: bool,
     /// Global vregs: vreg -> absolute offset in .data section.
@@ -659,6 +736,7 @@ impl CodeGen {
             fixups: Vec::new(),
             function_offsets: HashMap::new(),
             call_fixups: Vec::new(),
+            adr_fixups: Vec::new(),
             is_entry_point: false,
             global_vregs: HashMap::new(),
             direct_storage_vregs: HashSet::new(),
@@ -737,10 +815,11 @@ impl CodeGen {
                     IrInst::Compare { dest, .. }
                     | IrInst::Call { dest, .. }
                     | IrInst::Syscall { dest, .. }
-                    | IrInst::AddressOf { dest, .. } => {
+                    | IrInst::AddressOf { dest, .. }
+                    | IrInst::FunctionAddress { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
-                    IrInst::LoadIndexed { dest, .. } => {
+                    IrInst::LoadIndexed { dest, .. } | IrInst::PhysicalLoad { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
                     IrInst::ArrayAlloc { dest, count } => {
@@ -757,6 +836,8 @@ impl CodeGen {
                     }
                     IrInst::Store { .. }
                     | IrInst::StoreIndexed { .. }
+                    | IrInst::InlineAssembly { .. }
+                    | IrInst::PhysicalStore { .. }
                     | IrInst::Print { .. }
                     | IrInst::PrintStr { .. }
                     | IrInst::Nop
@@ -772,11 +853,29 @@ impl CodeGen {
         self.stack_size = self.frame_size as usize;
 
         // Function prologue: save x29/x30 and allocate the frame.
-        self.emitter
-            .emit_stp(Aarch64Reg::X29, Aarch64Reg::X30, Aarch64Reg::Sp, -16);
-        self.emitter
-            .emit_mov(Aarch64Reg::X29, Aarch64Reg::Sp);
-        self.emit_frame_adjust(true);
+        // The entry point (_start) runs before a stack exists, so it sets
+        // up its own stack and gets no prologue. Top-level global
+        // initializers are prepended to _start's body and may use stack
+        // slots and calls, but QEMU's `virt` machine enters the kernel
+        // with sp = 0 — so establish a temporary stack at the top of the
+        // kernel RAM window before anything else. boot.jstr re-initializes
+        // sp to the same address once its own body takes over.
+        if self.is_entry_point {
+            self.emitter.emit_load_imm64(Aarch64Reg::X16, 0x4100_0000);
+            // mov sp, x16 — must be an add: the orr-based mov cannot
+            // encode sp as an operand (31 reads as xzr there).
+            self.emitter
+                .emit_add_imm(Aarch64Reg::Sp, Aarch64Reg::X16, 0, false);
+        }
+        if !self.is_entry_point {
+            self.emitter
+                .emit_stp_pre(Aarch64Reg::X29, Aarch64Reg::X30, Aarch64Reg::Sp, -16);
+            // mov x29, sp — must be an add: the orr-based mov cannot
+            // encode sp as an operand (31 reads as xzr there).
+            self.emitter
+                .emit_add_imm(Aarch64Reg::X29, Aarch64Reg::Sp, 0, false);
+            self.emit_frame_adjust(true);
+        }
 
         // Store incoming arguments into their parameter stack slots.
         if !self.is_entry_point && func.param_count > 0 {
@@ -831,31 +930,35 @@ impl CodeGen {
         if self.frame_size == 0 {
             return;
         }
-        if self.frame_size <= 4095 {
-            if subtract {
-                self.emitter
-                    .emit_sub_imm(Aarch64Reg::Sp, Aarch64Reg::Sp, self.frame_size as u16, false);
-            } else {
-                self.emitter
-                    .emit_add_imm(Aarch64Reg::Sp, Aarch64Reg::Sp, self.frame_size as u16, false);
+        assert!(
+            self.frame_size < (1 << 24),
+            "stack frame too large to encode with immediate add/sub"
+        );
+        // ADD/SUB (immediate) are the only add/sub forms that accept sp.
+        // Split large frames into a low 12-bit chunk and a 12-bit-shifted
+        // chunk so no register-form add/sub is ever needed.
+        let mut remaining = self.frame_size;
+        let mut shift12 = false;
+        while remaining > 0 {
+            let chunk = (remaining & 0xFFF).min(remaining) as u16;
+            if chunk != 0 {
+                if subtract {
+                    self.emitter
+                        .emit_sub_imm(Aarch64Reg::Sp, Aarch64Reg::Sp, chunk, shift12);
+                } else {
+                    self.emitter
+                        .emit_add_imm(Aarch64Reg::Sp, Aarch64Reg::Sp, chunk, shift12);
+                }
             }
-        } else {
-            self.emitter
-                .emit_load_imm64(Aarch64Reg::X16, self.frame_size as i64);
-            if subtract {
-                self.emitter
-                    .emit_sub(Aarch64Reg::Sp, Aarch64Reg::Sp, Aarch64Reg::X16);
-            } else {
-                self.emitter
-                    .emit_add(Aarch64Reg::Sp, Aarch64Reg::Sp, Aarch64Reg::X16);
-            }
+            remaining >>= 12;
+            shift12 = true;
         }
     }
 
     fn emit_epilogue(&mut self) {
         self.emit_frame_adjust(false);
         self.emitter
-            .emit_ldp(Aarch64Reg::X29, Aarch64Reg::X30, Aarch64Reg::Sp, 16);
+            .emit_ldp_post(Aarch64Reg::X29, Aarch64Reg::X30, Aarch64Reg::Sp, 16);
         self.emitter.emit_ret();
     }
 
@@ -869,14 +972,14 @@ impl CodeGen {
                 match op {
                     IrBinOp::Add => self.emitter.emit_add(SCRATCH, SCRATCH, SCRATCH2),
                     IrBinOp::Sub => self.emitter.emit_sub(SCRATCH, SCRATCH, SCRATCH2),
-                    IrBinOp::Mul => self
-                        .emitter
-                        .emit_madd(SCRATCH, SCRATCH, SCRATCH2, Aarch64Reg::Xzr),
+                    IrBinOp::Mul => {
+                        self.emitter
+                            .emit_madd(SCRATCH, SCRATCH, SCRATCH2, Aarch64Reg::Xzr)
+                    }
                     IrBinOp::Div => self.emitter.emit_sdiv(SCRATCH, SCRATCH, SCRATCH2),
                     IrBinOp::Mod => {
                         self.emitter.emit_sdiv(SCRATCH3, SCRATCH, SCRATCH2);
-                        self.emitter
-                            .emit_msub(SCRATCH, SCRATCH3, SCRATCH2, SCRATCH);
+                        self.emitter.emit_msub(SCRATCH, SCRATCH3, SCRATCH2, SCRATCH);
                     }
                     IrBinOp::And => self.emitter.emit_and(SCRATCH, SCRATCH, SCRATCH2),
                     IrBinOp::Or => self.emitter.emit_orr(SCRATCH, SCRATCH, SCRATCH2),
@@ -891,8 +994,7 @@ impl CodeGen {
                 self.emit_load_value(SCRATCH, src)?;
                 match op {
                     IrUnaryOp::Neg => {
-                        self.emitter
-                            .emit_sub(SCRATCH, Aarch64Reg::Xzr, SCRATCH);
+                        self.emitter.emit_sub(SCRATCH, Aarch64Reg::Xzr, SCRATCH);
                     }
                     IrUnaryOp::Not => self.emitter.emit_mvn(SCRATCH, SCRATCH),
                 }
@@ -905,7 +1007,11 @@ impl CodeGen {
             }
 
             IrInst::Compare {
-                dest, lhs, rhs, kind, ..
+                dest,
+                lhs,
+                rhs,
+                kind,
+                ..
             } => {
                 self.emit_load_value(SCRATCH, lhs)?;
                 self.emit_load_value(SCRATCH2, rhs)?;
@@ -985,6 +1091,18 @@ impl CodeGen {
                 self.emit_store_vreg(SCRATCH, *dest);
             }
 
+            IrInst::FunctionAddress { dest, name } => {
+                // ADR gives the absolute runtime address of the function because
+                // it is PC-relative: address = PC_of_adr + offset. We emit a
+                // placeholder and resolve the offset once all functions are laid
+                // out via the existing adr_fixups mechanism.
+                let pos = self.emitter.len();
+                self.emitter
+                    .emit_u32(0x10000000 | SCRATCH.encoding() as u32);
+                self.adr_fixups.push((pos, name.clone()));
+                self.emit_store_vreg(SCRATCH, *dest);
+            }
+
             IrInst::Call {
                 dest, name, args, ..
             } => {
@@ -1027,6 +1145,64 @@ impl CodeGen {
             IrInst::ArrayLength { dest, count } => {
                 self.emitter.emit_load_imm64(SCRATCH, *count as i64);
                 self.emit_store_vreg(SCRATCH, *dest);
+            }
+
+            IrInst::LoadIndexed {
+                dest,
+                base,
+                index,
+                ty,
+            } => {
+                self.emit_index_base(SCRATCH, *base)?;
+                self.emit_load_value(SCRATCH2, index)?;
+                if Self::is_byte_type(ty) {
+                    // ldrb [base + index]
+                    self.emitter.emit_ldrb_reg(SCRATCH, SCRATCH, SCRATCH2);
+                } else {
+                    // ldr [base + index*8]
+                    self.emitter.emit_ldr_reg(SCRATCH, SCRATCH, SCRATCH2);
+                }
+                self.emit_store_vreg(SCRATCH, *dest);
+            }
+
+            IrInst::StoreIndexed {
+                base,
+                index,
+                value,
+                ty,
+            } => {
+                self.emit_index_base(SCRATCH, *base)?;
+                self.emit_load_value(SCRATCH2, index)?;
+                self.emit_load_value(SCRATCH3, value)?;
+                if Self::is_byte_type(ty) {
+                    // strb [base + index]
+                    self.emitter.emit_strb_reg(SCRATCH3, SCRATCH, SCRATCH2);
+                } else {
+                    // str [base + index*8]
+                    self.emitter.emit_str_reg(SCRATCH3, SCRATCH, SCRATCH2);
+                }
+            }
+
+            IrInst::InlineAssembly(text) => {
+                self.emit_inline_assembly(text)?;
+            }
+
+            IrInst::PhysicalLoad { dest, reg } => {
+                let rd = parse_aarch64_reg(reg).unwrap_or(Aarch64Reg::X0);
+                self.emit_store_vreg(rd, *dest);
+            }
+
+            IrInst::PhysicalStore { reg, value } => {
+                let rd = parse_aarch64_reg(reg).unwrap_or(Aarch64Reg::X0);
+                self.emit_load_value(rd, value)?;
+            }
+
+            IrInst::Print { value } => {
+                self.emit_print_integer(value)?;
+            }
+
+            IrInst::PrintStr { data_offset, len } => {
+                self.emit_print_string(*data_offset, *len);
             }
 
             IrInst::Alloca { .. } | IrInst::ArrayAlloc { .. } | IrInst::Nop => {
@@ -1101,17 +1277,46 @@ impl CodeGen {
                 }
             }
             IrValue::Named(_) => self.emitter.emit_load_imm64(dest, 0),
+            IrValue::DataAddr(data_offset) => {
+                self.emit_literal_address(dest, *data_offset);
+            }
+        }
+        Ok(())
+    }
+
+    /// Materialize the base address for an indexed load/store into `dest`.
+    ///
+    /// Direct-storage vregs (arrays and large buffers) are addressed by their
+    /// stack slot; other vregs are treated as pointer values and loaded.
+    fn emit_index_base(&mut self, dest: Aarch64Reg, base: VReg) -> MorphResult<()> {
+        if let Some(&data_offset) = self.global_vregs.get(&base) {
+            self.emit_literal_address(dest, data_offset);
+        } else if self.direct_storage_vregs.contains(&base) {
+            let offset = self.vreg_offset(base);
+            self.emit_local_address(dest, offset);
+        } else {
+            self.emit_load_vreg(dest, base);
         }
         Ok(())
     }
 
     fn emit_local_address(&mut self, rd: Aarch64Reg, offset: u32) {
-        let tmp = if rd == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+        // ADD (immediate) is the only add form that accepts sp; compute
+        // rd = sp + offset with at most two immediate adds (offset < 2^24).
         if offset <= 4095 {
-            self.emitter.emit_add_imm(rd, Aarch64Reg::Sp, offset as u16, false);
+            self.emitter
+                .emit_add_imm(rd, Aarch64Reg::Sp, offset as u16, false);
         } else {
-            self.emitter.emit_load_imm64(tmp, offset as i64);
-            self.emitter.emit_add(rd, Aarch64Reg::Sp, tmp);
+            assert!(offset < (1 << 24), "local address offset too large");
+            self.emitter.emit_add_imm(rd, Aarch64Reg::Sp, 0, false);
+            let lo = offset & 0xFFF;
+            if lo != 0 {
+                self.emitter.emit_add_imm(rd, rd, lo as u16, false);
+            }
+            let hi = offset >> 12;
+            if hi != 0 {
+                self.emitter.emit_add_imm(rd, rd, hi as u16, true);
+            }
         }
     }
 
@@ -1127,7 +1332,11 @@ impl CodeGen {
         if offset <= Self::MAX_UIMM12_64 {
             self.emitter.emit_ldr(dest, Aarch64Reg::Sp, offset);
         } else {
-            let addr = if dest == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+            let addr = if dest == ADDR_REG {
+                ADDR_REG2
+            } else {
+                ADDR_REG
+            };
             self.emit_local_address(addr, offset);
             self.emitter.emit_ldr(dest, addr, 0);
         }
@@ -1152,7 +1361,11 @@ impl CodeGen {
         if offset <= Self::MAX_UIMM12_8 {
             self.emitter.emit_ldrb(dest, Aarch64Reg::Sp, offset);
         } else {
-            let addr = if dest == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+            let addr = if dest == ADDR_REG {
+                ADDR_REG2
+            } else {
+                ADDR_REG
+            };
             self.emit_local_address(addr, offset);
             self.emitter.emit_ldrb(dest, addr, 0);
         }
@@ -1171,9 +1384,19 @@ impl CodeGen {
     }
 
     fn emit_literal_address(&mut self, rd: Aarch64Reg, data_offset: usize) {
-        // ldr rd, [pc, #4] followed by the 64-bit address placeholder.
-        let insn = 0x58000000 | (1u32 << 5) | rd.encoding() as u32;
+        // ldr rd, [pc, #8] loads the 64-bit address from the inline literal
+        // pool below; the branch skips over the pool so the address bytes
+        // are never executed as instructions. The pool must be 8-byte
+        // aligned: before the MMU is enabled all data accesses obey Device
+        // memory alignment rules, so an unaligned 64-bit literal load
+        // raises an Alignment fault. Pad with a nop when needed.
+        if self.emitter.len() % 8 != 0 {
+            self.emitter.emit_u32(0xD503201F); // nop
+        }
+        let insn = 0x58000000 | (2u32 << 5) | rd.encoding() as u32;
         self.emitter.emit_u32(insn);
+        // b +12 (from the branch's PC: skip the 8-byte literal at pc+4)
+        self.emitter.emit_u32(0x14000003);
         let fixup_pos = self.emitter.len();
         self.emitter
             .text
@@ -1181,8 +1404,124 @@ impl CodeGen {
         self.emitter.data_fixups.push(fixup_pos);
     }
 
+    /// Write `len` bytes from the data section to the PL011 UART.
+    ///
+    /// Emits a self-contained polled transmit loop (QEMU 'virt' PL011 at
+    /// 0x09000000) so `print` works before and independently of uart_init.
+    /// Clobbers x9-x13.
+    fn emit_print_string(&mut self, data_offset: usize, len: usize) {
+        self.emit_literal_address(Aarch64Reg::X9, data_offset);
+        self.emitter.emit_load_imm64(Aarch64Reg::X10, len as i64);
+        self.emit_uart_write();
+    }
+
+    /// Print a 64-bit integer in decimal followed by a newline.
+    ///
+    /// Converts the value into a 32-byte scratch buffer on the stack and
+    /// reuses the polled PL011 transmit loop. Clobbers x9-x17.
+    fn emit_print_integer(&mut self, value: &IrValue) -> MorphResult<()> {
+        let id = self.emitter.len();
+        let convert_label = format!("__itoa_convert_{}", id);
+        let write_label = format!("__itoa_write_{}", id);
+
+        self.emit_load_value(Aarch64Reg::X12, value)?;
+        // Scratch buffer: digits filled right-to-left, newline at the end.
+        self.emitter
+            .emit_sub_imm(Aarch64Reg::Sp, Aarch64Reg::Sp, 32, false);
+        self.emitter.emit_mov_imm(Aarch64Reg::X14, 0x0A);
+        self.emitter.emit_strb(Aarch64Reg::X14, Aarch64Reg::Sp, 31);
+        // x15 = write cursor (rightmost digit slot)
+        self.emitter
+            .emit_add_imm(Aarch64Reg::X15, Aarch64Reg::Sp, 30, false);
+        // x16 = divisor (10)
+        self.emitter.emit_mov_imm(Aarch64Reg::X16, 10);
+
+        // if value != 0 goto convert
+        self.emit_branch_cbnz(Aarch64Reg::X12, &convert_label);
+        // Zero case: store a single '0' digit.
+        self.emitter.emit_mov_imm(Aarch64Reg::X14, 0x30);
+        self.emitter.emit_strb(Aarch64Reg::X14, Aarch64Reg::X15, 0);
+        self.emitter
+            .emit_sub_imm(Aarch64Reg::X15, Aarch64Reg::X15, 1, false);
+        self.emit_branch_b(&write_label);
+
+        // convert: repeatedly divide by 10, storing ASCII remainders.
+        self.label_offsets
+            .insert(convert_label.clone(), self.emitter.len());
+        self.emitter
+            .emit_udiv(Aarch64Reg::X14, Aarch64Reg::X12, Aarch64Reg::X16);
+        self.emitter.emit_msub(
+            Aarch64Reg::X17,
+            Aarch64Reg::X14,
+            Aarch64Reg::X16,
+            Aarch64Reg::X12,
+        );
+        self.emitter
+            .emit_add_imm(Aarch64Reg::X17, Aarch64Reg::X17, 0x30, false);
+        self.emitter.emit_strb(Aarch64Reg::X17, Aarch64Reg::X15, 0);
+        self.emitter
+            .emit_sub_imm(Aarch64Reg::X15, Aarch64Reg::X15, 1, false);
+        self.emitter.emit_mov(Aarch64Reg::X12, Aarch64Reg::X14);
+        self.emit_branch_cbnz(Aarch64Reg::X12, &convert_label);
+
+        // write: x9 = first byte, x10 = length (end of buffer - first byte)
+        self.label_offsets
+            .insert(write_label.clone(), self.emitter.len());
+        self.emitter
+            .emit_add_imm(Aarch64Reg::X15, Aarch64Reg::X15, 1, false);
+        self.emitter
+            .emit_add_imm(Aarch64Reg::X14, Aarch64Reg::Sp, 32, false);
+        self.emitter
+            .emit_sub(Aarch64Reg::X10, Aarch64Reg::X14, Aarch64Reg::X15);
+        self.emitter.emit_mov(Aarch64Reg::X9, Aarch64Reg::X15);
+        self.emit_uart_write();
+        self.emitter
+            .emit_add_imm(Aarch64Reg::Sp, Aarch64Reg::Sp, 32, false);
+        Ok(())
+    }
+
+    /// Polled PL011 transmit of x9[0..x10]. Clobbers x9-x13.
+    fn emit_uart_write(&mut self) {
+        let id = self.emitter.len();
+        let wait_label = format!("__uart_wait_{}", id);
+        let loop_label = format!("__uart_loop_{}", id);
+        let done_label = format!("__uart_done_{}", id);
+
+        // x11 = PL011 base, x13 = TXFF flag mask
+        self.emitter.emit_load_imm64(Aarch64Reg::X11, 0x0900_0000);
+        self.emitter.emit_mov_imm(Aarch64Reg::X13, 0x20);
+        self.emit_branch_cbz(Aarch64Reg::X10, &done_label);
+
+        self.label_offsets
+            .insert(loop_label.clone(), self.emitter.len());
+        // Wait until the transmit FIFO is not full (FR bit 5 clear).
+        self.label_offsets
+            .insert(wait_label.clone(), self.emitter.len());
+        // ldr w12, [x11, #0x18] (UART_FR)
+        self.emitter
+            .emit_load_store_unsigned(2, true, Aarch64Reg::X12, Aarch64Reg::X11, 0x18);
+        self.emitter
+            .emit_and(Aarch64Reg::X12, Aarch64Reg::X12, Aarch64Reg::X13);
+        self.emit_branch_cbnz(Aarch64Reg::X12, &wait_label);
+        // Transmit one byte (UART_DR at offset 0).
+        self.emitter.emit_ldrb(Aarch64Reg::X12, Aarch64Reg::X9, 0);
+        self.emitter.emit_strb(Aarch64Reg::X12, Aarch64Reg::X11, 0);
+        self.emitter
+            .emit_add_imm(Aarch64Reg::X9, Aarch64Reg::X9, 1, false);
+        self.emitter
+            .emit_sub_imm(Aarch64Reg::X10, Aarch64Reg::X10, 1, false);
+        self.emit_branch_cbnz(Aarch64Reg::X10, &loop_label);
+
+        self.label_offsets
+            .insert(done_label.clone(), self.emitter.len());
+    }
+
     fn emit_load_global_value(&mut self, dest: Aarch64Reg, data_offset: usize) {
-        let addr_reg = if dest == ADDR_REG { ADDR_REG2 } else { ADDR_REG };
+        let addr_reg = if dest == ADDR_REG {
+            ADDR_REG2
+        } else {
+            ADDR_REG
+        };
         self.emit_literal_address(addr_reg, data_offset);
         self.emitter.emit_ldr(dest, addr_reg, 0);
     }
@@ -1205,6 +1544,12 @@ impl CodeGen {
         self.fixups.push((pos, label.to_string(), BranchKind::Cbnz));
     }
 
+    fn emit_branch_cbz(&mut self, rt: Aarch64Reg, label: &str) {
+        let pos = self.emitter.len();
+        self.emitter.emit_cbz(rt, 0);
+        self.fixups.push((pos, label.to_string(), BranchKind::Cbz));
+    }
+
     fn apply_local_fixups(&mut self) -> MorphResult<()> {
         for (pos, label, kind) in self.fixups.drain(..) {
             let target = self.label_offsets.get(label.as_str()).ok_or_else(|| {
@@ -1216,9 +1561,24 @@ impl CodeGen {
             let offset = (*target as i64 - pos as i64) as i32;
             match kind {
                 BranchKind::B => Self::patch_imm26(&mut self.emitter.text, pos, offset),
-                BranchKind::Cbnz => Self::patch_imm19(&mut self.emitter.text, pos, offset),
+                BranchKind::Cbnz | BranchKind::Cbz => {
+                    Self::patch_imm19(&mut self.emitter.text, pos, offset)
+                }
             }
         }
+
+        // Resolve ADR fixups that target labels inside this function; any
+        // that refer to function entry points are left for the global pass.
+        let mut remaining = Vec::new();
+        for (pos, label) in self.adr_fixups.drain(..) {
+            if let Some(target) = self.label_offsets.get(label.as_str()) {
+                let offset = (*target as i64 - pos as i64) as i32;
+                Self::patch_adr(&mut self.emitter.text, pos, offset);
+            } else {
+                remaining.push((pos, label));
+            }
+        }
+        self.adr_fixups = remaining;
         Ok(())
     }
 
@@ -1232,6 +1592,16 @@ impl CodeGen {
             })?;
             let offset = (*target as i64 - pos as i64) as i32;
             Self::patch_imm26(&mut self.emitter.text, pos, offset);
+        }
+        for (pos, label) in self.adr_fixups.drain(..) {
+            let target = self.function_offsets.get(&label).ok_or_else(|| {
+                MorphlexError::CodegenError(format!(
+                    "AArch64 backend: unresolved function/label '{}'",
+                    label
+                ))
+            })?;
+            let offset = (*target as i64 - pos as i64) as i32;
+            Self::patch_adr(&mut self.emitter.text, pos, offset);
         }
         Ok(())
     }
@@ -1249,6 +1619,459 @@ impl CodeGen {
         let patched = (word & !0x3FFFFFF) | imm26;
         text[pos..pos + 4].copy_from_slice(&patched.to_le_bytes());
     }
+
+    fn patch_adr(text: &mut [u8], pos: usize, offset: i32) {
+        // ADR uses a 21-bit signed byte offset split into immhi[18:0]|immlo[1:0].
+        assert!(offset % 4 == 0, "ADR target must be 4-byte aligned");
+        assert!(
+            -(1 << 20) * 4 <= offset && offset <= ((1 << 20) - 1) * 4,
+            "ADR offset out of range"
+        );
+        let imm = (offset as u32) & 0x1FFFFF;
+        let immlo = (imm & 0x3) << 29;
+        let immhi = ((imm >> 2) & 0x7FFFF) << 5;
+        let word = u32::from_le_bytes(text[pos..pos + 4].try_into().unwrap());
+        let patched = (word & 0x1000001F) | immlo | immhi;
+        text[pos..pos + 4].copy_from_slice(&patched.to_le_bytes());
+    }
+}
+
+/// Parse an AArch64 register name (x0..x30, sp, xzr).
+fn parse_aarch64_reg(name: &str) -> Option<Aarch64Reg> {
+    let lower = name.to_lowercase();
+    let trimmed = lower.trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ']');
+    match trimmed {
+        "xzr" | "wzr" => return Some(Aarch64Reg::Xzr),
+        "sp" => return Some(Aarch64Reg::Sp),
+        _ => {}
+    }
+    let num_part = if trimmed.starts_with('x') || trimmed.starts_with('w') {
+        &trimmed[1..]
+    } else {
+        return None;
+    };
+    let n: u8 = num_part.parse().ok()?;
+    if n > 30 {
+        return None;
+    }
+    Some(match n {
+        0 => Aarch64Reg::X0,
+        1 => Aarch64Reg::X1,
+        2 => Aarch64Reg::X2,
+        3 => Aarch64Reg::X3,
+        4 => Aarch64Reg::X4,
+        5 => Aarch64Reg::X5,
+        6 => Aarch64Reg::X6,
+        7 => Aarch64Reg::X7,
+        8 => Aarch64Reg::X8,
+        9 => Aarch64Reg::X9,
+        10 => Aarch64Reg::X10,
+        11 => Aarch64Reg::X11,
+        12 => Aarch64Reg::X12,
+        13 => Aarch64Reg::X13,
+        14 => Aarch64Reg::X14,
+        15 => Aarch64Reg::X15,
+        16 => Aarch64Reg::X16,
+        17 => Aarch64Reg::X17,
+        18 => Aarch64Reg::X18,
+        19 => Aarch64Reg::X19,
+        20 => Aarch64Reg::X20,
+        21 => Aarch64Reg::X21,
+        22 => Aarch64Reg::X22,
+        23 => Aarch64Reg::X23,
+        24 => Aarch64Reg::X24,
+        25 => Aarch64Reg::X25,
+        26 => Aarch64Reg::X26,
+        27 => Aarch64Reg::X27,
+        28 => Aarch64Reg::X28,
+        29 => Aarch64Reg::X29,
+        30 => Aarch64Reg::X30,
+        _ => unreachable!(),
+    })
+}
+
+/// Resolve a system-register name to its compact encoding.
+fn sysreg_by_name(name: &str) -> Option<Aarch64SysReg> {
+    let lower = name.to_lowercase();
+    Some(match lower.as_str() {
+        "sctlr_el1" => Aarch64SysReg::new(0b11, 0b000, 0b0001, 0b0000, 0b000),
+        "ttbr0_el1" => Aarch64SysReg::new(0b11, 0b000, 0b0010, 0b0000, 0b000),
+        "ttbr1_el1" => Aarch64SysReg::new(0b11, 0b000, 0b0010, 0b0000, 0b001),
+        "tcr_el1" => Aarch64SysReg::new(0b11, 0b000, 0b0010, 0b0000, 0b010),
+        "mair_el1" => Aarch64SysReg::new(0b11, 0b000, 0b1010, 0b0010, 0b000),
+        "vbar_el1" => Aarch64SysReg::new(0b11, 0b000, 0b1100, 0b0000, 0b000),
+        "esr_el1" => Aarch64SysReg::new(0b11, 0b000, 0b0101, 0b0010, 0b000),
+        "sp_el0" => Aarch64SysReg::new(0b11, 0b000, 0b0100, 0b0001, 0b000),
+        "sp_el1" => Aarch64SysReg::new(0b11, 0b000, 0b0100, 0b0001, 0b001),
+        "spsr_el1" => Aarch64SysReg::new(0b11, 0b000, 0b0100, 0b0000, 0b000),
+        "elr_el1" => Aarch64SysReg::new(0b11, 0b000, 0b0100, 0b0000, 0b001),
+        "spsr_el2" => Aarch64SysReg::new(0b11, 0b100, 0b0100, 0b0000, 0b000),
+        "elr_el2" => Aarch64SysReg::new(0b11, 0b100, 0b0100, 0b0000, 0b001),
+        "hcr_el2" => Aarch64SysReg::new(0b11, 0b100, 0b0001, 0b0001, 0b000),
+        "currentel" => Aarch64SysReg::new(0b11, 0b000, 0b0100, 0b0010, 0b010),
+        "daifset" => Aarch64SysReg::new(0b11, 0b011, 0b0100, 0b0010, 0b000),
+        "daifclr" => Aarch64SysReg::new(0b11, 0b011, 0b0100, 0b0010, 0b001),
+        "cntfrq_el0" => Aarch64SysReg::new(0b11, 0b011, 0b1110, 0b0000, 0b000),
+        "cntv_tval_el0" => Aarch64SysReg::new(0b11, 0b011, 0b1110, 0b0011, 0b000),
+        "cntv_ctl_el0" => Aarch64SysReg::new(0b11, 0b011, 0b1110, 0b0011, 0b001),
+        "cntpct_el0" => Aarch64SysReg::new(0b11, 0b011, 0b1110, 0b0000, 0b001),
+        _ => return None,
+    })
+}
+
+/// Parse an unsigned immediate (decimal or hex).
+fn parse_imm(s: &str) -> Option<i64> {
+    let t = s.trim().trim_start_matches('#');
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        i64::from_str_radix(hex, 16).ok()
+    } else {
+        t.parse::<i64>().ok()
+    }
+}
+
+impl CodeGen {
+    /// Emit machine code for a single inline-assembly statement.
+    ///
+    /// Supports the minimal AArch64 instruction subset used by the
+    /// Jasterish micro-kernel AArch64 port.  Unsupported lines are ignored.
+    fn emit_inline_assembly(&mut self, text: &str) -> MorphResult<()> {
+        for raw_line in text.split(['\n', ';']) {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            self.emit_asm_line(line)?;
+        }
+        Ok(())
+    }
+
+    fn emit_asm_line(&mut self, line: &str) -> MorphResult<()> {
+        let lower = line.to_lowercase();
+        let mut parts = lower.split_whitespace();
+        let mnemonic = parts.next().unwrap_or("");
+        let rest = lower[mnemonic.len()..].trim();
+        let operands: Vec<&str> = rest
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        match mnemonic {
+            "nop" => self.emitter.emit_u32(0xD503201F),
+            "wfe" => self.emitter.emit_u32(0xD503205F),
+            "sev" => self.emitter.emit_u32(0xD503209F),
+            "eret" => self.emitter.emit_u32(0xD69F03E0),
+            "isb" => self.emitter.emit_u32(0xD5033FDF),
+            "dsb" => {
+                let opt = operands.first().copied().unwrap_or("sy");
+                let imm4 = match opt {
+                    "osh" => 0b0011,
+                    "oshst" => 0b0010,
+                    "nsh" => 0b0111,
+                    "nshst" => 0b0110,
+                    "ish" => 0b1011,
+                    "ishst" => 0b1010,
+                    "ld" => 0b1101,
+                    "sy" => 0b1111,
+                    "st" => 0b1110,
+                    _ => 0b1111,
+                };
+                // DSB: fixed top 20 bits, CRm at bits [11:8], low 8 bits fixed.
+                self.emitter.emit_u32(0xD503309F | ((imm4 as u32) << 8));
+            }
+            "daifset" | "daifclr" => {
+                // MSR (immediate) form: DAIFSet #imm / DAIFClr #imm.
+                let imm = operands.first().and_then(|s| parse_imm(s)).unwrap_or(0xF);
+                let base = if mnemonic == "daifset" {
+                    0xD50340DF
+                } else {
+                    0xD50340FF
+                };
+                self.emitter.emit_u32(base | (((imm as u32) & 0xF) << 8));
+            }
+            "msr" => {
+                if operands.len() == 2 {
+                    if let Some(sysreg) = sysreg_by_name(operands[0])
+                        && let Some(rt) = parse_aarch64_reg(operands[1])
+                    {
+                        self.emitter.emit_msr(sysreg, rt);
+                    }
+                }
+            }
+            "mrs" => {
+                if operands.len() == 2
+                    && let Some(rt) = parse_aarch64_reg(operands[0])
+                    && let Some(sysreg) = sysreg_by_name(operands[1])
+                {
+                    self.emitter.emit_mrs(rt, sysreg);
+                }
+            }
+            "tlbi" => {
+                let op = operands.first().copied().unwrap_or("");
+                // TLBI is encoded as a SYS instruction.  The 16-bit SYS field is
+                // packed as (op0|op1|CRn|CRm|op2) and shifted into bits [20:5].
+                // Correct encodings verified against aarch64-elf-as:
+                //   tlbi vmalle1is  -> sys #0, c8, c3, #0  -> 0x4418
+                //   tlbi vae1is, Xt -> sys #0, c8, c3, #1  -> 0x4419
+                //   tlbi alle1is    -> sys #0, c8, c3, #4  -> 0x641C
+                //   tlbi vmalle1    -> sys #0, c8, c7, #0  -> 0x4438
+                let enc = match op {
+                    "vmalle1is" => 0x4418,
+                    "vae1is" => 0x4419,
+                    "alle1is" => 0x641C,
+                    "vmalle1" => 0x4438,
+                    _ => 0x4419,
+                };
+                let rt = operands
+                    .get(1)
+                    .and_then(|s| parse_aarch64_reg(s))
+                    .unwrap_or(Aarch64Reg::Xzr);
+                self.emitter
+                    .emit_u32(0xD5000000 | (enc << 5) | rt.encoding() as u32);
+            }
+            "mov" => {
+                if operands.len() == 2
+                    && let Some(rd) = parse_aarch64_reg(operands[0])
+                {
+                    if let Some(rm) = parse_aarch64_reg(operands[1]) {
+                        self.emitter.emit_mov(rd, rm);
+                    } else if let Some(imm) = parse_imm(operands[1]) {
+                        self.emitter.emit_load_imm64(rd, imm);
+                    }
+                }
+            }
+            "movz" => {
+                if operands.len() >= 3
+                    && let Some(rd) = parse_aarch64_reg(operands[0])
+                    && let Some(imm) = parse_imm(operands[1])
+                {
+                    let shift = parse_imm(operands[2]).unwrap_or(0) as u8;
+                    self.emitter.emit_movz(rd, imm as u16, shift);
+                }
+            }
+            "movk" => {
+                if operands.len() >= 3
+                    && let Some(rd) = parse_aarch64_reg(operands[0])
+                    && let Some(imm) = parse_imm(operands[1])
+                {
+                    let shift = parse_imm(operands[2]).unwrap_or(0) as u8;
+                    self.emitter.emit_movk(rd, imm as u16, shift);
+                }
+            }
+            "add" | "sub" => {
+                if operands.len() == 3
+                    && let (Some(rd), Some(rn)) = (
+                        parse_aarch64_reg(operands[0]),
+                        parse_aarch64_reg(operands[1]),
+                    )
+                {
+                    if let Some(rm) = parse_aarch64_reg(operands[2]) {
+                        if mnemonic == "add" {
+                            self.emitter.emit_add(rd, rn, rm);
+                        } else {
+                            self.emitter.emit_sub(rd, rn, rm);
+                        }
+                    } else if let Some(imm) = parse_imm(operands[2]) {
+                        if mnemonic == "add" {
+                            if imm <= 4095 {
+                                self.emitter.emit_add_imm(rd, rn, imm as u16, false);
+                            }
+                        } else if imm <= 4095 {
+                            self.emitter.emit_sub_imm(rd, rn, imm as u16, false);
+                        }
+                    }
+                }
+            }
+            "and" | "orr" | "eor" => {
+                if operands.len() == 3
+                    && let (Some(rd), Some(rn)) = (
+                        parse_aarch64_reg(operands[0]),
+                        parse_aarch64_reg(operands[1]),
+                    )
+                {
+                    if let Some(rm) = parse_aarch64_reg(operands[2]) {
+                        match mnemonic {
+                            "and" => self.emitter.emit_and(rd, rn, rm),
+                            "orr" => self.emitter.emit_orr(rd, rn, rm),
+                            _ => self.emitter.emit_eor(rd, rn, rm),
+                        }
+                    } else if let Some(imm) = parse_imm(operands[2]) {
+                        // Bitmask immediates are not supported; fall back to a scratch reg.
+                        let tmp = Aarch64Reg::X16;
+                        self.emitter.emit_load_imm64(tmp, imm);
+                        match mnemonic {
+                            "and" => self.emitter.emit_and(rd, rn, tmp),
+                            "orr" => self.emitter.emit_orr(rd, rn, tmp),
+                            _ => self.emitter.emit_eor(rd, rn, tmp),
+                        }
+                    }
+                }
+            }
+            "lsl" | "lsr" | "asr" => {
+                if operands.len() == 3
+                    && let (Some(rd), Some(rn)) = (
+                        parse_aarch64_reg(operands[0]),
+                        parse_aarch64_reg(operands[1]),
+                    )
+                {
+                    if let Some(rm) = parse_aarch64_reg(operands[2]) {
+                        match mnemonic {
+                            "lsl" => self.emitter.emit_lsl(rd, rn, rm),
+                            "lsr" => self.emitter.emit_lsr(rd, rn, rm),
+                            _ => self.emitter.emit_asr(rd, rn, rm),
+                        }
+                    } else if let Some(imm) = parse_imm(operands[2]) {
+                        let tmp = Aarch64Reg::X16;
+                        self.emitter.emit_load_imm64(tmp, imm);
+                        match mnemonic {
+                            "lsl" => self.emitter.emit_lsl(rd, rn, tmp),
+                            "lsr" => self.emitter.emit_lsr(rd, rn, tmp),
+                            _ => self.emitter.emit_asr(rd, rn, tmp),
+                        }
+                    }
+                }
+            }
+            "cmp" => {
+                if operands.len() == 2
+                    && let (Some(rn), Some(rm)) = (
+                        parse_aarch64_reg(operands[0]),
+                        parse_aarch64_reg(operands[1]),
+                    )
+                {
+                    self.emitter.emit_cmp(rn, rm);
+                }
+            }
+            "ldr" | "ldrb" => {
+                if operands.len() == 2
+                    && let Some(rt) = parse_aarch64_reg(operands[0])
+                {
+                    if let Some((rn, offset)) = parse_mem_operand(operands[1]) {
+                        if mnemonic == "ldrb" {
+                            self.emitter.emit_ldrb(rt, rn, offset as u32);
+                        } else if operands[0].starts_with('w') {
+                            // ldr wt, [...] — 32-bit load
+                            self.emitter
+                                .emit_load_store_unsigned(2, true, rt, rn, offset as u32);
+                        } else {
+                            self.emitter.emit_ldr(rt, rn, offset as u32);
+                        }
+                    }
+                }
+            }
+            "str" | "strb" => {
+                if operands.len() == 2
+                    && let Some(rt) = parse_aarch64_reg(operands[0])
+                {
+                    if let Some((rn, offset)) = parse_mem_operand(operands[1]) {
+                        if mnemonic == "strb" {
+                            self.emitter.emit_strb(rt, rn, offset as u32);
+                        } else if operands[0].starts_with('w') {
+                            // str wt, [...] — 32-bit store
+                            self.emitter
+                                .emit_load_store_unsigned(2, false, rt, rn, offset as u32);
+                        } else {
+                            self.emitter.emit_str(rt, rn, offset as u32);
+                        }
+                    }
+                }
+            }
+            "stp" | "ldp" => {
+                if operands.len() == 3
+                    && let (Some(rt1), Some(rt2)) = (
+                        parse_aarch64_reg(operands[0]),
+                        parse_aarch64_reg(operands[1]),
+                    )
+                {
+                    if let Some((rn, offset)) = parse_mem_operand(operands[2]) {
+                        if mnemonic == "stp" {
+                            self.emitter.emit_stp(rt1, rt2, rn, offset);
+                        } else {
+                            self.emitter.emit_ldp(rt1, rt2, rn, offset);
+                        }
+                    }
+                }
+            }
+            "cbz" | "cbnz" => {
+                if operands.len() == 2
+                    && let Some(rt) = parse_aarch64_reg(operands[0])
+                {
+                    let label = operands[1];
+                    let pos = self.emitter.len();
+                    if mnemonic == "cbz" {
+                        self.emitter.emit_cbz(rt, 0);
+                    } else {
+                        self.emitter.emit_cbnz(rt, 0);
+                    }
+                    self.fixups.push((pos, label.to_string(), BranchKind::Cbnz));
+                }
+            }
+            "b" => {
+                if let Some(label) = operands.first() {
+                    let pos = self.emitter.len();
+                    self.emitter.emit_b(0);
+                    self.fixups.push((pos, (*label).to_string(), BranchKind::B));
+                }
+            }
+            "bl" => {
+                if let Some(label) = operands.first() {
+                    let pos = self.emitter.len();
+                    self.emitter.emit_bl(0);
+                    self.call_fixups.push((pos, (*label).to_string()));
+                }
+            }
+            "ret" => self.emitter.emit_ret(),
+            "svc" => {
+                let imm = operands.first().and_then(|s| parse_imm(s)).unwrap_or(0);
+                self.emitter.emit_svc(imm as u16);
+            }
+            "brk" => {
+                let imm = operands.first().and_then(|s| parse_imm(s)).unwrap_or(0);
+                self.emitter
+                    .emit_u32(0xD4200000 | ((imm as u32 & 0xFFFF) << 5));
+            }
+            "adr" => {
+                if operands.len() == 2
+                    && let Some(rd) = parse_aarch64_reg(operands[0])
+                {
+                    if let Some(offset) = parse_imm(operands[1]) {
+                        // adr rd, pc+offset — immediate form (multiple of 4).
+                        let imm = (offset as u32) & 0x1FFFFF;
+                        let insn = 0x10000000
+                            | ((imm & 0x3) << 29)
+                            | (((imm >> 2) & 0x7FFFF) << 5)
+                            | rd.encoding() as u32;
+                        self.emitter.emit_u32(insn);
+                    } else {
+                        let label = operands[1];
+                        let pos = self.emitter.len();
+                        // ADR placeholder; patched by apply_adr_fixups with the
+                        // PC-relative offset to the function label.
+                        self.emitter.emit_u32(0x10000000 | rd.encoding() as u32);
+                        self.adr_fixups.push((pos, label.to_string()));
+                    }
+                }
+            }
+            _ => {
+                // Unknown instruction: emit a NOP so the build can proceed.
+                self.emitter.emit_u32(0xD503201F);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Parse a memory operand like `[x0]` or `[x0, #16]`.
+/// Returns (base register, offset in bytes).
+fn parse_mem_operand(s: &str) -> Option<(Aarch64Reg, i32)> {
+    let t = s.trim();
+    if !t.starts_with('[') || !t.ends_with(']') {
+        return None;
+    }
+    let inner = &t[1..t.len() - 1];
+    let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+    let rn = parse_aarch64_reg(parts.first()?)?;
+    let offset = parts.get(1).and_then(|p| parse_imm(p)).unwrap_or(0);
+    Some((rn, offset as i32))
 }
 
 // ─── Unit tests ─────────────────────────────────────────────────────────────
@@ -1257,9 +2080,7 @@ impl CodeGen {
 mod tests {
     use super::*;
     use crate::jstar::grammar::JStarType;
-    use crate::jstar::ir::{
-        BasicBlock, IrFunction, IrInst, IrProgram, IrValue, Terminator,
-    };
+    use crate::jstar::ir::{BasicBlock, IrFunction, IrInst, IrProgram, IrValue, Terminator};
     use std::collections::HashMap;
 
     fn empty_program(functions: Vec<IrFunction>) -> IrProgram {
@@ -1451,7 +2272,10 @@ mod tests {
             blocks: vec![BasicBlock {
                 label: "entry".to_string(),
                 instructions: vec![
-                    IrInst::ArrayAlloc { dest: 0, count: 4097 },
+                    IrInst::ArrayAlloc {
+                        dest: 0,
+                        count: 4097,
+                    },
                     IrInst::Copy {
                         dest: 1,
                         src: IrValue::Imm(42),

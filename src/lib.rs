@@ -126,10 +126,7 @@ pub fn compile_lexicon(
     }
 
     // Sort by id for binary search lookups
-    let mut paired: Vec<_> = deduped_vectors
-        .into_iter()
-        .zip(deduped_lemmas)
-        .collect();
+    let mut paired: Vec<_> = deduped_vectors.into_iter().zip(deduped_lemmas).collect();
     paired.sort_by_key(|(tv, _)| tv.id);
     let (sorted_vectors, sorted_lemmas): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
 

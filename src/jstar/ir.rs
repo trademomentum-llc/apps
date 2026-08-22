@@ -8,10 +8,10 @@
 //!
 //! Virtual register IDs are u32 (unlimited supply, allocated by codegen).
 
-use std::collections::HashMap;
-use crate::types::{MorphResult, MorphlexError};
 use super::grammar::*;
 use super::token_map::{AddrMode, FlowKind, JStarInstruction, ScopeKind};
+use crate::types::{MorphResult, MorphlexError};
+use std::collections::{HashMap, HashSet};
 
 // ─── IR Types ───────────────────────────────────────────────────────────────
 
@@ -98,6 +98,9 @@ pub enum IrInst {
 
     /// dest = &vreg (address of stack slot)
     AddressOf { dest: VReg, src: VReg },
+
+    /// dest = address of function `name` (absolute code address)
+    FunctionAddress { dest: VReg, name: String },
 
     /// dest = call name(args...)
     Call {
@@ -209,10 +212,7 @@ pub enum IrInst {
     },
 
     /// String length: dest = count bytes until null terminator
-    StrLen {
-        dest: VReg,
-        addr: IrValue,
-    },
+    StrLen { dest: VReg, addr: IrValue },
 
     /// String copy: memcpy dst <- src, len bytes (rep movsb)
     StrCopy {
@@ -220,6 +220,16 @@ pub enum IrInst {
         src: IrValue,
         len: IrValue,
     },
+
+    /// Raw inline assembly text.  Architecture-specific codegen emits the
+    /// corresponding machine code; unsupported instructions become no-ops.
+    InlineAssembly(String),
+
+    /// Load a value from a physical CPU register into a virtual register.
+    PhysicalLoad { dest: VReg, reg: String },
+
+    /// Store a value into a physical CPU register.
+    PhysicalStore { reg: String, value: IrValue },
 
     /// No-op (placeholder)
     Nop,
@@ -271,6 +281,9 @@ pub enum IrValue {
     Imm(i64),
     /// Named variable (resolved to stack slot in codegen)
     Named(String),
+    /// Address of data in the `.data` section (offset from its start).
+    /// Used for string literals passed as values (e.g. call arguments).
+    DataAddr(usize),
 }
 
 /// Basic block terminator — how control leaves the block.
@@ -352,11 +365,73 @@ impl IrFunction {
 
 // ─── Lowering: Typed AST → IR ───────────────────────────────────────────────
 
+/// Find the largest `argument N` index used anywhere in a statement list.
+/// Returns `None` if no `argument N` references appear.
+fn max_argument_index(stmts: &[TypedStatement]) -> Option<usize> {
+    let mut max = 0;
+    let mut seen = false;
+    for stmt in stmts {
+        scan_statement(stmt, &mut max, &mut seen);
+    }
+    if seen { Some(max) } else { None }
+}
+
+fn scan_statement(stmt: &TypedStatement, max: &mut usize, seen: &mut bool) {
+    match stmt {
+        TypedStatement::Execute { operands, .. } => {
+            for op in operands {
+                scan_operand(op, max, seen);
+            }
+        }
+        TypedStatement::ControlFlow {
+            condition,
+            body,
+            else_body,
+            ..
+        } => {
+            if let Some(cond) = condition {
+                scan_statement(cond, max, seen);
+            }
+            for s in body {
+                scan_statement(s, max, seen);
+            }
+            for s in else_body {
+                scan_statement(s, max, seen);
+            }
+        }
+        TypedStatement::Return { value, .. } => {
+            if let Some(v) = value {
+                scan_operand(v, max, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_operand(op: &TypedOperand, max: &mut usize, seen: &mut bool) {
+    if let TypedOperand::Argument(idx, _) = op {
+        *seen = true;
+        *max = (*max).max(*idx);
+    } else if let TypedOperand::Addressed { target, .. } = op {
+        scan_operand(target, max, seen);
+    }
+}
+
 /// Lower a typed program to IR.
 ///
 /// Function definitions are lowered to separate IrFunctions.
 /// Top-level statements go into `_start` (the ELF entry point).
 pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
+    // Collect all function names so `addressof` can resolve them to code addresses.
+    let function_names: HashSet<String> = program
+        .statements
+        .iter()
+        .filter_map(|s| match s {
+            TypedStatement::FunctionDef { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+
     let mut lowerer = Lowerer {
         next_vreg: 0,
         last_result: None,
@@ -371,6 +446,8 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
         global_data: Vec::new(),
         global_vregs: HashMap::new(),
         next_global_vreg: Lowerer::GLOBAL_VREG_BASE,
+        param_vregs: Vec::new(),
+        function_names,
     };
 
     // Separate function definitions from top-level statements
@@ -388,6 +465,8 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
 
     // Pre-scan: register global declarations so they are available in all functions.
     // This must happen before lowering any function body.
+    // Top-level array declarations are also promoted to globals so that functions
+    // (e.g. scheduler_init) can access shared tables like proc_pid, proc_state, etc.
     for stmt in &top_level {
         if let TypedStatement::Declare {
             scope,
@@ -396,27 +475,39 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
             size,
             ..
         } = stmt
-            && *scope == ScopeKind::Global {
-                let alloc_size = match size {
-                    Some(n) => *n * ty.size_bytes(),
-                    None => ty.size_bytes().max(8),
-                };
-                let offset = lowerer.global_data_offset;
-                lowerer
-                    .global_data
-                    .resize(lowerer.global_data_offset + alloc_size, 0);
-                lowerer.global_data_offset += alloc_size;
-                lowerer
-                    .globals
-                    .insert(name.clone(), (offset, alloc_size, *ty));
-                let dest = lowerer.next_global_vreg;
-                lowerer.next_global_vreg += 1;
-                lowerer.global_vregs.insert(dest, offset);
-                lowerer.variables.insert(name.clone(), dest);
-            }
+            && (*scope == ScopeKind::Global || matches!(ty, JStarType::Array(_)))
+        {
+            let alloc_size = match size {
+                Some(n) => {
+                    if matches!(ty, JStarType::Array(_)) {
+                        // Array type's size_bytes already includes the element count.
+                        ty.size_bytes()
+                    } else {
+                        *n * ty.size_bytes()
+                    }
+                }
+                None => ty.size_bytes().max(8),
+            };
+            let offset = lowerer.global_data_offset;
+            lowerer
+                .global_data
+                .resize(lowerer.global_data_offset + alloc_size, 0);
+            lowerer.global_data_offset += alloc_size;
+            lowerer
+                .globals
+                .insert(name.clone(), (offset, alloc_size, *ty));
+            let dest = lowerer.next_global_vreg;
+            lowerer.next_global_vreg += 1;
+            lowerer.global_vregs.insert(dest, offset);
+            lowerer.variables.insert(name.clone(), dest);
+        }
     }
 
-    // Lower function definitions (globals are already registered)
+    // Look for an explicit `_start` function definition.  When present it
+    // becomes the ELF entry point; top-level statements (global
+    // initializers, etc.) run before its body.
+    let mut explicit_start: Option<(Vec<(String, JStarType)>, Vec<TypedStatement>, JStarType)> =
+        None;
     for stmt in &program.statements {
         if let TypedStatement::FunctionDef {
             name,
@@ -425,11 +516,88 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
             return_type,
         } = stmt
         {
+            if name == "_start" {
+                explicit_start = Some((params.clone(), body.clone(), *return_type));
+            }
+        }
+    }
+
+    // Lower the entry point FIRST so that its code and string literals are
+    // emitted at the beginning of .text/.data.  This guarantees the ELF entry
+    // address (start of .text) actually begins executing `_start`, and that
+    // `_start`'s own prints reference its own strings rather than strings from
+    // functions lowered earlier.
+    if let Some((params, body, return_type)) = explicit_start {
+        // Top-level statements (global initializers) execute first, then the
+        // explicit `_start` body.
+        let mut combined = top_level.clone();
+        combined.extend(body);
+        lowerer.reset();
+        let implicit_count = max_argument_index(&combined).map(|m| m + 1).unwrap_or(0);
+        let total_params = params.len().max(implicit_count);
+        let mut param_vregs = Vec::with_capacity(total_params);
+        for (pname, pty) in params.iter().take(total_params) {
+            let dest = lowerer.alloc_vreg();
+            lowerer.current_insts.push(IrInst::Alloca {
+                dest,
+                size: pty.size_bytes(),
+                ty: *pty,
+            });
+            lowerer.variables.insert(pname.clone(), dest);
+            param_vregs.push(dest);
+        }
+        for _ in params.len()..total_params {
+            let dest = lowerer.alloc_vreg();
+            lowerer.current_insts.push(IrInst::Alloca {
+                dest,
+                size: JStarType::Long.size_bytes(),
+                ty: JStarType::Long,
+            });
+            param_vregs.push(dest);
+        }
+        let main_fn = lowerer.lower_to_function("_start", &combined, &param_vregs)?;
+        functions.push(IrFunction {
+            return_type,
+            param_vregs,
+            ..main_fn
+        });
+    } else {
+        lowerer.reset();
+        let implicit_count = max_argument_index(&top_level).map(|m| m + 1).unwrap_or(0);
+        let mut param_vregs = Vec::with_capacity(implicit_count);
+        for _ in 0..implicit_count {
+            let dest = lowerer.alloc_vreg();
+            lowerer.current_insts.push(IrInst::Alloca {
+                dest,
+                size: JStarType::Long.size_bytes(),
+                ty: JStarType::Long,
+            });
+            param_vregs.push(dest);
+        }
+        let main_fn = lowerer.lower_to_function("_start", &top_level, &param_vregs)?;
+        functions.push(main_fn);
+    }
+
+    // Lower the remaining function definitions (globals are already registered).
+    for stmt in &program.statements {
+        if let TypedStatement::FunctionDef {
+            name,
+            params,
+            body,
+            return_type,
+        } = stmt
+        {
+            if name == "_start" {
+                continue;
+            }
             // Lower each function definition
             lowerer.reset();
-            // Declare parameters as variables
-            let mut param_vregs = Vec::with_capacity(params.len());
-            for (pname, pty) in params {
+            // Declare parameters as variables. Functions that use no `with`
+            // clause but reference `argument N` need implicit parameter slots.
+            let implicit_count = max_argument_index(body).map(|m| m + 1).unwrap_or(0);
+            let total_params = params.len().max(implicit_count);
+            let mut param_vregs = Vec::with_capacity(total_params);
+            for (pname, pty) in params.iter().take(total_params) {
                 let dest = lowerer.alloc_vreg();
                 lowerer.current_insts.push(IrInst::Alloca {
                     dest,
@@ -439,7 +607,18 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
                 lowerer.variables.insert(pname.clone(), dest);
                 param_vregs.push(dest);
             }
-            let func = lowerer.lower_to_function(name, body, params.len())?;
+            // Pad with unnamed implicit parameter slots if `argument N` uses
+            // indices beyond the explicit parameter list.
+            for _ in params.len()..total_params {
+                let dest = lowerer.alloc_vreg();
+                lowerer.current_insts.push(IrInst::Alloca {
+                    dest,
+                    size: JStarType::Long.size_bytes(),
+                    ty: JStarType::Long,
+                });
+                param_vregs.push(dest);
+            }
+            let func = lowerer.lower_to_function(name, body, &param_vregs)?;
             functions.push(IrFunction {
                 return_type: *return_type,
                 param_vregs,
@@ -447,11 +626,6 @@ pub fn lower(program: &TypedProgram) -> MorphResult<IrProgram> {
             });
         }
     }
-
-    // Lower top-level statements into _start
-    lowerer.reset();
-    let main_fn = lowerer.lower_to_function("_start", &top_level, 0)?;
-    functions.insert(0, main_fn);
 
     Ok(IrProgram {
         functions,
@@ -471,6 +645,12 @@ struct Lowerer {
     /// When a Variable operand is lowered, it resolves to Reg(alloca_vreg)
     /// instead of Named(name), enabling direct stack-slot access in codegen.
     variables: HashMap<String, VReg>,
+    /// Parameter slot vregs in source order. Populated by the caller before
+    /// lower_to_function and used to resolve `argument N` operands.
+    param_vregs: Vec<VReg>,
+    /// Names of all function definitions in the program. Used to distinguish
+    /// `addressof function_name` (code address) from `addressof variable`.
+    function_names: HashSet<String>,
 
     // ─── Block-builder state (multi-block CFG support) ──────────────────
     /// Completed basic blocks
@@ -511,6 +691,7 @@ impl Lowerer {
         self.next_vreg = 0;
         self.last_result = None;
         self.variables.clear();
+        self.param_vregs.clear();
         self.blocks.clear();
         self.current_label.clear();
         self.current_insts.clear();
@@ -557,11 +738,12 @@ impl Lowerer {
         &mut self,
         name: &str,
         statements: &[TypedStatement],
-        param_count: usize,
+        param_vregs: &[VReg],
     ) -> MorphResult<IrFunction> {
         self.current_label = "entry".to_string();
         // Preserve any instructions already in current_insts (e.g. param Allocas)
         self.blocks.clear();
+        self.param_vregs = param_vregs.to_vec();
 
         let mut final_terminator: Option<Terminator> = None;
 
@@ -583,10 +765,10 @@ impl Lowerer {
         let func = IrFunction {
             name: name.to_string(),
             return_type: JStarType::Int,
-            param_vregs: Vec::new(),
+            param_vregs: self.param_vregs.clone(),
             blocks,
             next_vreg: self.next_vreg,
-            param_count,
+            param_count: self.param_vregs.len(),
         };
 
         // Self-validate: the CFG must be structurally sound before it
@@ -624,12 +806,18 @@ impl Lowerer {
                 size,
                 ..
             } => {
-                if *scope == ScopeKind::Global {
+                if *scope == ScopeKind::Global || self.globals.contains_key(name) {
                     // Global: already pre-registered in the lower() pre-scan.
                     // Just ensure the variable mapping is current.
                     if !self.globals.contains_key(name) {
                         let alloc_size = match size {
-                            Some(n) => *n * ty.size_bytes(),
+                            Some(n) => {
+                                if matches!(ty, JStarType::Array(_)) {
+                                    ty.size_bytes()
+                                } else {
+                                    *n * ty.size_bytes()
+                                }
+                            }
                             None => ty.size_bytes().max(8),
                         };
                         let offset = self.global_data_offset;
@@ -706,6 +894,11 @@ impl Lowerer {
 
             TypedStatement::Label(_) => {
                 // Labels are handled at the basic block level
+            }
+
+            TypedStatement::InlineAssembly(text) => {
+                self.current_insts
+                    .push(IrInst::InlineAssembly(text.clone()));
             }
 
             TypedStatement::Nop => {
@@ -927,11 +1120,17 @@ impl Lowerer {
                 size,
                 ..
             } => {
-                if *scope == ScopeKind::Global {
+                if *scope == ScopeKind::Global || self.globals.contains_key(name) {
                     // Global: already pre-registered in the lower() pre-scan.
                     if !self.globals.contains_key(name) {
                         let alloc_size = match size {
-                            Some(n) => *n * ty.size_bytes(),
+                            Some(n) => {
+                                if matches!(ty, JStarType::Array(_)) {
+                                    ty.size_bytes()
+                                } else {
+                                    *n * ty.size_bytes()
+                                }
+                            }
                             None => ty.size_bytes().max(8),
                         };
                         let offset = self.global_data_offset;
@@ -1097,35 +1296,52 @@ impl Lowerer {
             JStarInstruction::Load => {
                 let addr = self.get_one_operand(operands)?;
 
-                // Get the array element type from the source variable's declared type.
-                let array_ty = match &operands[0] {
-                    TypedOperand::Addressed { target, .. } => target.ty(),
-                    other => other.ty(),
-                };
+                // Convenience: `load <immediate>` loads the immediate value
+                // into the accumulator rather than dereferencing it. Kernel
+                // code frequently uses `load -1` to obtain the sentinel value.
+                if let IrValue::Imm(val) = addr {
+                    insts.push(IrInst::Copy {
+                        dest,
+                        src: IrValue::Imm(val),
+                        ty: result_type,
+                    });
+                } else {
+                    // Get the array element type from the source variable's declared type.
+                    let array_ty = match &operands[0] {
+                        TypedOperand::Addressed { target, .. } => target.ty(),
+                        other => other.ty(),
+                    };
 
-                // Check for indexed addressing: "load from buffer at INDEX"
-                let index_operand = operands.get(1).and_then(|op| {
-                    if let TypedOperand::Addressed {
-                        mode: AddrMode::At,
-                        target,
-                        ..
-                    } = op
-                    {
-                        Some(target.as_ref())
-                    } else {
-                        None
-                    }
-                });
+                    // Check for indexed addressing: "load from buffer at INDEX"
+                    let index_operand = operands.get(1).and_then(|op| {
+                        if let TypedOperand::Addressed {
+                            mode: AddrMode::At,
+                            target,
+                            ..
+                        } = op
+                        {
+                            Some(target.as_ref())
+                        } else {
+                            None
+                        }
+                    });
 
-                if let Some(idx_op) = index_operand {
-                    let idx = self.lower_operand(idx_op)?;
-                    if let IrValue::Reg(base_vreg) = addr {
-                        insts.push(IrInst::LoadIndexed {
-                            dest,
-                            base: base_vreg,
-                            index: idx,
-                            ty: array_ty,
-                        });
+                    if let Some(idx_op) = index_operand {
+                        let idx = self.lower_operand(idx_op)?;
+                        if let IrValue::Reg(base_vreg) = addr {
+                            insts.push(IrInst::LoadIndexed {
+                                dest,
+                                base: base_vreg,
+                                index: idx,
+                                ty: array_ty,
+                            });
+                        } else {
+                            insts.push(IrInst::Load {
+                                dest,
+                                addr,
+                                ty: result_type,
+                            });
+                        }
                     } else {
                         insts.push(IrInst::Load {
                             dest,
@@ -1133,17 +1349,40 @@ impl Lowerer {
                             ty: result_type,
                         });
                     }
-                } else {
-                    insts.push(IrInst::Load {
-                        dest,
-                        addr,
-                        ty: result_type,
-                    });
                 }
             }
             JStarInstruction::Store => {
                 produces_result = false;
                 if operands.len() >= 2 {
+                    // Handle physical register as source: `store register x0 into var`
+                    if let TypedOperand::PhysicalRegister { name, .. } = &operands[0] {
+                        let dest_vreg = self.lower_operand(&operands[1])?;
+                        if let IrValue::Reg(dest) = dest_vreg {
+                            insts.push(IrInst::PhysicalLoad {
+                                dest,
+                                reg: name.clone(),
+                            });
+                        }
+                        return Ok((insts, None));
+                    }
+
+                    // Handle physical register as destination: `store value into register x0`
+                    if let TypedOperand::Addressed {
+                        mode: AddrMode::Into,
+                        target,
+                        ..
+                    } = &operands[1]
+                    {
+                        if let TypedOperand::PhysicalRegister { name, .. } = target.as_ref() {
+                            let value = self.lower_operand(&operands[0])?;
+                            insts.push(IrInst::PhysicalStore {
+                                reg: name.clone(),
+                                value,
+                            });
+                            return Ok((insts, None));
+                        }
+                    }
+
                     let value = self.lower_operand(&operands[0])?;
                     let addr = self.lower_operand(&operands[1])?;
 
@@ -1172,7 +1411,10 @@ impl Lowerer {
                         if let IrValue::Reg(base_vreg) = addr {
                             // TRACE: dump all StoreIndexed IR for syscall section analysis
                             if std::env::var("JSTAR_TRACE_IR").is_ok() {
-                                eprintln!("[IR] StoreIndexed base=v{} idx={:?} val={:?} ty={:?}", base_vreg, idx, value, array_ty);
+                                eprintln!(
+                                    "[IR] StoreIndexed base=v{} idx={:?} val={:?} ty={:?}",
+                                    base_vreg, idx, value, array_ty
+                                );
                             }
                             insts.push(IrInst::StoreIndexed {
                                 base: base_vreg,
@@ -1232,7 +1474,8 @@ impl Lowerer {
             }
 
             JStarInstruction::AddressOf => {
-                // addressof X — get the stack address of variable X
+                // addressof X — get the stack address of variable X, or the code
+                // address of function X if X names a function and not a variable.
                 let src = self.get_one_operand(operands)?;
                 match src {
                     IrValue::Reg(src_vreg) => {
@@ -1240,6 +1483,9 @@ impl Lowerer {
                             dest,
                             src: src_vreg,
                         });
+                    }
+                    IrValue::Named(name) if self.function_names.contains(&name) => {
+                        insts.push(IrInst::FunctionAddress { dest, name });
                     }
                     _ => {
                         // For non-register operands, treat as no-op
@@ -1417,14 +1663,29 @@ impl Lowerer {
 
             // String operations
             JStarInstruction::StrCmp => {
-                let a = operands.first()
-                    .ok_or_else(|| MorphlexError::CodegenError("StrCmp requires 3 operands: a, b, len (missing a)".to_string()))
+                let a = operands
+                    .first()
+                    .ok_or_else(|| {
+                        MorphlexError::CodegenError(
+                            "StrCmp requires 3 operands: a, b, len (missing a)".to_string(),
+                        )
+                    })
                     .and_then(|o| self.lower_operand(o))?;
-                let b = operands.get(1)
-                    .ok_or_else(|| MorphlexError::CodegenError("StrCmp requires 3 operands: a, b, len (missing b)".to_string()))
+                let b = operands
+                    .get(1)
+                    .ok_or_else(|| {
+                        MorphlexError::CodegenError(
+                            "StrCmp requires 3 operands: a, b, len (missing b)".to_string(),
+                        )
+                    })
                     .and_then(|o| self.lower_operand(o))?;
-                let len = operands.get(2)
-                    .ok_or_else(|| MorphlexError::CodegenError("StrCmp requires 3 operands: a, b, len (missing len)".to_string()))
+                let len = operands
+                    .get(2)
+                    .ok_or_else(|| {
+                        MorphlexError::CodegenError(
+                            "StrCmp requires 3 operands: a, b, len (missing len)".to_string(),
+                        )
+                    })
                     .and_then(|o| self.lower_operand(o))?;
                 insts.push(IrInst::StrCmp { dest, a, b, len });
             }
@@ -1434,14 +1695,29 @@ impl Lowerer {
             }
             JStarInstruction::StrCopy => {
                 produces_result = false;
-                let dst = operands.first()
-                    .ok_or_else(|| MorphlexError::CodegenError("StrCopy requires 3 operands: dst, src, len (missing dst)".to_string()))
+                let dst = operands
+                    .first()
+                    .ok_or_else(|| {
+                        MorphlexError::CodegenError(
+                            "StrCopy requires 3 operands: dst, src, len (missing dst)".to_string(),
+                        )
+                    })
                     .and_then(|o| self.lower_operand(o))?;
-                let src = operands.get(1)
-                    .ok_or_else(|| MorphlexError::CodegenError("StrCopy requires 3 operands: dst, src, len (missing src)".to_string()))
+                let src = operands
+                    .get(1)
+                    .ok_or_else(|| {
+                        MorphlexError::CodegenError(
+                            "StrCopy requires 3 operands: dst, src, len (missing src)".to_string(),
+                        )
+                    })
                     .and_then(|o| self.lower_operand(o))?;
-                let len = operands.get(2)
-                    .ok_or_else(|| MorphlexError::CodegenError("StrCopy requires 3 operands: dst, src, len (missing len)".to_string()))
+                let len = operands
+                    .get(2)
+                    .ok_or_else(|| {
+                        MorphlexError::CodegenError(
+                            "StrCopy requires 3 operands: dst, src, len (missing len)".to_string(),
+                        )
+                    })
                     .and_then(|o| self.lower_operand(o))?;
                 insts.push(IrInst::StrCopy { dst, src, len });
             }
@@ -1455,7 +1731,7 @@ impl Lowerer {
         Ok((insts, if produces_result { Some(dest) } else { None }))
     }
 
-    fn lower_operand(&self, operand: &TypedOperand) -> MorphResult<IrValue> {
+    fn lower_operand(&mut self, operand: &TypedOperand) -> MorphResult<IrValue> {
         match operand {
             TypedOperand::Immediate(val, _) => Ok(IrValue::Imm(*val)),
             TypedOperand::Variable { name, .. } => {
@@ -1473,16 +1749,38 @@ impl Lowerer {
                     None => Ok(IrValue::Imm(0)), // no prior result
                 }
             }
-            TypedOperand::StringLiteral(_) => {
-                // String literals are handled at the instruction level (PrintStr),
-                // not as operand values. If one reaches here, treat as 0.
+
+            TypedOperand::PhysicalRegister { .. } => {
+                // Physical registers are handled by the instruction that uses them
+                // (PhysicalLoad/PhysicalStore).  If one reaches here, treat as 0.
                 Ok(IrValue::Imm(0))
+            }
+            TypedOperand::Argument(idx, _) => {
+                // `argument N` refers to the Nth incoming argument slot.
+                if *idx < self.param_vregs.len() {
+                    Ok(IrValue::Reg(self.param_vregs[*idx]))
+                } else {
+                    Err(MorphlexError::CodegenError(format!(
+                        "argument {} out of bounds (function has {} parameters)",
+                        idx,
+                        self.param_vregs.len()
+                    )))
+                }
+            }
+            TypedOperand::StringLiteral(s) => {
+                // Intern the string into the .data section (NUL-terminated)
+                // and yield its address, so string literals can be passed as
+                // values (e.g. call arguments like arch_panic "message").
+                let offset = self.string_data.len();
+                self.string_data.extend_from_slice(s.as_bytes());
+                self.string_data.push(0);
+                Ok(IrValue::DataAddr(offset))
             }
             TypedOperand::Addressed { target, .. } => self.lower_operand(target),
         }
     }
 
-    fn get_one_operand(&self, operands: &[TypedOperand]) -> MorphResult<IrValue> {
+    fn get_one_operand(&mut self, operands: &[TypedOperand]) -> MorphResult<IrValue> {
         if let Some(first) = operands.first() {
             self.lower_operand(first)
         } else {
@@ -1490,7 +1788,7 @@ impl Lowerer {
         }
     }
 
-    fn get_two_operands(&self, operands: &[TypedOperand]) -> MorphResult<(IrValue, IrValue)> {
+    fn get_two_operands(&mut self, operands: &[TypedOperand]) -> MorphResult<(IrValue, IrValue)> {
         let lhs = if let Some(first) = operands.first() {
             self.lower_operand(first)?
         } else {

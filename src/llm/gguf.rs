@@ -69,12 +69,10 @@ pub fn export_to_gguf(model: &MorphlexLLM, path: &Path, quantize: bool) -> Morph
     )?;
 
     // Align to 32 bytes
-    let pos = file.stream_position()
-        .map_err(MorphlexError::IoError)?;
+    let pos = file.stream_position().map_err(MorphlexError::IoError)?;
     let padding = (32 - (pos % 32)) % 32;
     for _ in 0..padding {
-        file.write_all(&[0u8])
-            .map_err(MorphlexError::IoError)?;
+        file.write_all(&[0u8]).map_err(MorphlexError::IoError)?;
     }
 
     // Write tensor data (simplified - just zeros as placeholder)

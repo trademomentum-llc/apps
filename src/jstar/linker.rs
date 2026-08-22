@@ -11,6 +11,7 @@
 //!
 //! The _start entry point is at the beginning of .text.
 
+use super::codegen::Arch;
 use super::codegen::MachineCode;
 use crate::types::{MorphResult, MorphlexError};
 use std::path::Path;
@@ -37,6 +38,7 @@ const ET_EXEC: u16 = 2; // executable
 
 // ELF machine
 const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
 
 // Program header types
 const PT_LOAD: u32 = 1;
@@ -50,15 +52,24 @@ const PF_R: u32 = 4; // read
 const ELF64_EHDR_SIZE: usize = 64;
 const ELF64_PHDR_SIZE: usize = 56;
 
-// Virtual address base (standard Linux user-space)
-const VADDR_BASE: u64 = 0x400000;
+// Virtual address base (standard Linux user-space / kernel load addresses).
+const VADDR_BASE_X86_64: u64 = 0x400000;
+/// QEMU `virt` machine loads `-kernel` images at this physical address.
+const VADDR_BASE_AARCH64: u64 = 0x40080000;
+
+fn vaddr_base(arch: Arch) -> u64 {
+    match arch {
+        Arch::X86_64 => VADDR_BASE_X86_64,
+        Arch::Aarch64 => VADDR_BASE_AARCH64,
+    }
+}
 
 /// Link machine code into an ELF64 executable.
-pub fn link(code: &MachineCode, output_path: &Path) -> MorphResult<()> {
+pub fn link(code: &MachineCode, output_path: &Path, arch: Arch) -> MorphResult<()> {
     // Patch data section addresses in the .text before building ELF
     let mut code = code.clone();
-    patch_data_addresses(&mut code);
-    let elf = build_elf(&code)?;
+    patch_data_addresses(&mut code, arch);
+    let elf = build_elf(&code, arch)?;
 
     std::fs::write(output_path, &elf).map_err(MorphlexError::IoError)?;
 
@@ -73,28 +84,69 @@ pub fn link(code: &MachineCode, output_path: &Path) -> MorphResult<()> {
     Ok(())
 }
 
-/// Patch data section addresses in the .text section.
+/// Patch data section addresses and function addresses in the .text section.
 ///
 /// Uses the data_fixups list from codegen: each entry is the byte offset
 /// in .text of an 8-byte value (a .data section offset) to which we add
-/// the actual data vaddr (VADDR_BASE + headers + text_size).
+/// the actual data vaddr (VADDR_BASE + text_size, plus the ELF headers
+/// size on x86-64 where the headers are part of the loaded image).
+///
+/// Uses the text_fixups list from codegen: each entry is the byte offset
+/// in .text of an 8-byte function-offset placeholder to which we add the
+/// .text base virtual address.
 ///
 /// This replaces the old byte-pattern scanning approach. Every movabs
 /// that references .data now records its fixup position explicitly.
-fn patch_data_addresses(code: &mut MachineCode) {
-    if code.data.is_empty() && code.data_fixups.is_empty() {
+fn patch_data_addresses(code: &mut MachineCode, arch: Arch) {
+    if code.data.is_empty() && code.data_fixups.is_empty() && code.text_fixups.is_empty() {
         return;
     }
 
     let headers_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE;
-    let data_offset = headers_size + code.text.len();
-    let data_vaddr = VADDR_BASE + data_offset as u64;
+    // AArch64 raw images are booted with the first .text byte at VADDR_BASE
+    // (the ELF headers are stripped when producing the .bin), so code/data
+    // vaddrs start at the base itself rather than after the headers.
+    let data_offset = match arch {
+        Arch::X86_64 => headers_size + code.text.len(),
+        Arch::Aarch64 => code.text.len(),
+    };
+    let data_vaddr = vaddr_base(arch) + data_offset as u64;
+    let text_vaddr = vaddr_base(arch)
+        + match arch {
+            Arch::X86_64 => headers_size as u64,
+            Arch::Aarch64 => 0,
+        };
 
+    eprintln!(
+        "[linker] arch={:?} text_len={} data_vaddr={:#x} text_vaddr={:#x} data_fixups={} text_fixups={}",
+        arch,
+        code.text.len(),
+        data_vaddr,
+        text_vaddr,
+        code.data_fixups.len(),
+        code.text_fixups.len()
+    );
     for &fixup_pos in &code.data_fixups {
         if fixup_pos + 8 <= code.text.len() {
             let offset_bytes: [u8; 8] = code.text[fixup_pos..fixup_pos + 8].try_into().unwrap();
             let current_val = u64::from_le_bytes(offset_bytes);
             let patched = current_val + data_vaddr;
+            eprintln!(
+                "[linker] data fixup @ {} current={:#x} patched={:#x}",
+                fixup_pos, current_val, patched
+            );
+            code.text[fixup_pos..fixup_pos + 8].copy_from_slice(&patched.to_le_bytes());
+        }
+    }
+    for &fixup_pos in &code.text_fixups {
+        if fixup_pos + 8 <= code.text.len() {
+            let offset_bytes: [u8; 8] = code.text[fixup_pos..fixup_pos + 8].try_into().unwrap();
+            let current_val = u64::from_le_bytes(offset_bytes);
+            let patched = current_val + text_vaddr;
+            eprintln!(
+                "[linker] text fixup @ {} current={:#x} patched={:#x}",
+                fixup_pos, current_val, patched
+            );
             code.text[fixup_pos..fixup_pos + 8].copy_from_slice(&patched.to_le_bytes());
         }
     }
@@ -105,7 +157,7 @@ fn patch_data_addresses(code: &mut MachineCode) {
 /// Uses a single PT_LOAD segment (R+W+X) for the bootstrap compiler.
 /// This avoids multi-segment mapping complexity. All code and data
 /// are in one segment mapped at VADDR_BASE.
-fn build_elf(code: &MachineCode) -> MorphResult<Vec<u8>> {
+fn build_elf(code: &MachineCode, arch: Arch) -> MorphResult<Vec<u8>> {
     let text_size = code.text.len();
     let data_size = code.data.len();
 
@@ -116,8 +168,25 @@ fn build_elf(code: &MachineCode) -> MorphResult<Vec<u8>> {
     // Memory segment = file segment + BSS (zero-filled by kernel)
     let mem_segment_size = segment_size + code.bss_size;
 
-    // Entry point = start of .text (right after headers)
-    let entry_point = VADDR_BASE + headers_size as u64;
+    // Entry point = start of .text. x86-64 images keep the ELF headers inside
+    // the loaded segment, so .text begins right after them; AArch64 images
+    // are stripped to a raw .bin and booted directly at VADDR_BASE, so the
+    // segment starts at .text and the headers are not part of the image.
+    let base = vaddr_base(arch);
+    let (entry_point, seg_offset, seg_file_size, seg_mem_size) = match arch {
+        Arch::X86_64 => (
+            base + headers_size as u64,
+            0u64,
+            (headers_size + segment_size) as u64,
+            (headers_size + mem_segment_size) as u64,
+        ),
+        Arch::Aarch64 => (
+            base,
+            headers_size as u64,
+            segment_size as u64,
+            mem_segment_size as u64,
+        ),
+    };
 
     let mut elf = Vec::with_capacity(headers_size + segment_size);
 
@@ -130,8 +199,13 @@ fn build_elf(code: &MachineCode) -> MorphResult<Vec<u8>> {
     elf.push(ELFOSABI_NONE);
     elf.extend_from_slice(&[0u8; 8]); // padding
 
+    let emachine = match arch {
+        Arch::X86_64 => EM_X86_64,
+        Arch::Aarch64 => EM_AARCH64,
+    };
+
     elf.extend_from_slice(&ET_EXEC.to_le_bytes());
-    elf.extend_from_slice(&EM_X86_64.to_le_bytes());
+    elf.extend_from_slice(&emachine.to_le_bytes());
     elf.extend_from_slice(&1u32.to_le_bytes()); // version
     elf.extend_from_slice(&entry_point.to_le_bytes());
     elf.extend_from_slice(&(ELF64_EHDR_SIZE as u64).to_le_bytes()); // phoff
@@ -147,17 +221,16 @@ fn build_elf(code: &MachineCode) -> MorphResult<Vec<u8>> {
     assert_eq!(elf.len(), ELF64_EHDR_SIZE);
 
     // ─── Single Program Header: PT_LOAD (R+W+X) ────────────────────────
-    // Maps the entire file from offset 0 so header/text/data are all in one segment.
+    // x86-64 maps the entire file from offset 0 (headers included); AArch64
+    // maps only .text+.data starting at VADDR_BASE.
 
     elf.extend_from_slice(&PT_LOAD.to_le_bytes());
     elf.extend_from_slice(&(PF_R | PF_W | PF_X).to_le_bytes()); // rwx
-    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset: start of file
-    elf.extend_from_slice(&VADDR_BASE.to_le_bytes()); // p_vaddr
-    elf.extend_from_slice(&VADDR_BASE.to_le_bytes()); // p_paddr
-    let total_file_size = (headers_size + segment_size) as u64;
-    let total_mem_size = (headers_size + mem_segment_size) as u64;
-    elf.extend_from_slice(&total_file_size.to_le_bytes()); // p_filesz
-    elf.extend_from_slice(&total_mem_size.to_le_bytes()); // p_memsz (includes BSS)
+    elf.extend_from_slice(&seg_offset.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&base.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&base.to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&seg_file_size.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&seg_mem_size.to_le_bytes()); // p_memsz (includes BSS)
     elf.extend_from_slice(&0x1000u64.to_le_bytes()); // p_align
 
     assert_eq!(elf.len(), headers_size);
@@ -190,8 +263,9 @@ mod tests {
             bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
+            text_fixups: vec![],
         };
-        let elf = build_elf(&code).unwrap();
+        let elf = build_elf(&code, Arch::X86_64).unwrap();
         assert_eq!(&elf[0..4], &ELF_MAGIC);
     }
 
@@ -204,8 +278,9 @@ mod tests {
             bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
+            text_fixups: vec![],
         };
-        let elf = build_elf(&code).unwrap();
+        let elf = build_elf(&code, Arch::X86_64).unwrap();
         assert_eq!(elf[4], ELFCLASS64);
     }
 
@@ -218,8 +293,9 @@ mod tests {
             bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
+            text_fixups: vec![],
         };
-        let elf = build_elf(&code).unwrap();
+        let elf = build_elf(&code, Arch::X86_64).unwrap();
         let machine = u16::from_le_bytes([elf[18], elf[19]]);
         assert_eq!(machine, EM_X86_64);
     }
@@ -233,8 +309,9 @@ mod tests {
             bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
+            text_fixups: vec![],
         };
-        let elf = build_elf(&code).unwrap();
+        let elf = build_elf(&code, Arch::X86_64).unwrap();
         // ELF header (64) + 1 phdr (56) + 1 byte text = 121
         assert_eq!(elf.len(), ELF64_EHDR_SIZE + ELF64_PHDR_SIZE + 1);
     }
@@ -248,10 +325,11 @@ mod tests {
             bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
+            text_fixups: vec![],
         };
-        let elf = build_elf(&code).unwrap();
+        let elf = build_elf(&code, Arch::X86_64).unwrap();
         let entry = u64::from_le_bytes(elf[24..32].try_into().unwrap());
-        let expected = VADDR_BASE + (ELF64_EHDR_SIZE + ELF64_PHDR_SIZE) as u64;
+        let expected = VADDR_BASE_X86_64 + (ELF64_EHDR_SIZE + ELF64_PHDR_SIZE) as u64;
         assert_eq!(entry, expected);
     }
 
@@ -264,13 +342,36 @@ mod tests {
             bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
+            text_fixups: vec![],
         };
-        let elf = build_elf(&code).unwrap();
+        let elf = build_elf(&code, Arch::X86_64).unwrap();
         // Single PT_LOAD segment — always 1 program header
         let phnum = u16::from_le_bytes([elf[56], elf[57]]);
         assert_eq!(phnum, 1);
         // Total size: header + 1 phdr + 1 text + 2 data
         assert_eq!(elf.len(), ELF64_EHDR_SIZE + ELF64_PHDR_SIZE + 1 + 2);
+    }
+
+    #[test]
+    fn test_elf_entry_point_aarch64() {
+        let code = MachineCode {
+            data_vaddr: 0,
+            text: vec![0x1F, 0x20, 0x03, 0xD5], // nop
+            data: vec![],
+            bss_size: 0,
+            stack_size: 0,
+            data_fixups: vec![],
+            text_fixups: vec![],
+        };
+        let elf = build_elf(&code, Arch::Aarch64).unwrap();
+        let entry = u64::from_le_bytes(elf[24..32].try_into().unwrap());
+        // Raw AArch64 images boot with the first .text byte at VADDR_BASE.
+        assert_eq!(entry, VADDR_BASE_AARCH64);
+        // The LOAD segment starts at .text (after the ELF headers).
+        let p_offset = u64::from_le_bytes(elf[72..80].try_into().unwrap());
+        assert_eq!(p_offset, (ELF64_EHDR_SIZE + ELF64_PHDR_SIZE) as u64);
+        let p_vaddr = u64::from_le_bytes(elf[80..88].try_into().unwrap());
+        assert_eq!(p_vaddr, VADDR_BASE_AARCH64);
     }
 
     #[test]
@@ -282,9 +383,10 @@ mod tests {
             bss_size: 0,
             stack_size: 0,
             data_fixups: vec![],
+            text_fixups: vec![],
         };
-        let a = build_elf(&code).unwrap();
-        let b = build_elf(&code).unwrap();
+        let a = build_elf(&code, Arch::X86_64).unwrap();
+        let b = build_elf(&code, Arch::X86_64).unwrap();
         assert_eq!(a, b, "ELF output must be deterministic");
     }
 }

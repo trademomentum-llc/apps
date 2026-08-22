@@ -222,9 +222,11 @@ fn collect_filename(chars: &mut std::iter::Peekable<std::str::Chars>) -> String 
 /// Write output text to the appropriate destination based on redirection.
 pub fn write_output(text: &str, redirect: &Redirect) -> std::io::Result<()> {
     if let Some(ref path) = redirect.stdout_overwrite {
+        require_file_io_enabled()?;
         let mut f = File::create(path)?;
         f.write_all(text.as_bytes())?;
     } else if let Some(ref path) = redirect.stdout_append {
+        require_file_io_enabled()?;
         let mut f = OpenOptions::new().create(true).append(true).open(path)?;
         f.write_all(text.as_bytes())?;
     } else {
@@ -237,11 +239,25 @@ pub fn write_output(text: &str, redirect: &Redirect) -> std::io::Result<()> {
 pub fn read_input(redirect: &Redirect) -> std::io::Result<Option<String>> {
     match redirect.stdin_file {
         Some(ref path) => {
+            require_file_io_enabled()?;
             let content = std::fs::read_to_string(path)?;
             Ok(Some(content))
         }
         None => Ok(None),
     }
+}
+
+fn require_file_io_enabled() -> std::io::Result<()> {
+    if matches!(
+        std::env::var("MORPHLEX_JSH_ALLOW_FILE_IO").as_deref(),
+        Ok("1" | "true" | "yes")
+    ) {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "JSH file IO is disabled by default; set MORPHLEX_JSH_ALLOW_FILE_IO=1 only for audited local development",
+    ))
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -407,6 +423,9 @@ mod tests {
 
     #[test]
     fn test_write_output_to_file() {
+        unsafe {
+            std::env::set_var("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
+        }
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_redirect_write.txt");
         let redirect = Redirect {
@@ -419,10 +438,16 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "hello\n");
         let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::remove_var("MORPHLEX_JSH_ALLOW_FILE_IO");
+        }
     }
 
     #[test]
     fn test_write_output_append() {
+        unsafe {
+            std::env::set_var("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
+        }
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_redirect_append.txt");
         let _ = std::fs::remove_file(&path);
@@ -438,10 +463,16 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "line1\nline2\n");
         let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::remove_var("MORPHLEX_JSH_ALLOW_FILE_IO");
+        }
     }
 
     #[test]
     fn test_read_input_from_file() {
+        unsafe {
+            std::env::set_var("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
+        }
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_redirect_read.txt");
         std::fs::write(&path, "input data\n").unwrap();
@@ -455,6 +486,9 @@ mod tests {
         let input = read_input(&redirect).unwrap();
         assert_eq!(input, Some("input data\n".to_string()));
         let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::remove_var("MORPHLEX_JSH_ALLOW_FILE_IO");
+        }
     }
 
     #[test]

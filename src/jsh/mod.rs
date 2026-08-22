@@ -29,13 +29,20 @@ pub struct ExecutionResult {
 ///
 /// This is the Phase 7 codegen+execute bridge used by both the REPL and scripting.
 pub fn execute_jstar(source: &str) -> MorphResult<ExecutionResult> {
+    if !unsafe_execute_enabled() {
+        return Err(MorphlexError::CodegenError(
+            "JSH native execution is disabled by default; set MORPHLEX_JSH_UNSAFE_EXECUTE=1 only for audited local development".to_string(),
+        ));
+    }
+
     // Generate a unique temp path based on source hash + thread ID
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     std::thread::current().id().hash(&mut hasher);
     // Include timestamp for uniqueness across invocations with same source
-    if let Ok(d) = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH) { d.as_nanos().hash(&mut hasher) }
+    if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        d.as_nanos().hash(&mut hasher)
+    }
     let hash = hasher.finish();
 
     let dir = std::env::temp_dir().join("jsh_exec");
@@ -63,6 +70,13 @@ pub fn execute_jstar(source: &str) -> MorphResult<ExecutionResult> {
     })
 }
 
+fn unsafe_execute_enabled() -> bool {
+    matches!(
+        std::env::var("MORPHLEX_JSH_UNSAFE_EXECUTE").as_deref(),
+        Ok("1" | "true" | "yes")
+    )
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -70,6 +84,9 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_return() {
+        unsafe {
+            std::env::set_var("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
+        }
         let result = execute_jstar("return 42").unwrap();
         assert_eq!(result.exit_code, 42);
     }
@@ -77,6 +94,9 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_print() {
+        unsafe {
+            std::env::set_var("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
+        }
         let result = execute_jstar("print 99").unwrap();
         assert_eq!(result.stdout.trim(), "99");
     }
@@ -84,6 +104,9 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_multiline() {
+        unsafe {
+            std::env::set_var("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
+        }
         let result = execute_jstar("a counter\nstore 10 into counter\nprint counter").unwrap();
         assert_eq!(result.stdout.trim(), "10");
     }

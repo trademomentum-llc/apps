@@ -15,6 +15,7 @@ vk.bin
 *.db
 *.db.enc
 *.sig
+!release/provenance/manifest.sha256.sig
 
 # Environment and secrets
 .env
@@ -39,6 +40,13 @@ Thumbs.db
 .vscode/
 *.iml
 
+# Node/promptfoo local tooling
+node_modules/
+.promptfoo/
+redteam.yaml
+promptfoo-results/
+redteam-results/
+
 
 # Crawl output
 crawl_data/
@@ -52,6 +60,12 @@ a.out
 agent.py
 .claude/
 *.json
+!package.json
+!package-lock.json
+!security/**/*.json
+!release/provenance/*.json
+!release/provenance/release-manifest.pub.pem
+!release/security/*.json
 llm_checkpoints/
 logs/
 rr_db.json
@@ -62,4 +76,3 @@ rr_db.json
 tests/regression/**/*.elf
 tests/regression/**/work.*
 tests/regression/**/actual.*.log
-

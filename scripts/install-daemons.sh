@@ -1,65 +1,47 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Rational Reserve Daemon Installation Script
-# Installs systemd service files and enables daemons at boot
+# Installs non-production scaffolding as user systemd units only.
 #
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(dirname "$SCRIPT_DIR")"
+USER_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+SYSTEMD_USER_DIR="$USER_CONFIG_HOME/systemd/user"
 
 echo "=== Rational Reserve Daemon Installation ==="
+echo "Status: NON-PRODUCTION SCAFFOLDING"
 echo ""
 
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then
-    echo "Warning: Not running as root. systemd service installation may fail."
-    echo "Please run with: sudo $0"
-    echo ""
+if [ "${RR_INSTALL_NON_PRODUCTION_SCAFFOLDING:-}" != "1" ]; then
+    echo "Refusing to install placeholder RR daemons."
+    echo "Set RR_INSTALL_NON_PRODUCTION_SCAFFOLDING=1 only for local scaffolding tests."
+    exit 1
 fi
 
-# Copy service files to systemd directory
-SYSTEMD_DIR="/etc/systemd/system"
-
-echo "Installing systemd service files..."
-
-if [ -w "$SYSTEMD_DIR" ]; then
-    cp "$SCRIPT_DIR/rr-integrity-daemon.service" "$SYSTEMD_DIR/"
-    cp "$SCRIPT_DIR/rr-threat-manager.service" "$SYSTEMD_DIR/"
-    cp "$SCRIPT_DIR/rr-morpho-maintainer.service" "$SYSTEMD_DIR/"
-    cp "$SCRIPT_DIR/rr-morpho-maintainer.timer" "$SYSTEMD_DIR/"
-    
-    # Reload systemd
-    systemctl daemon-reload
-    
-    # Enable services
-    echo "Enabling services..."
-    systemctl enable rr-integrity-daemon.service
-    systemctl enable rr-threat-manager.service
-    systemctl enable rr-morpho-maintainer.timer
-    
-    # Start services
-    echo "Starting services..."
-    systemctl start rr-integrity-daemon.service
-    systemctl start rr-threat-manager.service
-    systemctl start rr-morpho-maintainer.timer
-    
-    echo ""
-    echo "=== Installation Complete ==="
-    echo ""
-    echo "Services enabled and started:"
-    systemctl status rr-integrity-daemon.service --no-pager -l
-    echo ""
-    systemctl status rr-threat-manager.service --no-pager -l
-    echo ""
-    systemctl status rr-morpho-maintainer.timer --no-pager -l
-else
-    echo "Cannot write to $SYSTEMD_DIR"
-    echo ""
-    echo "Manual installation steps:"
-    echo "1. Copy service files to $SYSTEMD_DIR"
-    echo "2. Run: systemctl daemon-reload"
-    echo "3. Run: systemctl enable rr-integrity-daemon rr-threat-manager rr-morpho-maintainer.timer"
-    echo "4. Run: systemctl start rr-integrity-daemon rr-threat-manager rr-morpho-maintainer.timer"
+if [ "$EUID" -eq 0 ]; then
+    echo "Refusing root install. These placeholder daemons may only be installed as user units."
+    exit 1
 fi
+
+echo "Installing user systemd service files under $SYSTEMD_USER_DIR"
+mkdir -p "$SYSTEMD_USER_DIR"
+install -m 0644 "$SCRIPT_DIR/rr-integrity-daemon.service" "$SYSTEMD_USER_DIR/"
+install -m 0644 "$SCRIPT_DIR/rr-threat-manager.service" "$SYSTEMD_USER_DIR/"
+install -m 0644 "$SCRIPT_DIR/rr-morpho-maintainer.service" "$SYSTEMD_USER_DIR/"
+install -m 0644 "$SCRIPT_DIR/rr-morpho-maintainer.timer" "$SYSTEMD_USER_DIR/"
+
+systemctl --user daemon-reload
+systemctl --user enable rr-integrity-daemon.service
+systemctl --user enable rr-threat-manager.service
+systemctl --user enable rr-morpho-maintainer.timer
+
+if [ "${RR_START_NON_PRODUCTION_SCAFFOLDING:-}" = "1" ]; then
+    systemctl --user start rr-integrity-daemon.service
+    systemctl --user start rr-threat-manager.service
+    systemctl --user start rr-morpho-maintainer.timer
+fi
+
+echo "Installed user units. They are non-production scaffolding and are not root system services."

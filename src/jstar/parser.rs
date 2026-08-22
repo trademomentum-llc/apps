@@ -34,6 +34,32 @@ struct Parser {
     pos: usize,
 }
 
+/// Returns true when `lemma` is a built-in type noun that can be followed
+/// by a variable name, e.g. "integer counter" or "global byte input".
+fn is_known_type_noun(lemma: &str) -> bool {
+    matches!(
+        lemma,
+        "boolean"
+            | "bool"
+            | "flag"
+            | "byte"
+            | "short"
+            | "integer"
+            | "int"
+            | "number"
+            | "count"
+            | "counter"
+            | "result"
+            | "value"
+            | "long"
+            | "float"
+            | "double"
+            | "char"
+            | "character"
+            | "letter"
+    )
+}
+
 /// Parse morphlex output into a JStar AST.
 ///
 /// Takes parallel arrays from morphlex::compile() and produces a JStarProgram.
@@ -94,6 +120,7 @@ impl Parser {
                 self.parse_control_flow(kind)
             }
             TokenCategory::FunctionDef => self.parse_function_def(),
+            TokenCategory::InlineAssembly => self.parse_inline_assembly(),
             TokenCategory::Scope(_) => self.parse_declaration_or_operand_stmt(),
             TokenCategory::Data => self.parse_declaration_from_noun(),
             TokenCategory::Literal => self.parse_literal_statement(),
@@ -160,9 +187,10 @@ impl Parser {
                 && !matches!(
                     self.peek().map(|t| &t.category),
                     Some(TokenCategory::Addressing(_))
-                ) {
-                    break;
-                }
+                )
+            {
+                break;
+            }
             operands.push(self.parse_operand()?);
         }
 
@@ -262,7 +290,11 @@ impl Parser {
                     let lemma = tok.lemma.to_lowercase();
                     if lemma == "glob" || lemma == "local" {
                         // Treat as scope keyword
-                        let scope = if lemma == "glob" { ScopeKind::Global } else { ScopeKind::Local };
+                        let scope = if lemma == "glob" {
+                            ScopeKind::Global
+                        } else {
+                            ScopeKind::Local
+                        };
                         self.advance();
                         scope
                     } else {
@@ -301,18 +333,26 @@ impl Parser {
 
                 // Check if the next token is also a noun (name follows type)
                 // e.g., "the unsigned integer counter" → type=Int, name="counter"
-                if let Some(tok) = self.peek()
-                    && matches!(tok.category, TokenCategory::Data | TokenCategory::Register(_)) {
-                        let actual_name = tok.original.clone();
-                        self.advance();
-                        let size = self.try_parse_array_size();
-                        return Ok(JStarStatement::Declare {
-                            scope,
-                            name: actual_name,
-                            ty,
-                            size,
-                        });
-                    }
+                // Only do this when the first noun is a known type keyword;
+                // otherwise a bare name like "global buf" would greedily consume
+                // the next line's token as its name.
+                if is_known_type_noun(&lemma)
+                    && let Some(tok) = self.peek()
+                    && matches!(
+                        tok.category,
+                        TokenCategory::Data | TokenCategory::Register(_)
+                    )
+                {
+                    let actual_name = tok.original.clone();
+                    self.advance();
+                    let size = self.try_parse_array_size();
+                    return Ok(JStarStatement::Declare {
+                        scope,
+                        name: actual_name,
+                        ty,
+                        size,
+                    });
+                }
 
                 let size = self.try_parse_array_size();
                 Ok(JStarStatement::Declare {
@@ -377,17 +417,21 @@ impl Parser {
 
         // Check for a second noun (the variable name) - also accept Register for single-letter vars
         if let Some(tok) = self.peek()
-            && matches!(tok.category, TokenCategory::Data | TokenCategory::Register(_)) {
-                let name = tok.original.clone();
-                self.advance();
-                let size = self.try_parse_array_size();
-                return Ok(JStarStatement::Declare {
-                    scope: ScopeKind::Local,
-                    name,
-                    ty,
-                    size,
-                });
-            }
+            && matches!(
+                tok.category,
+                TokenCategory::Data | TokenCategory::Register(_)
+            )
+        {
+            let name = tok.original.clone();
+            self.advance();
+            let size = self.try_parse_array_size();
+            return Ok(JStarStatement::Declare {
+                scope: ScopeKind::Local,
+                name,
+                ty,
+                size,
+            });
+        }
 
         // Single noun — declare it with its own name
         let size = self.try_parse_array_size();
@@ -441,15 +485,16 @@ impl Parser {
                     }
                 }
                 if let Some(tok) = self.peek()
-                    && matches!(tok.category, TokenCategory::Data) {
-                        let name = tok.original.clone();
-                        self.advance();
-                        return Ok(JStarOperand::Variable {
-                            name,
-                            scope,
-                            modifiers,
-                        });
-                    }
+                    && matches!(tok.category, TokenCategory::Data)
+                {
+                    let name = tok.original.clone();
+                    self.advance();
+                    return Ok(JStarOperand::Variable {
+                        name,
+                        scope,
+                        modifiers,
+                    });
+                }
                 Err(MorphlexError::AstError(
                     "Expected noun after determiner in operand".to_string(),
                 ))
@@ -459,6 +504,18 @@ impl Parser {
             TokenCategory::Data => {
                 let name = current.original.clone();
                 self.advance();
+                // Special form: `argument N` references the Nth incoming
+                // function argument. This is used by kernel functions that
+                // declare parameters implicitly (no `with` clause).
+                if name.eq_ignore_ascii_case("argument") {
+                    if let Some(tok) = self.peek() {
+                        if matches!(tok.category, TokenCategory::Literal) {
+                            let idx = tok.lemma.parse::<usize>().unwrap_or(0);
+                            self.advance();
+                            return Ok(JStarOperand::Argument(idx));
+                        }
+                    }
+                }
                 Ok(JStarOperand::Variable {
                     name,
                     scope: ScopeKind::Local,
@@ -471,6 +528,17 @@ impl Parser {
                 let reg = *reg;
                 self.advance();
                 Ok(JStarOperand::Register(reg))
+            }
+
+            // Physical register marker: `register x0`
+            TokenCategory::PhysicalRegister => {
+                self.advance();
+                let tok = self.peek().ok_or_else(|| {
+                    MorphlexError::AstError("Expected register name after 'register'".to_string())
+                })?;
+                let name = tok.original.clone();
+                self.advance();
+                Ok(JStarOperand::PhysicalRegister(name))
             }
 
             // Number, string, or boolean literal
@@ -505,15 +573,16 @@ impl Parser {
                     }
                 }
                 if let Some(tok) = self.peek()
-                    && matches!(tok.category, TokenCategory::Data) {
-                        let name = tok.original.clone();
-                        self.advance();
-                        return Ok(JStarOperand::Variable {
-                            name,
-                            scope: ScopeKind::Local,
-                            modifiers,
-                        });
-                    }
+                    && matches!(tok.category, TokenCategory::Data)
+                {
+                    let name = tok.original.clone();
+                    self.advance();
+                    return Ok(JStarOperand::Variable {
+                        name,
+                        scope: ScopeKind::Local,
+                        modifiers,
+                    });
+                }
                 // No Data noun found — treat the modifier itself as a variable name.
                 // This handles cases where morphlex classifies variable names
                 // (like "left", "right") as adjectives instead of nouns.
@@ -535,6 +604,24 @@ impl Parser {
                 "Unexpected token category in operand position: {:?}",
                 other
             ))),
+        }
+    }
+
+    /// Parse an inline assembly statement: `inline "assembly text"`
+    fn parse_inline_assembly(&mut self) -> MorphResult<JStarStatement> {
+        self.advance(); // consume "inline"
+        let tok = self.peek().ok_or_else(|| {
+            MorphlexError::AstError("Expected string literal after 'inline'".to_string())
+        })?;
+        match tok.category {
+            TokenCategory::Literal if tok.vector.pos == POS_STRING => {
+                let text = tok.original.clone();
+                self.advance();
+                Ok(JStarStatement::InlineAssembly(text))
+            }
+            _ => Err(MorphlexError::AstError(
+                "Expected string literal after 'inline'".to_string(),
+            )),
         }
     }
 
@@ -560,48 +647,60 @@ impl Parser {
             }
         };
 
-        // Optional parameters: "with <type> <name> [<type> <name>]..."
+        // Optional parameters: "with <type> <name> [with <type> <name>]..."
+        // Jasterish allows an optional "with" before each parameter, so we
+        // accept both "with int a int b" and "with int a with int b".
         let mut params = Vec::new();
         if let Some(tok) = self.peek()
-            && matches!(tok.category, TokenCategory::Addressing(AddrMode::By)) {
-                self.advance(); // consume "with"
-                // Parse parameter pairs: <type-noun> <name>
-                // Type token must be Data; name token can be any category
-                // (morphlex may classify parameter names as adjectives, verbs, etc.)
-                while let Some(tok) = self.peek() {
-                    if matches!(tok.category, TokenCategory::Data) {
-                        let type_lemma = tok.lemma.clone();
-                        let ty = JStarType::from_noun(&type_lemma);
+            && matches!(tok.category, TokenCategory::Addressing(AddrMode::By))
+        {
+            self.advance(); // consume leading "with"
+
+            // Parse parameter pairs: <type-noun> <name>
+            // Type token must be Data; name token can be any category
+            // (morphlex may classify parameter names as adjectives, verbs, etc.)
+            while let Some(tok) = self.peek() {
+                // Allow an optional "with" before each subsequent parameter.
+                if matches!(tok.category, TokenCategory::Addressing(AddrMode::By)) {
+                    self.advance();
+                    continue;
+                }
+                if matches!(tok.category, TokenCategory::Data) {
+                    let type_lemma = tok.lemma.clone();
+                    let ty = JStarType::from_noun(&type_lemma);
+                    self.advance();
+                    // Next token is the parameter name — accept regardless of POS
+                    if let Some(name_tok) = self.peek()
+                        && !matches!(
+                            name_tok.category,
+                            TokenCategory::BlockEnd
+                                | TokenCategory::ControlFlow(_)
+                                | TokenCategory::FunctionDef
+                                | TokenCategory::Addressing(_)
+                        )
+                    {
+                        let param_name = name_tok.original.clone();
                         self.advance();
-                        // Next token is the parameter name — accept regardless of POS
-                        if let Some(name_tok) = self.peek()
-                            && !matches!(
-                                name_tok.category,
-                                TokenCategory::BlockEnd
-                                    | TokenCategory::ControlFlow(_)
-                                    | TokenCategory::FunctionDef
-                            ) {
-                                let param_name = name_tok.original.clone();
-                                self.advance();
-                                params.push((param_name, ty));
-                                continue;
-                            }
-                        // Single noun — treat as name with default type
-                        params.push((type_lemma, JStarType::Int));
-                    } else {
-                        break;
+                        params.push((param_name, ty));
+                        continue;
                     }
+                    // Single noun — treat as name with default type
+                    params.push((type_lemma, JStarType::Int));
+                } else {
+                    break;
                 }
             }
+        }
 
         // Parse body statements until "end"
         let mut body = Vec::new();
         while !self.is_at_end() {
             if let Some(tok) = self.peek()
-                && matches!(tok.category, TokenCategory::BlockEnd) {
-                    self.advance(); // consume "end"
-                    break;
-                }
+                && matches!(tok.category, TokenCategory::BlockEnd)
+            {
+                self.advance(); // consume "end"
+                break;
+            }
             match self.parse_statement() {
                 Ok(stmt) => body.push(stmt),
                 Err(_) => {
@@ -639,9 +738,10 @@ impl Parser {
 
         // "from" — skip the addressing token
         if let Some(tok) = self.peek()
-            && matches!(tok.category, TokenCategory::Addressing(_)) {
-                self.advance();
-            }
+            && matches!(tok.category, TokenCategory::Addressing(_))
+        {
+            self.advance();
+        }
 
         // Start value
         let start_val = if let Some(tok) = self.peek() {
@@ -658,9 +758,10 @@ impl Parser {
 
         // "to" — skip the addressing token
         if let Some(tok) = self.peek()
-            && matches!(tok.category, TokenCategory::Addressing(_)) {
-                self.advance();
-            }
+            && matches!(tok.category, TokenCategory::Addressing(_))
+        {
+            self.advance();
+        }
 
         // End value
         let end_val = if let Some(tok) = self.peek() {
@@ -698,10 +799,10 @@ impl Parser {
                         tok.category,
                         TokenCategory::Operation(JStarInstruction::Halt)
                     ))
-                {
-                    self.advance(); // consume "end"
-                    break;
-                }
+            {
+                self.advance(); // consume "end"
+                break;
+            }
             match self.parse_statement() {
                 Ok(stmt) => body.push(stmt),
                 Err(_) => {
@@ -805,12 +906,14 @@ impl Parser {
     /// "a counter"    → size = None
     fn try_parse_array_size(&mut self) -> Option<usize> {
         if let Some(tok) = self.peek()
-            && matches!(tok.category, TokenCategory::Literal) && tok.vector.pos == POS_LITERAL
-                && let Ok(n) = tok.lemma.parse::<usize>()
-                    && n > 0 {
-                        self.advance();
-                        return Some(n);
-                    }
+            && matches!(tok.category, TokenCategory::Literal)
+            && tok.vector.pos == POS_LITERAL
+            && let Ok(n) = tok.lemma.parse::<usize>()
+            && n > 0
+        {
+            self.advance();
+            return Some(n);
+        }
         None
     }
 
@@ -825,6 +928,7 @@ impl Parser {
         match self.peek().map(|t| &t.category) {
             Some(TokenCategory::Data) => true,
             Some(TokenCategory::Register(_)) => true,
+            Some(TokenCategory::PhysicalRegister) => true,
             Some(TokenCategory::Addressing(_)) => true,
             Some(TokenCategory::Literal) => true,
             Some(TokenCategory::TypeModifier(_)) => true,

@@ -1,11 +1,11 @@
 [Unit]
-Description=Rational Reserve - Morphogenetic Maintainer
+Description=Rational Reserve - Morphogenetic Maintainer (NON-PRODUCTION SCAFFOLDING)
 Documentation=https://github.com/morphlex/rational-reserve
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/llc/apps/target/release/morphlex daemon maintenance --run
+ExecStart=/usr/bin/env morphlex daemon maintenance --run
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rr-morpho
@@ -14,7 +14,7 @@ SyslogIdentifier=rr-morpho
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/llc/apps/data /var/log
+ReadWritePaths=%h/.local/share/morphlex %t/morphlex
 PrivateTmp=true
 
 # Resource limits

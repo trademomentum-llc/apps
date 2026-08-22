@@ -398,9 +398,10 @@ impl SwarmOrchestrator {
             .ok_or_else(|| crate::MorphlexError::DatabaseError("Agent not found".to_string()))?;
 
         if let Some(swarm_id) = &agent_record.swarm_id
-            && let Some(swarm) = self.swarms.get_mut(swarm_id) {
-                swarm.record_communication(Communication::SitRep(sitrep.clone()));
-            }
+            && let Some(swarm) = self.swarms.get_mut(swarm_id)
+        {
+            swarm.record_communication(Communication::SitRep(sitrep.clone()));
+        }
 
         self.comm_log.push(Communication::SitRep(sitrep));
         Ok(())

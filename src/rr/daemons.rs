@@ -1,7 +1,11 @@
 //! System Daemon Agents -- Continuous background operations.
 //!
-//! This module provides system-level daemon agents that run continuously
-//! or on scheduled intervals to maintain system integrity and security.
+//! SECURITY STATUS: non-production scaffolding.
+//!
+//! This module names intended daemon roles, but it does not yet implement real
+//! hash baselines, process/network inventory, log anomaly detection, tested
+//! isolation, revocation, or recovery actions. Do not treat these daemons as
+//! production protection controls until those checks exist and pass CI.
 //!
 //! ## Daemon Types
 //!
@@ -22,11 +26,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+/// Explicit status marker for deployment/reporting gates.
+pub const RR_DAEMON_SECURITY_STATUS: &str = "NON_PRODUCTION_SCAFFOLDING";
+
 // ============================================================================
 // System Integrity Daemon
 // ============================================================================
 
-/// SystemIntegrityDaemon - Autonomous system monitoring and integrity maintenance.
+/// SystemIntegrityDaemon - non-production scaffolding for system monitoring.
 ///
 /// Runs continuously to:
 /// - Protect system integrity
@@ -122,7 +129,7 @@ impl SystemIntegrityDaemon {
                 IntegrityStatus::Degraded
             },
             monitored_paths: self.monitored_paths.clone(),
-            issues: Vec::new(),
+            issues: vec![scaffolding_integrity_issue()],
         }
     }
 }
@@ -172,9 +179,19 @@ pub struct IntegrityIssue {
     pub remediation: Option<String>,
 }
 
-// Placeholder for actual integrity checking
+fn scaffolding_integrity_issue() -> IntegrityIssue {
+    IntegrityIssue {
+        issue_type: "non_production_scaffolding".to_string(),
+        path: PathBuf::from("src/rr/daemons.rs"),
+        severity: Severity::Serious,
+        description: "RR integrity daemon has no real hash baseline, inventory, anomaly detection, or tested response action implementation.".to_string(),
+        remediation: Some("Implement real baselines and response tests before production deployment.".to_string()),
+    }
+}
+
+// Non-production scaffolding for future integrity checking.
 fn check_system_integrity(_paths: &[PathBuf]) -> f64 {
-    // In production, this would:
+    // Required before production:
     // - Verify file checksums
     // - Check for unauthorized modifications
     // - Monitor process integrity
@@ -182,9 +199,9 @@ fn check_system_integrity(_paths: &[PathBuf]) -> f64 {
     1.0
 }
 
-// Placeholder for self-healing
+// Non-production scaffolding for future self-healing.
 fn perform_self_healing(_paths: &[PathBuf]) {
-    // In production, this would:
+    // Required before production:
     // - Restore from known-good backups
     // - Re-verify compromised components
     // - Alert administrators
@@ -195,7 +212,7 @@ fn perform_self_healing(_paths: &[PathBuf]) {
 // Threat Intelligence Manager
 // ============================================================================
 
-/// ThreatIntelligenceManager - Comprehensive system security monitoring.
+/// ThreatIntelligenceManager - non-production scaffolding for security monitoring.
 ///
 /// Runs continuously to:
 /// - Detect threats in real-time
@@ -407,9 +424,9 @@ pub struct ThreatReport {
     pub threat_level: ThreatLevel,
 }
 
-// Placeholder for threat scanning
+// Non-production scaffolding for future threat scanning.
 fn scan_for_threats() -> Vec<DetectedThreat> {
-    // In production, this would:
+    // Required before production:
     // - Scan filesystem for malware signatures
     // - Monitor network connections
     // - Check process behavior
@@ -417,9 +434,9 @@ fn scan_for_threats() -> Vec<DetectedThreat> {
     Vec::new()
 }
 
-// Placeholder for threat mitigation
+// Non-production scaffolding for future threat mitigation.
 fn mitigate_threat(_threat: &DetectedThreat) {
-    // In production, this would:
+    // Required before production:
     // - Isolate affected systems
     // - Remove malicious files
     // - Block network connections

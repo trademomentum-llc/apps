@@ -16,8 +16,9 @@ pub type MissionId = String;
 pub type TaskId = String;
 
 /// Mission priority level
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum Priority {
     /// Routine priority
     #[default]
@@ -27,7 +28,6 @@ pub enum Priority {
     /// Urgent mission
     Urgent = 2,
 }
-
 
 /// Mission constraints
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

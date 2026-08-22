@@ -1,0 +1,65 @@
+{
+  "manifest_version": "1.0.0",
+  "status": "candidate-canonical-self-host-baseline",
+  "created_utc": "2026-08-22T00:00:00Z",
+  "source_root": "/Users/nnos/Projects/Sovereign/System/apps",
+  "accepted_fixpoint_invariant": "jstar4_sha256 == jstar5_sha256",
+  "notes": [
+    "This manifest records the local candidate canonical JStar self-host baseline.",
+    "It is not a release signature or build attestation by itself.",
+    "Release promotion still requires a clean-tree rebuild, signed manifest, SBOM, build attestation, and reproducible verification."
+  ],
+  "artifacts": {
+    "compiler_source": {
+      "path": "jstar/compiler.jstr",
+      "size_bytes": 212894,
+      "sha256": "1f95ce9f5ef7a6c2d2a67515cda88db843b302c09ddd607ccf869960475dcff6"
+    },
+    "jstar2": {
+      "path": "jstar/jstar2",
+      "size_bytes": 123259,
+      "sha256": "d4619f2370bd5dc0ab554caba99ba2f6c05de9e6b4f5f077806c9675b9a5a0f4",
+      "role": "intermediate self-host stage"
+    },
+    "jstar3": {
+      "path": "jstar/jstar3",
+      "size_bytes": 70925,
+      "sha256": "76dabe3d96b8375dd78c5a7d64f51b12a89bb0cbdbbebc009b8cc724f66b568e",
+      "role": "intermediate self-host stage; differs from final fixpoint"
+    },
+    "jstar4": {
+      "path": "jstar/jstar4",
+      "size_bytes": 70925,
+      "sha256": "d510be40bea44ece8442e66289e39a4f5a89822307316ed80ca84ad969187dc1",
+      "role": "canonical fixpoint stage"
+    },
+    "jstar5": {
+      "path": "jstar/jstar5",
+      "size_bytes": 70925,
+      "sha256": "d510be40bea44ece8442e66289e39a4f5a89822307316ed80ca84ad969187dc1",
+      "role": "canonical fixpoint stage"
+    }
+  },
+  "non_canonical_artifacts": [
+    {
+      "path": "jstar_bootstrap_out",
+      "reason": "invalid stale bootstrap-output lineage; zero-byte jstar3 observed in quarantine"
+    },
+    {
+      "path": "jstar/jstar_c",
+      "reason": "native/C bootstrap helper, not canonical self-host baseline"
+    },
+    {
+      "path": "jstar/jstar_canonical",
+      "reason": "native/C bootstrap helper, not canonical self-host baseline"
+    },
+    {
+      "path": "jstar/jstar_c.c",
+      "reason": "native/C bootstrap source, not canonical self-host baseline"
+    },
+    {
+      "path": "jstar/jstar_canonical.c",
+      "reason": "native/C bootstrap source, not canonical self-host baseline"
+    }
+  ]
+}

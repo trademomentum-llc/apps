@@ -14,7 +14,10 @@ fn test_compile_simple_math_aarch64() {
     let source = include_str!("data/simple_math.jstr");
     let program = compile_to_ir(source).unwrap();
     let code = codegen::generate(Arch::Aarch64, &program).unwrap();
-    assert!(!code.text.is_empty(), "AArch64 backend produced no machine code");
+    assert!(
+        !code.text.is_empty(),
+        "AArch64 backend produced no machine code"
+    );
 }
 
 #[test]
