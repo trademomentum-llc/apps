@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import time
 import tomllib
@@ -323,7 +324,8 @@ def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
         if run.returncode != 0:
             return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"{stage_out.name} generation failed:\n{run.stderr.decode('utf-8', errors='replace')}")
         stage_out.write_bytes(run.stdout)
-        os.chmod(stage_out, 0o755)
+        # The generated compiler must be executable, but only by its owner.
+        os.chmod(stage_out, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
     # Byte-identical check
     s1 = stage1.read_bytes()
