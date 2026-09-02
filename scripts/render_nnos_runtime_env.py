@@ -45,7 +45,7 @@ def main() -> int:
     print("# Non-secret NNOS runtime environment generated from validated identity and firewall manifests.")
     print("# Inject NNOS_SYNC_KEY and NNOS_NINL_AUTH_KEY from protected storage at deploy time.")
     print(f"# sync.aead_key_ref={sync['aead_key_ref']['provider']}:{sync['aead_key_ref']['id']}")
-    print(f"# ninl.auth_key_ref={ninl['auth_key_ref']['provider']}:{ninl['auth_key_ref']['id']}")
+    print("# ninl.auth_key_ref=[redacted]")
     print(f"NNOS_SYNC_NODE_ID={local_node['node_id']}")
     print(f"NNOS_SYNC_IFADDR={sync['bind_address']}")
     print(f"NNOS_SYNC_ALLOWED_PEERS={csv(sync['allowed_peer_node_ids'])}")
