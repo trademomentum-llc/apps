@@ -13,7 +13,6 @@ import argparse
 import datetime as dt
 import hashlib
 import json
-import os
 import stat
 import subprocess
 import sys
