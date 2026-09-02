@@ -549,9 +549,10 @@ impl MemorySystem {
 
         // Load long-term memory from disk if path provided
         if let Some(path) = long_term_path
-            && path.exists() {
-                memory.long_term = LongTermMemory::load_from_path(path)?;
-            }
+            && path.exists()
+        {
+            memory.long_term = LongTermMemory::load_from_path(path)?;
+        }
 
         Ok(memory)
     }

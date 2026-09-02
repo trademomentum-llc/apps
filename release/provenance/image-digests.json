@@ -1,0 +1,12 @@
+{
+  "created_at": "2026-08-22T20:58:13Z",
+  "images": [
+    {
+      "digest": "sha256:03122d8cfaede9ec6cd8e4dbca680e6ad5db09c4cc5eb0180de89de704e48a3c",
+      "digest_kind": "docker-image-id-or-repo-digest",
+      "name": "nnos-daemon",
+      "ref": "localhost/nnos-daemon:release-20260822-0639bcd659c4"
+    }
+  ],
+  "schema_version": "nnos.image-digests.v1"
+}

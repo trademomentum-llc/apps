@@ -11,6 +11,13 @@ use crate::rr::mission::*;
 use crate::types::MorphResult;
 use serde::{Deserialize, Serialize};
 
+fn allow_unsigned_rr_orders() -> bool {
+    matches!(
+        std::env::var("MORPHLEX_RR_ALLOW_UNSIGNED_ORDERS").as_deref(),
+        Ok("1" | "true" | "yes")
+    )
+}
+
 /// Unique agent identifier
 pub type AgentId = String;
 
@@ -287,13 +294,20 @@ impl RRAgentBase {
 
     /// Default implementation for receiving an order
     pub fn base_receive_order(&mut self, order: &crate::rr::comms::Order) -> MorphResult<()> {
-        // Validate chain of command (simplified - in production would verify signature)
+        if !allow_unsigned_rr_orders() {
+            return Err(crate::MorphlexError::DatabaseError(
+                "Unsigned RR orders are disabled by default; provide a signed command envelope or set MORPHLEX_RR_ALLOW_UNSIGNED_ORDERS=1 only for audited local development".to_string(),
+            ));
+        }
+
+        // Validate chain of command after explicit local-development unsigned-order opt-in.
         if let Some(cmdr) = &self.commander
-            && &order.header.from != cmdr {
-                return Err(crate::MorphlexError::DatabaseError(
-                    "Order received from non-commanding officer".to_string(),
-                ));
-            }
+            && &order.header.from != cmdr
+        {
+            return Err(crate::MorphlexError::DatabaseError(
+                "Order received from non-commanding officer".to_string(),
+            ));
+        }
 
         // Store order in short-term memory
         self.memory.add_short_term(

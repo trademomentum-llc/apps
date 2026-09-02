@@ -6,9 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CHECK_SCRIPT="${SCRIPT_DIR}/jstar_bootstrap_check.sh"
 TRACE_SCRIPT="${SCRIPT_DIR}/jstar_bootstrap_trace.sh"
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/home/llc/.cache/jstar-target}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT_DIR}/target/jstar-bootstrap}"
 RUN_FIXPOINT="${RUN_FIXPOINT:-0}"
-RUN_TRACE="${RUN_TRACE:-1}"
+RUN_TRACE="${RUN_TRACE:-0}"
 
 log() {
   printf '[jstar-bootstrap-linux] %s\n' "$1"
@@ -77,10 +77,14 @@ if [ "${RUN_FIXPOINT}" = "1" ]; then
   log "running fixpoint test"
   CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" cargo test test_t_diagram_fixpoint -- --ignored --nocapture
 else
-  log "skipping fixpoint test (RUN_FIXPOINT=${RUN_FIXPOINT})"
+  log "canonical fixpoint check completed by preflight (RUN_FIXPOINT=${RUN_FIXPOINT})"
 fi
 
 if [ "${RUN_TRACE}" = "1" ]; then
+  if [ "${ALLOW_FORENSIC_BOOTSTRAP_REBUILD:-0}" != "1" ]; then
+    log "refusing trace: set ALLOW_FORENSIC_BOOTSTRAP_REBUILD=1 and JSTAR_BOOTSTRAP_OUT_DIR to a quarantine path"
+    exit 1
+  fi
   log "running stage trace"
   CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" \
     JSTAR_COMPILER_SRC="${SOURCE_COMPILER_SRC}" \

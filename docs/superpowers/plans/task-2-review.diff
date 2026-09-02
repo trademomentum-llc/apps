@@ -1,0 +1,120 @@
+diff --git a/scripts/jasterish_regression.py b/scripts/jasterish_regression.py
+index 0fe79bb..62ebc33 100644
+--- a/scripts/jasterish_regression.py
++++ b/scripts/jasterish_regression.py
+@@ -1,12 +1,13 @@
+ from __future__ import annotations
+ 
++import re
+ import tomllib
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+ 
+ @dataclass
+ class Case:
+     root: Path
+     name: str
+     kind: str
+@@ -34,10 +35,45 @@ def discover_cases(root: Path) -> list[Case]:
+             Case(
+                 root=entry,
+                 name=data.get("name", entry.name),
+                 kind=data["kind"],
+                 archs=data.get("archs", ["x86_64"]),
+                 timeout=data.get("timeout", 30),
+                 compare=data.get("compare", "exact"),
+             )
+         )
+     return cases
++
++
++def _normalize_trailing_newlines(text: str) -> str:
++    return text.rstrip("\n") + "\n" if text else text
++
++
++def compare_output(actual: str, golden_path: Path, mode: str) -> tuple[bool, str]:
++    if not golden_path.exists():
++        return False, f"missing golden file: {golden_path}"
++
++    golden = golden_path.read_text()
++
++    if mode == "exact":
++        if _normalize_trailing_newlines(actual) == _normalize_trailing_newlines(golden):
++            return True, ""
++        return False, f"output mismatch:\n--- expected ---\n{golden}\n--- actual ---\n{actual}"
++
++    if mode == "contains":
++        missing = [line for line in golden.splitlines() if line and line not in actual]
++        if not missing:
++            return True, ""
++        return False, f"missing fragments: {missing}"
++
++    if mode == "regex":
++        missing = []
++        for line in golden.splitlines():
++            if not line:
++                continue
++            if not re.search(line, actual):
++                missing.append(line)
++        if not missing:
++            return True, ""
++        return False, f"unmatched regexes: {missing}"
++
++    return False, f"unknown compare mode: {mode}"
+diff --git a/tests/test_regression_lib.py b/tests/test_regression_lib.py
+index abda7f1..7ba724a 100644
+--- a/tests/test_regression_lib.py
++++ b/tests/test_regression_lib.py
+@@ -1,16 +1,50 @@
+ from pathlib import Path
+ import tempfile
+ 
+-from scripts.jasterish_regression import discover_cases
++from scripts.jasterish_regression import compare_output, discover_cases
+ 
+ 
+ def test_discover_cases_finds_test_toml():
+     with tempfile.TemporaryDirectory() as tmp:
+         root = Path(tmp)
+         case_dir = root / "print-literal"
+         case_dir.mkdir()
+         (case_dir / "test.toml").write_text('name = "print-literal"\nkind = "compiler"\n')
+         (case_dir / "main.jstr").write_text('print 42')
+         cases = discover_cases(root)
+         assert len(cases) == 1
+         assert cases[0].name == "print-literal"
++
++
++def test_compare_exact_pass():
++    with tempfile.TemporaryDirectory() as tmp:
++        golden = Path(tmp) / "expected.x86_64"
++        golden.write_text("hello\n")
++        ok, detail = compare_output("hello\n", golden, "exact")
++        assert ok is True
++        assert detail == ""
++
++
++def test_compare_exact_fail():
++    with tempfile.TemporaryDirectory() as tmp:
++        golden = Path(tmp) / "expected.x86_64"
++        golden.write_text("hello\n")
++        ok, detail = compare_output("world\n", golden, "exact")
++        assert ok is False
++        assert "mismatch" in detail.lower()
++
++
++def test_compare_contains_pass():
++    with tempfile.TemporaryDirectory() as tmp:
++        golden = Path(tmp) / "expected.x86_64"
++        golden.write_text("BOOT\nJMK>\n")
++        ok, detail = compare_output("BOOT\nJMK> prompt\n", golden, "contains")
++        assert ok is True
++
++
++def test_compare_regex_pass():
++    with tempfile.TemporaryDirectory() as tmp:
++        golden = Path(tmp) / "expected.x86_64"
++        golden.write_text(r"^JMK>\s*$")
++        ok, detail = compare_output("JMK> \n", golden, "regex")
++        assert ok is True

@@ -1,0 +1,15 @@
+{
+  "name": "morphlex-security-harness",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Repo-local security and AI red-team harness for Morphlex/Sovereign apps.",
+  "scripts": {
+    "promptfoo:version": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_CACHE_PATH=.promptfoo/cache PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 PROMPTFOO_DISABLE_SHARING=1 promptfoo --version",
+    "redteam:generate": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_CACHE_PATH=.promptfoo/cache PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 PROMPTFOO_DISABLE_SHARING=1 promptfoo redteam generate -c security/promptfoo/promptfooconfig.yaml",
+    "redteam:run": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_CACHE_PATH=.promptfoo/cache PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 PROMPTFOO_DISABLE_SHARING=1 promptfoo redteam run -c security/promptfoo/promptfooconfig.yaml",
+    "redteam:eval": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_CACHE_PATH=.promptfoo/cache PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 PROMPTFOO_DISABLE_SHARING=1 promptfoo eval -c security/promptfoo/promptfooconfig.yaml"
+  },
+  "devDependencies": {
+    "promptfoo": "0.122.0"
+  }
+}

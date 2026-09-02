@@ -5,8 +5,8 @@
 //!   2. Copy Propagation  -- propagate Imm values through Copy instructions
 //!   3. Dead Code Elimination -- remove Nop and unused instructions
 
-use std::collections::HashSet;
 use super::ir::*;
+use std::collections::HashSet;
 
 /// Run all optimization passes on the IR program (mutates in place).
 pub fn optimize(program: &mut IrProgram) {
@@ -28,7 +28,13 @@ pub fn optimize_function(func: &mut IrFunction) {
 fn constant_fold(block: &mut BasicBlock) {
     for inst in &mut block.instructions {
         let folded = match inst {
-            IrInst::BinOp { dest, op, lhs: IrValue::Imm(l), rhs: IrValue::Imm(r), ty } => {
+            IrInst::BinOp {
+                dest,
+                op,
+                lhs: IrValue::Imm(l),
+                rhs: IrValue::Imm(r),
+                ty,
+            } => {
                 let l = *l;
                 let r = *r;
                 let result = match op {
@@ -46,7 +52,7 @@ fn constant_fold(block: &mut BasicBlock) {
                         _ => Some(l.wrapping_rem(r)),
                     },
                     IrBinOp::And => Some(l & r),
-                    IrBinOp::Or  => Some(l | r),
+                    IrBinOp::Or => Some(l | r),
                     IrBinOp::Xor => Some(l ^ r),
                     IrBinOp::Shl => Some(l.wrapping_shl(r as u32)),
                     IrBinOp::Shr => Some(l.wrapping_shr(r as u32)),
@@ -75,7 +81,12 @@ fn copy_propagate(block: &mut BasicBlock) {
             imm_map.remove(&dest);
         }
 
-        if let IrInst::Copy { dest, src: IrValue::Imm(n), .. } = inst {
+        if let IrInst::Copy {
+            dest,
+            src: IrValue::Imm(n),
+            ..
+        } = inst
+        {
             imm_map.insert(*dest, *n);
         }
     }
@@ -83,69 +94,156 @@ fn copy_propagate(block: &mut BasicBlock) {
 }
 
 fn replace_values_in_inst(inst: &mut IrInst, map: &std::collections::HashMap<VReg, i64>) {
-    if map.is_empty() { return; }
+    if map.is_empty() {
+        return;
+    }
     match inst {
-        IrInst::BinOp { lhs, rhs, .. } => { replace_value(lhs, map); replace_value(rhs, map); }
-        IrInst::UnaryOp { src, .. } => { replace_value(src, map); }
-        IrInst::Copy { src, .. } => { replace_value(src, map); }
-        IrInst::Store { addr, value, .. } => { replace_value(addr, map); replace_value(value, map); }
-        IrInst::Load { addr, .. } => { replace_value(addr, map); }
-        IrInst::Call { args, .. } => { for arg in args { replace_value(arg, map); } }
-        IrInst::Syscall { number, args, .. } => { replace_value(number, map); for arg in args { replace_value(arg, map); } }
-        IrInst::Compare { lhs, rhs, .. } => { replace_value(lhs, map); replace_value(rhs, map); }
-        IrInst::Print { value } => { replace_value(value, map); }
-        IrInst::ArrayLoad { base, index, .. } => { replace_value(base, map); replace_value(index, map); }
-        IrInst::ArrayStore { base, index, value } => { replace_value(base, map); replace_value(index, map); replace_value(value, map); }
-        IrInst::StoreIndexed { index, value, .. } => { replace_value(index, map); replace_value(value, map); }
-        IrInst::LoadIndexed { index, .. } => { replace_value(index, map); }
-        IrInst::HashOp { addr, len, .. } => { replace_value(addr, map); replace_value(len, map); }
-        IrInst::FileRead { fd, buf, len, .. } => { replace_value(fd, map); replace_value(buf, map); replace_value(len, map); }
-        IrInst::FileClose { fd } => { replace_value(fd, map); }
-        IrInst::StrCmp { a, b, len, .. } => { replace_value(a, map); replace_value(b, map); replace_value(len, map); }
-        IrInst::StrLen { addr, .. } => { replace_value(addr, map); }
-        IrInst::StrCopy { dst, src, len } => { replace_value(dst, map); replace_value(src, map); replace_value(len, map); }
-        IrInst::AddressOf { .. } | IrInst::Alloca { .. } | IrInst::PrintStr { .. } | IrInst::ArrayAlloc { .. } | IrInst::FileOpen { .. } | IrInst::ArrayLength { .. } | IrInst::Nop => {}
+        IrInst::BinOp { lhs, rhs, .. } => {
+            replace_value(lhs, map);
+            replace_value(rhs, map);
+        }
+        IrInst::UnaryOp { src, .. } => {
+            replace_value(src, map);
+        }
+        IrInst::Copy { src, .. } => {
+            replace_value(src, map);
+        }
+        IrInst::Store { addr, value, .. } => {
+            replace_value(addr, map);
+            replace_value(value, map);
+        }
+        IrInst::Load { addr, .. } => {
+            replace_value(addr, map);
+        }
+        IrInst::Call { args, .. } => {
+            for arg in args {
+                replace_value(arg, map);
+            }
+        }
+        IrInst::Syscall { number, args, .. } => {
+            replace_value(number, map);
+            for arg in args {
+                replace_value(arg, map);
+            }
+        }
+        IrInst::Compare { lhs, rhs, .. } => {
+            replace_value(lhs, map);
+            replace_value(rhs, map);
+        }
+        IrInst::Print { value } => {
+            replace_value(value, map);
+        }
+        IrInst::ArrayLoad { base, index, .. } => {
+            replace_value(base, map);
+            replace_value(index, map);
+        }
+        IrInst::ArrayStore { base, index, value } => {
+            replace_value(base, map);
+            replace_value(index, map);
+            replace_value(value, map);
+        }
+        IrInst::StoreIndexed { index, value, .. } => {
+            replace_value(index, map);
+            replace_value(value, map);
+        }
+        IrInst::LoadIndexed { index, .. } => {
+            replace_value(index, map);
+        }
+        IrInst::HashOp { addr, len, .. } => {
+            replace_value(addr, map);
+            replace_value(len, map);
+        }
+        IrInst::FileRead { fd, buf, len, .. } => {
+            replace_value(fd, map);
+            replace_value(buf, map);
+            replace_value(len, map);
+        }
+        IrInst::FileClose { fd } => {
+            replace_value(fd, map);
+        }
+        IrInst::StrCmp { a, b, len, .. } => {
+            replace_value(a, map);
+            replace_value(b, map);
+            replace_value(len, map);
+        }
+        IrInst::StrLen { addr, .. } => {
+            replace_value(addr, map);
+        }
+        IrInst::StrCopy { dst, src, len } => {
+            replace_value(dst, map);
+            replace_value(src, map);
+            replace_value(len, map);
+        }
+        IrInst::PhysicalStore { value, .. } => {
+            replace_value(value, map);
+        }
+        IrInst::AddressOf { .. }
+        | IrInst::FunctionAddress { .. }
+        | IrInst::Alloca { .. }
+        | IrInst::InlineAssembly { .. }
+        | IrInst::PhysicalLoad { .. }
+        | IrInst::PrintStr { .. }
+        | IrInst::ArrayAlloc { .. }
+        | IrInst::FileOpen { .. }
+        | IrInst::ArrayLength { .. }
+        | IrInst::Nop => {}
     }
 }
 
 fn replace_values_in_terminator(term: &mut Terminator, map: &std::collections::HashMap<VReg, i64>) {
     match term {
-        Terminator::Return(Some(val)) => { replace_value(val, map); }
-        Terminator::Halt(val) => { replace_value(val, map); }
-        Terminator::Return(None) | Terminator::Jump(_) | Terminator::Branch { .. } | Terminator::Unreachable => {}
+        Terminator::Return(Some(val)) => {
+            replace_value(val, map);
+        }
+        Terminator::Halt(val) => {
+            replace_value(val, map);
+        }
+        Terminator::Return(None)
+        | Terminator::Jump(_)
+        | Terminator::Branch { .. }
+        | Terminator::Unreachable => {}
     }
 }
 
 fn replace_value(val: &mut IrValue, map: &std::collections::HashMap<VReg, i64>) {
-    if let IrValue::Reg(r) = val && let Some(&imm) = map.get(r) { *val = IrValue::Imm(imm); }
+    if let IrValue::Reg(r) = val
+        && let Some(&imm) = map.get(r)
+    {
+        *val = IrValue::Imm(imm);
+    }
 }
 
 fn dead_code_eliminate(func: &mut IrFunction) {
+    // Parameter allocas anchor the function's incoming-argument stores in
+    // codegen; they must survive even when the parameter is never read.
+    let param_vregs = func.param_vregs.clone();
     loop {
         let used = collect_used_vregs(func);
         let mut changed = false;
 
         for block in &mut func.blocks {
             let before_len = block.instructions.len();
-            block.instructions.retain(|inst| {
-                match inst {
-                    IrInst::Nop => false,
-                    IrInst::Store { .. }
-                    | IrInst::StoreIndexed { .. }
-                    | IrInst::Call { .. }
-                    | IrInst::Syscall { .. }
-                    | IrInst::Print { .. }
-                    | IrInst::PrintStr { .. }
-                    | IrInst::ArrayStore { .. }
-                    | IrInst::FileOpen { .. }
-                    | IrInst::FileRead { .. }
-                    | IrInst::FileClose { .. }
-                    | IrInst::StrCopy { .. } => true,
-                    _ => match inst_dest(inst) {
-                        Some(dest) => used.contains(&dest),
-                        None => true,
-                    },
-                }
+            block.instructions.retain(|inst| match inst {
+                IrInst::Nop => false,
+                IrInst::Alloca { dest, .. } if param_vregs.contains(dest) => true,
+                IrInst::Store { .. }
+                | IrInst::StoreIndexed { .. }
+                | IrInst::PhysicalStore { .. }
+                | IrInst::PhysicalLoad { .. }
+                | IrInst::InlineAssembly { .. }
+                | IrInst::Call { .. }
+                | IrInst::Syscall { .. }
+                | IrInst::Print { .. }
+                | IrInst::PrintStr { .. }
+                | IrInst::ArrayStore { .. }
+                | IrInst::FileOpen { .. }
+                | IrInst::FileRead { .. }
+                | IrInst::FileClose { .. }
+                | IrInst::StrCopy { .. } => true,
+                _ => match inst_dest(inst) {
+                    Some(dest) => used.contains(&dest),
+                    None => true,
+                },
             });
 
             if block.instructions.len() != before_len {
@@ -161,15 +259,45 @@ fn dead_code_eliminate(func: &mut IrFunction) {
 
 fn inst_dest(inst: &IrInst) -> Option<VReg> {
     match inst {
-        IrInst::BinOp { dest, .. } | IrInst::UnaryOp { dest, .. } | IrInst::Copy { dest, .. } | IrInst::Load { dest, .. } | IrInst::AddressOf { dest, .. } | IrInst::Call { dest, .. } | IrInst::Syscall { dest, .. } | IrInst::Alloca { dest, .. } | IrInst::Compare { dest, .. } | IrInst::ArrayAlloc { dest, .. } | IrInst::ArrayLoad { dest, .. } | IrInst::LoadIndexed { dest, .. } | IrInst::HashOp { dest, .. } | IrInst::FileOpen { dest, .. } | IrInst::FileRead { dest, .. } | IrInst::ArrayLength { dest, .. } | IrInst::StrCmp { dest, .. } | IrInst::StrLen { dest, .. } => Some(*dest),
-        IrInst::Store { .. } | IrInst::StoreIndexed { .. } | IrInst::Print { .. } | IrInst::PrintStr { .. } | IrInst::ArrayStore { .. } | IrInst::FileClose { .. } | IrInst::StrCopy { .. } | IrInst::Nop => None,
+        IrInst::BinOp { dest, .. }
+        | IrInst::UnaryOp { dest, .. }
+        | IrInst::Copy { dest, .. }
+        | IrInst::Load { dest, .. }
+        | IrInst::AddressOf { dest, .. }
+        | IrInst::FunctionAddress { dest, .. }
+        | IrInst::Call { dest, .. }
+        | IrInst::Syscall { dest, .. }
+        | IrInst::Alloca { dest, .. }
+        | IrInst::Compare { dest, .. }
+        | IrInst::ArrayAlloc { dest, .. }
+        | IrInst::ArrayLoad { dest, .. }
+        | IrInst::LoadIndexed { dest, .. }
+        | IrInst::HashOp { dest, .. }
+        | IrInst::FileOpen { dest, .. }
+        | IrInst::FileRead { dest, .. }
+        | IrInst::ArrayLength { dest, .. }
+        | IrInst::StrCmp { dest, .. }
+        | IrInst::PhysicalLoad { dest, .. }
+        | IrInst::StrLen { dest, .. } => Some(*dest),
+        IrInst::Store { .. }
+        | IrInst::StoreIndexed { .. }
+        | IrInst::PhysicalStore { .. }
+        | IrInst::InlineAssembly { .. }
+        | IrInst::Print { .. }
+        | IrInst::PrintStr { .. }
+        | IrInst::ArrayStore { .. }
+        | IrInst::FileClose { .. }
+        | IrInst::StrCopy { .. }
+        | IrInst::Nop => None,
     }
 }
 
 fn collect_used_vregs(func: &IrFunction) -> HashSet<VReg> {
     let mut used = HashSet::new();
     for block in &func.blocks {
-        for inst in &block.instructions { collect_values_in_inst(inst, &mut used); }
+        for inst in &block.instructions {
+            collect_values_in_inst(inst, &mut used);
+        }
         collect_values_in_terminator(&block.terminator, &mut used);
     }
     used
@@ -177,27 +305,101 @@ fn collect_used_vregs(func: &IrFunction) -> HashSet<VReg> {
 
 fn collect_values_in_inst(inst: &IrInst, used: &mut HashSet<VReg>) {
     match inst {
-        IrInst::BinOp { lhs, rhs, .. } => { collect_vreg(lhs, used); collect_vreg(rhs, used); }
-        IrInst::UnaryOp { src, .. } => { collect_vreg(src, used); }
-        IrInst::Copy { src, .. } => { collect_vreg(src, used); }
-        IrInst::Store { addr, value, .. } => { collect_vreg(addr, used); collect_vreg(value, used); }
-        IrInst::Load { addr, .. } => { collect_vreg(addr, used); }
-        IrInst::AddressOf { src, .. } => { used.insert(*src); }
-        IrInst::Call { args, .. } => { for arg in args { collect_vreg(arg, used); } }
-        IrInst::Syscall { number, args, .. } => { collect_vreg(number, used); for arg in args { collect_vreg(arg, used); } }
-        IrInst::Compare { lhs, rhs, .. } => { collect_vreg(lhs, used); collect_vreg(rhs, used); }
-        IrInst::Print { value } => { collect_vreg(value, used); }
-        IrInst::ArrayLoad { base, index, .. } => { collect_vreg(base, used); collect_vreg(index, used); }
-        IrInst::ArrayStore { base, index, value } => { collect_vreg(base, used); collect_vreg(index, used); collect_vreg(value, used); }
-        IrInst::StoreIndexed { base, index, value, .. } => { used.insert(*base); collect_vreg(index, used); collect_vreg(value, used); }
-        IrInst::LoadIndexed { base, index, .. } => { used.insert(*base); collect_vreg(index, used); }
-        IrInst::HashOp { addr, len, .. } => { collect_vreg(addr, used); collect_vreg(len, used); }
-        IrInst::FileRead { fd, buf, len, .. } => { collect_vreg(fd, used); collect_vreg(buf, used); collect_vreg(len, used); }
-        IrInst::FileClose { fd } => { collect_vreg(fd, used); }
-        IrInst::StrCmp { a, b, len, .. } => { collect_vreg(a, used); collect_vreg(b, used); collect_vreg(len, used); }
-        IrInst::StrLen { addr, .. } => { collect_vreg(addr, used); }
-        IrInst::StrCopy { dst, src, len } => { collect_vreg(dst, used); collect_vreg(src, used); collect_vreg(len, used); }
-        IrInst::Alloca { .. } | IrInst::PrintStr { .. } | IrInst::ArrayAlloc { .. } | IrInst::FileOpen { .. } | IrInst::ArrayLength { .. } | IrInst::Nop => {}
+        IrInst::BinOp { lhs, rhs, .. } => {
+            collect_vreg(lhs, used);
+            collect_vreg(rhs, used);
+        }
+        IrInst::UnaryOp { src, .. } => {
+            collect_vreg(src, used);
+        }
+        IrInst::Copy { src, .. } => {
+            collect_vreg(src, used);
+        }
+        IrInst::Store { addr, value, .. } => {
+            collect_vreg(addr, used);
+            collect_vreg(value, used);
+        }
+        IrInst::Load { addr, .. } => {
+            collect_vreg(addr, used);
+        }
+        IrInst::AddressOf { src, .. } => {
+            used.insert(*src);
+        }
+        IrInst::FunctionAddress { .. } => {}
+        IrInst::Call { args, .. } => {
+            for arg in args {
+                collect_vreg(arg, used);
+            }
+        }
+        IrInst::Syscall { number, args, .. } => {
+            collect_vreg(number, used);
+            for arg in args {
+                collect_vreg(arg, used);
+            }
+        }
+        IrInst::Compare { lhs, rhs, .. } => {
+            collect_vreg(lhs, used);
+            collect_vreg(rhs, used);
+        }
+        IrInst::Print { value } => {
+            collect_vreg(value, used);
+        }
+        IrInst::ArrayLoad { base, index, .. } => {
+            collect_vreg(base, used);
+            collect_vreg(index, used);
+        }
+        IrInst::ArrayStore { base, index, value } => {
+            collect_vreg(base, used);
+            collect_vreg(index, used);
+            collect_vreg(value, used);
+        }
+        IrInst::StoreIndexed {
+            base, index, value, ..
+        } => {
+            used.insert(*base);
+            collect_vreg(index, used);
+            collect_vreg(value, used);
+        }
+        IrInst::LoadIndexed { base, index, .. } => {
+            used.insert(*base);
+            collect_vreg(index, used);
+        }
+        IrInst::HashOp { addr, len, .. } => {
+            collect_vreg(addr, used);
+            collect_vreg(len, used);
+        }
+        IrInst::FileRead { fd, buf, len, .. } => {
+            collect_vreg(fd, used);
+            collect_vreg(buf, used);
+            collect_vreg(len, used);
+        }
+        IrInst::FileClose { fd } => {
+            collect_vreg(fd, used);
+        }
+        IrInst::StrCmp { a, b, len, .. } => {
+            collect_vreg(a, used);
+            collect_vreg(b, used);
+            collect_vreg(len, used);
+        }
+        IrInst::StrLen { addr, .. } => {
+            collect_vreg(addr, used);
+        }
+        IrInst::StrCopy { dst, src, len } => {
+            collect_vreg(dst, used);
+            collect_vreg(src, used);
+            collect_vreg(len, used);
+        }
+        IrInst::PhysicalStore { value, .. } => {
+            collect_vreg(value, used);
+        }
+        IrInst::Alloca { .. }
+        | IrInst::InlineAssembly { .. }
+        | IrInst::PhysicalLoad { .. }
+        | IrInst::PrintStr { .. }
+        | IrInst::ArrayAlloc { .. }
+        | IrInst::FileOpen { .. }
+        | IrInst::ArrayLength { .. }
+        | IrInst::Nop => {}
     }
 }
 
@@ -205,13 +407,17 @@ fn collect_values_in_terminator(term: &Terminator, used: &mut HashSet<VReg>) {
     match term {
         Terminator::Return(Some(val)) => collect_vreg(val, used),
         Terminator::Halt(val) => collect_vreg(val, used),
-        Terminator::Branch { cond, .. } => { used.insert(*cond); }
+        Terminator::Branch { cond, .. } => {
+            used.insert(*cond);
+        }
         Terminator::Return(None) | Terminator::Jump(_) | Terminator::Unreachable => {}
     }
 }
 
 fn collect_vreg(val: &IrValue, used: &mut HashSet<VReg>) {
-    if let IrValue::Reg(r) = val { used.insert(*r); }
+    if let IrValue::Reg(r) = val {
+        used.insert(*r);
+    }
 }
 
 #[cfg(test)]
@@ -246,21 +452,32 @@ mod tests {
         let mut program = make_program(
             vec![
                 IrInst::Nop,
-                IrInst::Print { value: IrValue::Imm(42) },
+                IrInst::Print {
+                    value: IrValue::Imm(42),
+                },
                 IrInst::Nop,
             ],
             Terminator::Return(None),
         );
         optimize(&mut program);
         let insts = &program.functions[0].blocks[0].instructions;
-        assert!(insts.iter().all(|i| !matches!(i, IrInst::Nop)), "Nop instructions should be removed");
+        assert!(
+            insts.iter().all(|i| !matches!(i, IrInst::Nop)),
+            "Nop instructions should be removed"
+        );
         assert_eq!(insts.len(), 1, "Only the Print should remain");
     }
 
     #[test]
     fn test_constant_folding_add() {
         let mut program = make_program(
-            vec![IrInst::BinOp { dest: 0, op: IrBinOp::Add, lhs: IrValue::Imm(3), rhs: IrValue::Imm(4), ty: JStarType::Long }],
+            vec![IrInst::BinOp {
+                dest: 0,
+                op: IrBinOp::Add,
+                lhs: IrValue::Imm(3),
+                rhs: IrValue::Imm(4),
+                ty: JStarType::Long,
+            }],
             Terminator::Return(Some(IrValue::Reg(0))),
         );
         optimize(&mut program);
@@ -273,22 +490,41 @@ mod tests {
     #[test]
     fn test_constant_folding_all_ops() {
         let cases: Vec<(IrBinOp, i64, i64, i64)> = vec![
-            (IrBinOp::Add, 10, 20, 30), (IrBinOp::Sub, 20, 7, 13), (IrBinOp::Mul, 3, 5, 15),
-            (IrBinOp::Div, 20, 4, 5), (IrBinOp::Mod, 17, 5, 2),
-            (IrBinOp::And, 0xFF, 0x0F, 0x0F), (IrBinOp::Or, 0xF0, 0x0F, 0xFF),
-            (IrBinOp::Xor, 0xFF, 0xFF, 0), (IrBinOp::Shl, 1, 4, 16), (IrBinOp::Shr, 16, 4, 1),
+            (IrBinOp::Add, 10, 20, 30),
+            (IrBinOp::Sub, 20, 7, 13),
+            (IrBinOp::Mul, 3, 5, 15),
+            (IrBinOp::Div, 20, 4, 5),
+            (IrBinOp::Mod, 17, 5, 2),
+            (IrBinOp::And, 0xFF, 0x0F, 0x0F),
+            (IrBinOp::Or, 0xF0, 0x0F, 0xFF),
+            (IrBinOp::Xor, 0xFF, 0xFF, 0),
+            (IrBinOp::Shl, 1, 4, 16),
+            (IrBinOp::Shr, 16, 4, 1),
         ];
         for (op, l, r, expected) in cases {
             let mut program = make_program(
-                vec![IrInst::BinOp { dest: 0, op, lhs: IrValue::Imm(l), rhs: IrValue::Imm(r), ty: JStarType::Long }],
+                vec![IrInst::BinOp {
+                    dest: 0,
+                    op,
+                    lhs: IrValue::Imm(l),
+                    rhs: IrValue::Imm(r),
+                    ty: JStarType::Long,
+                }],
                 Terminator::Return(Some(IrValue::Reg(0))),
             );
             optimize(&mut program);
             match &program.functions[0].blocks[0].terminator {
                 Terminator::Return(Some(IrValue::Imm(val))) => {
-                    assert_eq!(*val, expected, "Failed for {:?}: {} op {} = {}, got {}", op, l, r, expected, val);
+                    assert_eq!(
+                        *val, expected,
+                        "Failed for {:?}: {} op {} = {}, got {}",
+                        op, l, r, expected, val
+                    );
                 }
-                other => panic!("Expected Return(Imm({})) for {:?}, got {:?}", expected, op, other),
+                other => panic!(
+                    "Expected Return(Imm({})) for {:?}, got {:?}",
+                    expected, op, other
+                ),
             }
         }
     }
@@ -296,19 +532,41 @@ mod tests {
     #[test]
     fn test_constant_folding_div_by_zero_preserved() {
         let mut program = make_program(
-            vec![IrInst::BinOp { dest: 0, op: IrBinOp::Div, lhs: IrValue::Imm(10), rhs: IrValue::Imm(0), ty: JStarType::Long }],
+            vec![IrInst::BinOp {
+                dest: 0,
+                op: IrBinOp::Div,
+                lhs: IrValue::Imm(10),
+                rhs: IrValue::Imm(0),
+                ty: JStarType::Long,
+            }],
             Terminator::Return(Some(IrValue::Reg(0))),
         );
         optimize(&mut program);
-        assert!(matches!(&program.functions[0].blocks[0].instructions[0], IrInst::BinOp { .. }), "Div by zero should NOT be folded");
+        assert!(
+            matches!(
+                &program.functions[0].blocks[0].instructions[0],
+                IrInst::BinOp { .. }
+            ),
+            "Div by zero should NOT be folded"
+        );
     }
 
     #[test]
     fn test_copy_propagation() {
         let mut program = make_program(
             vec![
-                IrInst::Copy { dest: 0, src: IrValue::Imm(42), ty: JStarType::Long },
-                IrInst::BinOp { dest: 1, op: IrBinOp::Add, lhs: IrValue::Reg(0), rhs: IrValue::Imm(8), ty: JStarType::Long },
+                IrInst::Copy {
+                    dest: 0,
+                    src: IrValue::Imm(42),
+                    ty: JStarType::Long,
+                },
+                IrInst::BinOp {
+                    dest: 1,
+                    op: IrBinOp::Add,
+                    lhs: IrValue::Reg(0),
+                    rhs: IrValue::Imm(8),
+                    ty: JStarType::Long,
+                },
             ],
             Terminator::Return(Some(IrValue::Reg(1))),
         );
@@ -323,8 +581,16 @@ mod tests {
     fn test_dead_code_elimination_unused_dest() {
         let mut program = make_program(
             vec![
-                IrInst::Copy { dest: 0, src: IrValue::Imm(99), ty: JStarType::Long },
-                IrInst::Copy { dest: 1, src: IrValue::Imm(1), ty: JStarType::Long },
+                IrInst::Copy {
+                    dest: 0,
+                    src: IrValue::Imm(99),
+                    ty: JStarType::Long,
+                },
+                IrInst::Copy {
+                    dest: 1,
+                    src: IrValue::Imm(1),
+                    ty: JStarType::Long,
+                },
             ],
             Terminator::Return(Some(IrValue::Reg(1))),
         );
@@ -334,19 +600,32 @@ mod tests {
             other => panic!("Expected Return(Imm(1)), got {:?}", other),
         }
         let insts = &program.functions[0].blocks[0].instructions;
-        assert!(insts.is_empty(), "All instructions should be eliminated after propagation");
+        assert!(
+            insts.is_empty(),
+            "All instructions should be eliminated after propagation"
+        );
     }
 
     #[test]
     fn test_side_effects_not_eliminated() {
         let mut program = make_program(
             vec![
-                IrInst::Print { value: IrValue::Imm(42) },
-                IrInst::Store { addr: IrValue::Imm(0), value: IrValue::Imm(1), ty: JStarType::Long },
+                IrInst::Print {
+                    value: IrValue::Imm(42),
+                },
+                IrInst::Store {
+                    addr: IrValue::Imm(0),
+                    value: IrValue::Imm(1),
+                    ty: JStarType::Long,
+                },
             ],
             Terminator::Return(None),
         );
         optimize(&mut program);
-        assert_eq!(program.functions[0].blocks[0].instructions.len(), 2, "Side-effecting instructions must not be eliminated");
+        assert_eq!(
+            program.functions[0].blocks[0].instructions.len(),
+            2,
+            "Side-effecting instructions must not be eliminated"
+        );
     }
 }

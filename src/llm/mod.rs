@@ -347,10 +347,11 @@ impl MultiHeadAttention {
         for i in 0..batch_size {
             for j in 0..batch_size {
                 if let Some(m) = mask
-                    && !m[j] {
-                        attention_scores[i][j] = -1e9;
-                        continue;
-                    }
+                    && !m[j]
+                {
+                    attention_scores[i][j] = -1e9;
+                    continue;
+                }
                 let score: f32 = q[i].iter().zip(k[j].iter()).map(|(a, b)| a * b).sum();
                 attention_scores[i][j] = score * scale;
             }

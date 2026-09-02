@@ -670,7 +670,11 @@ impl Trainer {
             }
 
             // Save checkpoint
-            if self.stats.steps.is_multiple_of(self.config.checkpoint_interval) {
+            if self
+                .stats
+                .steps
+                .is_multiple_of(self.config.checkpoint_interval)
+            {
                 self.save_checkpoint()?;
             }
         }

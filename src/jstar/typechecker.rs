@@ -168,6 +168,10 @@ impl TypeChecker {
 
             JStarStatement::Label(name) => Ok(TypedStatement::Label(name.clone())),
 
+            JStarStatement::InlineAssembly(text) => {
+                Ok(TypedStatement::InlineAssembly(text.clone()))
+            }
+
             JStarStatement::Nop => Ok(TypedStatement::Nop),
         }
     }
@@ -207,6 +211,13 @@ impl TypeChecker {
                 // Registers default to Int
                 Ok(TypedOperand::Register(*reg, JStarType::Int))
             }
+
+            JStarOperand::PhysicalRegister(name) => Ok(TypedOperand::PhysicalRegister {
+                name: name.clone(),
+                ty: JStarType::Long,
+            }),
+
+            JStarOperand::Argument(idx) => Ok(TypedOperand::Argument(*idx, JStarType::Long)),
 
             JStarOperand::StringLiteral(s) => Ok(TypedOperand::StringLiteral(s.clone())),
 

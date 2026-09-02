@@ -778,8 +778,7 @@ pub struct SearchOperation {
 }
 
 /// Search options
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SearchOptions {
     /// Case sensitive
     pub case_sensitive: bool,
@@ -790,7 +789,6 @@ pub struct SearchOptions {
     /// Whole word only
     pub whole_word: bool,
 }
-
 
 /// Replacement template
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1088,27 +1086,24 @@ impl DataManagementAgent {
             if let Some(v) = value {
                 // Type validation (simplified)
                 match &field.field_type {
-                    FieldType::Integer
-                        if v.parse::<i64>().is_err() => {
-                            errors.push(ValidationError {
-                                field: field.name.clone(),
-                                error: "Invalid integer".to_string(),
-                            });
-                        }
-                    FieldType::Float
-                        if v.parse::<f64>().is_err() => {
-                            errors.push(ValidationError {
-                                field: field.name.clone(),
-                                error: "Invalid float".to_string(),
-                            });
-                        }
-                    FieldType::Boolean
-                        if !["true", "false", "1", "0"].contains(&v.as_str()) => {
-                            errors.push(ValidationError {
-                                field: field.name.clone(),
-                                error: "Invalid boolean".to_string(),
-                            });
-                        }
+                    FieldType::Integer if v.parse::<i64>().is_err() => {
+                        errors.push(ValidationError {
+                            field: field.name.clone(),
+                            error: "Invalid integer".to_string(),
+                        });
+                    }
+                    FieldType::Float if v.parse::<f64>().is_err() => {
+                        errors.push(ValidationError {
+                            field: field.name.clone(),
+                            error: "Invalid float".to_string(),
+                        });
+                    }
+                    FieldType::Boolean if !["true", "false", "1", "0"].contains(&v.as_str()) => {
+                        errors.push(ValidationError {
+                            field: field.name.clone(),
+                            error: "Invalid boolean".to_string(),
+                        });
+                    }
                     _ => {}
                 }
             }

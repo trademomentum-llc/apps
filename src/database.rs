@@ -55,6 +55,8 @@ use crate::types::*;
 const MAGIC: &[u8; 8] = b"MORPHLEX";
 const FORMAT_VERSION: u32 = 4; // v4: hardened PQC (ML-DSA-87 + SLH-DSA + HKDF)
 const HEADER_SIZE: usize = 24;
+const MAX_DB_ENTRIES: usize = 1_000_000;
+const MAX_LEMMA_BYTES: usize = 4096;
 
 /// ML-KEM-1024 ciphertext size in bytes.
 const MLKEM1024_CT_SIZE: usize = 1568;
@@ -141,20 +143,52 @@ fn calculate_exact_size(data: &[u8]) -> MorphResult<usize> {
         return Err(MorphlexError::DatabaseError("Invalid magic".to_string()));
     }
 
-    let entry_count = u64::from_le_bytes(data[12..20].try_into().unwrap()) as usize;
+    let entry_count_u64 = u64::from_le_bytes(data[12..20].try_into().unwrap());
+    if entry_count_u64 > MAX_DB_ENTRIES as u64 {
+        return Err(MorphlexError::DatabaseError(format!(
+            "Entry count exceeds bound: {} > {}",
+            entry_count_u64, MAX_DB_ENTRIES
+        )));
+    }
+    let entry_count = entry_count_u64 as usize;
 
     // Walk the lemma table
     let mut offset = HEADER_SIZE;
     for _ in 0..entry_count {
-        if offset + 2 > data.len() {
+        if offset.checked_add(2).is_none_or(|end| end > data.len()) {
             return Err(MorphlexError::DatabaseError("Truncated lemma".to_string()));
         }
         let lemma_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+        if lemma_len > MAX_LEMMA_BYTES {
+            return Err(MorphlexError::DatabaseError(format!(
+                "Lemma exceeds bound: {} > {}",
+                lemma_len, MAX_LEMMA_BYTES
+            )));
+        }
+        if offset
+            .checked_add(2)
+            .and_then(|start| start.checked_add(lemma_len))
+            .is_none_or(|end| end > data.len())
+        {
+            return Err(MorphlexError::DatabaseError(
+                "Truncated lemma data".to_string(),
+            ));
+        }
         offset += 2 + lemma_len;
     }
 
     // Vector table: entry_count * 12 bytes
-    offset += entry_count * TOKEN_VECTOR_SIZE;
+    let vector_bytes = entry_count
+        .checked_mul(TOKEN_VECTOR_SIZE)
+        .ok_or_else(|| MorphlexError::DatabaseError("Vector table size overflow".to_string()))?;
+    offset = offset
+        .checked_add(vector_bytes)
+        .ok_or_else(|| MorphlexError::DatabaseError("Database size overflow".to_string()))?;
+    if offset > data.len() {
+        return Err(MorphlexError::DatabaseError(
+            "Truncated vector table".to_string(),
+        ));
+    }
 
     Ok(offset)
 }
@@ -347,96 +381,104 @@ pub fn decrypt(
             )));
         }
     } else {
-        false // No .sig file -- skip verification, assume v3 key derivation
+        let allow_unsigned_migration = matches!(
+            std::env::var("MORPHLEX_ALLOW_UNSIGNED_PQC_DB_MIGRATION").as_deref(),
+            Ok("1" | "true" | "yes")
+        );
+        if !allow_unsigned_migration {
+            return Err(MorphlexError::EncryptionError(
+                "Missing .sig file; unsigned legacy PQC DBs are rejected unless MORPHLEX_ALLOW_UNSIGNED_PQC_DB_MIGRATION=1 is set for explicit offline migration".to_string(),
+            ));
+        }
+        false
     };
 
     // Verify signatures
-    if let Some(vk_raw) = vk_bytes
-        && sig_path.exists() {
-            let sig_bytes = fs::read(&sig_path).map_err(MorphlexError::IoError)?;
+    if sig_path.exists() {
+        let vk_raw = vk_bytes.ok_or_else(|| {
+            MorphlexError::EncryptionError(
+                "Signature verification key is required when .sig is present".to_string(),
+            )
+        })?;
+        let sig_bytes = fs::read(&sig_path).map_err(MorphlexError::IoError)?;
 
-            if is_v4 {
-                // v4: Verify ML-DSA-87 signature (first 4627 bytes)
-                let (dsa_sig_bytes, slh_sig_bytes) = sig_bytes.split_at(MLDSA87_SIG_SIZE);
+        if is_v4 {
+            if slh_vk_bytes.is_none() {
+                return Err(MorphlexError::EncryptionError(
+                    "SLH-DSA verifying key is required for v4 dual-signature databases".to_string(),
+                ));
+            }
+            // v4: Verify ML-DSA-87 signature (first 4627 bytes)
+            let (dsa_sig_bytes, slh_sig_bytes) = sig_bytes.split_at(MLDSA87_SIG_SIZE);
 
-                let vk_encoded = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(vk_raw)
-                    .map_err(|_| {
+            let vk_encoded = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(vk_raw)
+                .map_err(|_| {
                     MorphlexError::EncryptionError(format!(
                         "Invalid ML-DSA-87 verifying key size (expected {}, got {})",
                         MLDSA87_VK_SIZE,
                         vk_raw.len()
                     ))
                 })?;
-                let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa87>::decode(&vk_encoded);
+            let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa87>::decode(&vk_encoded);
 
-                let sig_encoded = ml_dsa::EncodedSignature::<ml_dsa::MlDsa87>::try_from(
-                    dsa_sig_bytes,
-                )
+            let sig_encoded = ml_dsa::EncodedSignature::<ml_dsa::MlDsa87>::try_from(dsa_sig_bytes)
                 .map_err(|_| {
                     MorphlexError::EncryptionError("Invalid ML-DSA-87 signature size".to_string())
                 })?;
-                let sig = ml_dsa::Signature::<ml_dsa::MlDsa87>::decode(&sig_encoded).ok_or_else(
-                    || {
-                        MorphlexError::EncryptionError(
-                            "Invalid ML-DSA-87 signature data".to_string(),
-                        )
-                    },
-                )?;
-
-                use ml_dsa::signature::Verifier;
-                vk.verify(&data, &sig).map_err(|e| {
-                    MorphlexError::EncryptionError(format!(
-                        "ML-DSA-87 signature verification failed: {}",
-                        e
-                    ))
+            let sig =
+                ml_dsa::Signature::<ml_dsa::MlDsa87>::decode(&sig_encoded).ok_or_else(|| {
+                    MorphlexError::EncryptionError("Invalid ML-DSA-87 signature data".to_string())
                 })?;
 
-                // v4: Verify SLH-DSA-SHAKE-256s signature (remaining bytes)
-                if let Some(slh_vk_raw) = slh_vk_bytes {
-                    let slh_vk = slh_dsa::VerifyingKey::<slh_dsa::Shake256s>::try_from(slh_vk_raw)
-                        .map_err(|_| {
-                            MorphlexError::EncryptionError(
-                                "Invalid SLH-DSA verifying key".to_string(),
-                            )
-                        })?;
-                    let slh_sig = slh_dsa::Signature::<slh_dsa::Shake256s>::try_from(slh_sig_bytes)
-                        .map_err(|_| {
-                            MorphlexError::EncryptionError(
-                                "Invalid SLH-DSA signature data".to_string(),
-                            )
-                        })?;
+            use ml_dsa::signature::Verifier;
+            vk.verify(&data, &sig).map_err(|e| {
+                MorphlexError::EncryptionError(format!(
+                    "ML-DSA-87 signature verification failed: {}",
+                    e
+                ))
+            })?;
 
-                    use signature::Verifier as SlhVerifier;
-                    slh_vk.verify(&data, &slh_sig).map_err(|e| {
-                        MorphlexError::EncryptionError(format!(
-                            "SLH-DSA signature verification failed: {}",
-                            e
-                        ))
-                    })?;
-                }
-            } else {
-                // v3: Verify ML-DSA-65 signature (legacy)
-                let vk_encoded = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa65>::try_from(vk_raw)
-                    .map_err(|_| {
+            // v4: Verify SLH-DSA-SHAKE-256s signature (remaining bytes)
+            let slh_vk_raw = slh_vk_bytes.unwrap();
+            let slh_vk = slh_dsa::VerifyingKey::<slh_dsa::Shake256s>::try_from(slh_vk_raw)
+                .map_err(|_| {
+                    MorphlexError::EncryptionError("Invalid SLH-DSA verifying key".to_string())
+                })?;
+            let slh_sig = slh_dsa::Signature::<slh_dsa::Shake256s>::try_from(slh_sig_bytes)
+                .map_err(|_| {
+                    MorphlexError::EncryptionError("Invalid SLH-DSA signature data".to_string())
+                })?;
+
+            slh_vk.verify(&data, &slh_sig).map_err(|e| {
+                MorphlexError::EncryptionError(format!(
+                    "SLH-DSA signature verification failed: {}",
+                    e
+                ))
+            })?;
+        } else {
+            // v3: Verify ML-DSA-65 signature (legacy)
+            let vk_encoded = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa65>::try_from(vk_raw)
+                .map_err(|_| {
                     MorphlexError::EncryptionError("Invalid verifying key size".to_string())
                 })?;
-                let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa65>::decode(&vk_encoded);
+            let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa65>::decode(&vk_encoded);
 
-                let sig_encoded =
-                    ml_dsa::EncodedSignature::<ml_dsa::MlDsa65>::try_from(sig_bytes.as_slice())
-                        .map_err(|_| {
-                            MorphlexError::EncryptionError("Invalid signature size".to_string())
-                        })?;
-                let sig = ml_dsa::Signature::<ml_dsa::MlDsa65>::decode(&sig_encoded).ok_or_else(
-                    || MorphlexError::EncryptionError("Invalid signature data".to_string()),
-                )?;
-
-                use ml_dsa::signature::Verifier;
-                vk.verify(&data, &sig).map_err(|e| {
-                    MorphlexError::EncryptionError(format!("Signature verification failed: {}", e))
+            let sig_encoded =
+                ml_dsa::EncodedSignature::<ml_dsa::MlDsa65>::try_from(sig_bytes.as_slice())
+                    .map_err(|_| {
+                        MorphlexError::EncryptionError("Invalid signature size".to_string())
+                    })?;
+            let sig =
+                ml_dsa::Signature::<ml_dsa::MlDsa65>::decode(&sig_encoded).ok_or_else(|| {
+                    MorphlexError::EncryptionError("Invalid signature data".to_string())
                 })?;
-            }
+
+            use ml_dsa::signature::Verifier;
+            vk.verify(&data, &sig).map_err(|e| {
+                MorphlexError::EncryptionError(format!("Signature verification failed: {}", e))
+            })?;
         }
+    }
 
     if data.len() < MLKEM1024_CT_SIZE + 12 {
         return Err(MorphlexError::EncryptionError(
@@ -494,14 +536,38 @@ pub fn read_database(data: &[u8]) -> MorphResult<(Vec<String>, Vec<TokenVector>)
         return Err(MorphlexError::DatabaseError("Invalid magic".to_string()));
     }
 
-    let entry_count = u64::from_le_bytes(data[12..20].try_into().unwrap()) as usize;
+    let entry_count_u64 = u64::from_le_bytes(data[12..20].try_into().unwrap());
+    if entry_count_u64 > MAX_DB_ENTRIES as u64 {
+        return Err(MorphlexError::DatabaseError(format!(
+            "Entry count exceeds bound: {} > {}",
+            entry_count_u64, MAX_DB_ENTRIES
+        )));
+    }
+    let entry_count = entry_count_u64 as usize;
 
     // Read lemma table
     let mut lemmas = Vec::with_capacity(entry_count);
     let mut offset = HEADER_SIZE;
     for _ in 0..entry_count {
+        if offset.checked_add(2).is_none_or(|end| end > data.len()) {
+            return Err(MorphlexError::DatabaseError("Truncated lemma".to_string()));
+        }
         let lemma_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+        if lemma_len > MAX_LEMMA_BYTES {
+            return Err(MorphlexError::DatabaseError(format!(
+                "Lemma exceeds bound: {} > {}",
+                lemma_len, MAX_LEMMA_BYTES
+            )));
+        }
         offset += 2;
+        if offset
+            .checked_add(lemma_len)
+            .is_none_or(|end| end > data.len())
+        {
+            return Err(MorphlexError::DatabaseError(
+                "Truncated lemma data".to_string(),
+            ));
+        }
         let lemma = String::from_utf8(data[offset..offset + lemma_len].to_vec())
             .map_err(|e| MorphlexError::DatabaseError(e.to_string()))?;
         offset += lemma_len;
@@ -511,6 +577,12 @@ pub fn read_database(data: &[u8]) -> MorphResult<(Vec<String>, Vec<TokenVector>)
     // Read vector table
     let mut vectors = Vec::with_capacity(entry_count);
     for _ in 0..entry_count {
+        if offset
+            .checked_add(TOKEN_VECTOR_SIZE)
+            .is_none_or(|end| end > data.len())
+        {
+            return Err(MorphlexError::DatabaseError("Truncated vector".to_string()));
+        }
         let buf: [u8; TOKEN_VECTOR_SIZE] = data[offset..offset + TOKEN_VECTOR_SIZE]
             .try_into()
             .map_err(|_| MorphlexError::DatabaseError("Truncated vector".to_string()))?;

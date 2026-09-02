@@ -9,6 +9,117 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+fn truthy_env(name: &str) -> bool {
+    matches!(std::env::var(name).as_deref(), Ok("1" | "true" | "yes"))
+}
+
+fn redacted_snippet(text: &str) -> String {
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("private key")
+        || lowered.contains("api_key")
+        || lowered.contains("apikey")
+        || lowered.contains("secret")
+        || lowered.contains("token")
+        || lowered.contains("password")
+        || lowered.contains("system prompt")
+    {
+        return "[redacted sensitive snippet]".to_string();
+    }
+    text.chars().take(80).collect()
+}
+
+fn required_json_string<'a>(value: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| format!("signed envelope missing non-empty string field '{}'", key))
+}
+
+fn verify_rr_frago_envelope(
+    envelope_path: &Path,
+    swarm_id: &str,
+    content: &str,
+) -> Result<String, String> {
+    let raw = std::fs::read_to_string(envelope_path).map_err(|e| {
+        format!(
+            "failed to read signed envelope {}: {}",
+            envelope_path.display(),
+            e
+        )
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("invalid signed envelope JSON: {}", e))?;
+
+    let subject = required_json_string(&value, "subject")?;
+    if subject != "rr-frago" {
+        return Err(format!(
+            "signed envelope subject must be rr-frago, got {}",
+            subject
+        ));
+    }
+    let issuer = required_json_string(&value, "issuer")?;
+    let envelope_swarm = required_json_string(&value, "swarm_id")?;
+    if envelope_swarm != swarm_id {
+        return Err("signed envelope swarm_id does not match requested swarm".to_string());
+    }
+    let nonce = required_json_string(&value, "nonce")?;
+    let timestamp = required_json_string(&value, "timestamp")?;
+    let signature_path = PathBuf::from(required_json_string(&value, "signature_path")?);
+    let public_key_path = PathBuf::from(required_json_string(&value, "public_key_path")?);
+    let algorithm = required_json_string(&value, "algorithm")?;
+    if algorithm != "openssl-rsa-sha256" {
+        return Err("signed envelope algorithm must be openssl-rsa-sha256".to_string());
+    }
+
+    let content_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    let envelope_hash = required_json_string(&value, "content_blake3")?;
+    if envelope_hash != content_hash {
+        return Err("signed envelope content_blake3 does not match FRAGO content".to_string());
+    }
+
+    let canonical = format!(
+        "RR-FRAGO-v1\nissuer={issuer}\nswarm_id={swarm_id}\ncontent_blake3={content_hash}\nnonce={nonce}\ntimestamp={timestamp}\n"
+    );
+    let mut child = Command::new("openssl")
+        .args([
+            "dgst",
+            "-sha256",
+            "-verify",
+            public_key_path
+                .to_str()
+                .ok_or_else(|| "public_key_path is not valid UTF-8".to_string())?,
+            "-signature",
+            signature_path
+                .to_str()
+                .ok_or_else(|| "signature_path is not valid UTF-8".to_string())?,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to run openssl for RR envelope verification: {}", e))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| "failed to open openssl stdin".to_string())?
+        .write_all(canonical.as_bytes())
+        .map_err(|e| format!("failed to feed openssl verification payload: {}", e))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed waiting for openssl: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "RR signed envelope verification failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(issuer.to_string())
+}
 
 #[derive(Parser)]
 #[command(name = "morphlex")]
@@ -126,8 +237,8 @@ enum Commands {
         #[arg(short, long, default_value = "./crawl_data/")]
         output: PathBuf,
 
-        /// Maximum number of pages to crawl (0 = unlimited)
-        #[arg(long, default_value = "0")]
+        /// Maximum number of pages to crawl
+        #[arg(long, default_value = "100")]
         max_pages: u32,
 
         /// User-agent string for HTTP requests
@@ -235,6 +346,10 @@ enum RrAction {
         /// FRAGO content (new instructions)
         #[arg(short, long)]
         content: String,
+
+        /// JSON signed envelope binding issuer, swarm_id, content_blake3, nonce, and timestamp
+        #[arg(long)]
+        signed_envelope: Option<PathBuf>,
 
         /// Database path
         #[arg(short, long, default_value = "rr_db.json")]
@@ -416,6 +531,10 @@ fn write_key_file(path: &Path, bytes: &[u8], mode: u32, label: &str) {
     }
 }
 
+fn env_flag_enabled(name: &str) -> bool {
+    matches!(std::env::var(name).as_deref(), Ok("1" | "true" | "yes"))
+}
+
 fn write_key_bundle(bundle: &morphlex::database::PqcKeyBundle, dir: &std::path::Path) {
     std::fs::create_dir_all(dir).expect("Failed to create key directory");
 
@@ -424,28 +543,10 @@ fn write_key_bundle(bundle: &morphlex::database::PqcKeyBundle, dir: &std::path::
         .expect("Failed to harden key directory permissions");
 
     write_key_file(
-        &dir.join("dk.bin"),
-        &bundle.decapsulation_key,
-        0o600,
-        "decapsulation key",
-    );
-    write_key_file(
-        &dir.join("sk.bin"),
-        &bundle.signing_key,
-        0o600,
-        "ML-DSA-87 signing key",
-    );
-    write_key_file(
         &dir.join("vk.bin"),
         &bundle.verifying_key,
         0o644,
         "ML-DSA-87 verifying key",
-    );
-    write_key_file(
-        &dir.join("slh_sk.bin"),
-        &bundle.slh_signing_key,
-        0o600,
-        "SLH-DSA signing key",
     );
     write_key_file(
         &dir.join("slh_vk.bin"),
@@ -453,6 +554,31 @@ fn write_key_bundle(bundle: &morphlex::database::PqcKeyBundle, dir: &std::path::
         0o644,
         "SLH-DSA verifying key",
     );
+
+    if env_flag_enabled("MORPHLEX_EXPORT_PQC_PRIVATE_KEYS") {
+        write_key_file(
+            &dir.join("dk.bin"),
+            &bundle.decapsulation_key,
+            0o600,
+            "decapsulation key",
+        );
+        write_key_file(
+            &dir.join("sk.bin"),
+            &bundle.signing_key,
+            0o600,
+            "ML-DSA-87 signing key",
+        );
+        write_key_file(
+            &dir.join("slh_sk.bin"),
+            &bundle.slh_signing_key,
+            0o600,
+            "SLH-DSA signing key",
+        );
+    } else {
+        eprintln!(
+            "Private PQC key export skipped. Set MORPHLEX_EXPORT_PQC_PRIVATE_KEYS=1 only for explicit offline migration/export."
+        );
+    }
 }
 
 fn main() {
@@ -632,8 +758,13 @@ fn main() {
                         title
                     );
                     if let Some(text) = index.get_doc_text(r.doc_id) {
-                        let snippet: String = text.chars().take(80).collect();
-                        println!("      {}", snippet);
+                        if truthy_env("MORPHLEX_SEARCH_ALLOW_SNIPPETS") {
+                            println!("      {}", redacted_snippet(text));
+                        } else {
+                            println!(
+                                "      [snippet suppressed; set MORPHLEX_SEARCH_ALLOW_SNIPPETS=1 for audited local debugging]"
+                            );
+                        }
                     }
                 }
                 println!("--- {} results ---", results.len());
@@ -676,8 +807,8 @@ fn main() {
                             .expect("JStar compilation failed");
                     }
                 } else {
-                    let mut sources: Vec<PathBuf> = include;
-                    sources.push(input.clone());
+                    let mut sources: Vec<PathBuf> = vec![input.clone()];
+                    sources.extend(include);
                     let paths: Vec<&std::path::Path> =
                         sources.iter().map(|p| p.as_path()).collect();
                     println!(
@@ -740,11 +871,11 @@ fn main() {
                 std::process::exit(1);
             });
 
-            let max_pages_opt = if max_pages == 0 {
-                None
-            } else {
-                Some(max_pages as usize)
-            };
+            if max_pages == 0 {
+                eprintln!("--max-pages=0 is no longer allowed; use an explicit finite bound");
+                std::process::exit(1);
+            }
+            let max_pages_opt = Some(max_pages as usize);
 
             let config = morphlex::crawler::CrawlConfig {
                 seed_url,
@@ -837,6 +968,7 @@ fn main() {
             RrAction::Frago {
                 swarm_id,
                 content,
+                signed_envelope,
                 db,
             } => {
                 use morphlex::rr::{Frago, Priority, RRDatabase};
@@ -849,7 +981,26 @@ fn main() {
                     std::process::exit(1);
                 }
 
-                let frago = Frago::new("commander".to_string(), swarm_id.clone(), content.clone());
+                let issuer = match signed_envelope {
+                    Some(path) => match verify_rr_frago_envelope(&path, &swarm_id, &content) {
+                        Ok(issuer) => issuer,
+                        Err(e) => {
+                            eprintln!("FRAGO rejected: {}", e);
+                            std::process::exit(1);
+                        }
+                    },
+                    None if truthy_env("MORPHLEX_RR_ALLOW_UNSIGNED_FRAGO") => {
+                        "commander-dev-unsigned".to_string()
+                    }
+                    None => {
+                        eprintln!(
+                            "FRAGO rejected: --signed-envelope is required; set MORPHLEX_RR_ALLOW_UNSIGNED_FRAGO=1 only for audited local development"
+                        );
+                        std::process::exit(1);
+                    }
+                };
+
+                let frago = Frago::new(issuer, swarm_id.clone(), content.clone());
 
                 rr_db.record_communication(&morphlex::rr::CommunicationDBRecord {
                     id: frago.header.id.clone(),
@@ -1049,7 +1200,7 @@ fn main() {
                 {
                     use morphlex::rr::SystemIntegrityDaemon;
                     let daemon = SystemIntegrityDaemon::new(vec![
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                     ]);
                     daemon.start();
                     println!("  [DONE] System Integrity Daemon started");
@@ -1155,7 +1306,7 @@ fn main() {
                 output,
                 quantize,
             } => {
-                use morphlex::llm::{export_to_gguf, MorphlexLLM};
+                use morphlex::llm::{MorphlexLLM, export_to_gguf};
 
                 println!("Exporting model to GGUF format...");
                 println!("Input: {}", model.display());

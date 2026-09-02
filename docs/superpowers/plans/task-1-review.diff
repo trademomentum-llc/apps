@@ -1,0 +1,71 @@
+diff --git a/scripts/jasterish_regression.py b/scripts/jasterish_regression.py
+new file mode 100644
+index 0000000..0fe79bb
+--- /dev/null
++++ b/scripts/jasterish_regression.py
+@@ -0,0 +1,43 @@
++from __future__ import annotations
++
++import tomllib
++from dataclasses import dataclass
++from pathlib import Path
++
++
++@dataclass
++class Case:
++    root: Path
++    name: str
++    kind: str
++    archs: list[str]
++    timeout: int
++    compare: str
++
++    @property
++    def source_path(self) -> Path:
++        return self.root / "main.jstr"
++
++
++def discover_cases(root: Path) -> list[Case]:
++    cases: list[Case] = []
++    if not root.exists():
++        return cases
++    for entry in sorted(root.iterdir()):
++        if not entry.is_dir():
++            continue
++        manifest = entry / "test.toml"
++        if not manifest.exists():
++            continue
++        data = tomllib.loads(manifest.read_text())
++        cases.append(
++            Case(
++                root=entry,
++                name=data.get("name", entry.name),
++                kind=data["kind"],
++                archs=data.get("archs", ["x86_64"]),
++                timeout=data.get("timeout", 30),
++                compare=data.get("compare", "exact"),
++            )
++        )
++    return cases
+diff --git a/tests/test_regression_lib.py b/tests/test_regression_lib.py
+new file mode 100644
+index 0000000..abda7f1
+--- /dev/null
++++ b/tests/test_regression_lib.py
+@@ -0,0 +1,16 @@
++from pathlib import Path
++import tempfile
++
++from scripts.jasterish_regression import discover_cases
++
++
++def test_discover_cases_finds_test_toml():
++    with tempfile.TemporaryDirectory() as tmp:
++        root = Path(tmp)
++        case_dir = root / "print-literal"
++        case_dir.mkdir()
++        (case_dir / "test.toml").write_text('name = "print-literal"\nkind = "compiler"\n')
++        (case_dir / "main.jstr").write_text('print 42')
++        cases = discover_cases(root)
++        assert len(cases) == 1
++        assert cases[0].name == "print-literal"

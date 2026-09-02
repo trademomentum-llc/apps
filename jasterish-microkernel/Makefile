@@ -135,8 +135,8 @@ QEMU_BASE       := -machine $(QEMU_MACHINE) \
 # QEMU display (disable for headless operation)
 QEMU_DISPLAY    := -display none
 
-# QEMU debug flags (for GDB remote debugging)
-QEMU_DEBUG      := -s -S
+# QEMU debug flags (for GDB remote debugging). Bind explicitly to localhost.
+QEMU_DEBUG      := -gdb tcp:127.0.0.1:1234 -S
 
 # QEMU Multiboot2 boot (direct kernel loading)
 QEMU_KERNEL     := -kernel $(KERNEL_BIN)
@@ -228,6 +228,7 @@ run-iso: iso
 
 # Launch QEMU with GDB server (waits for debugger connection)
 debug: build
+	@test "$(ALLOW_QEMU_GDB)" = "1" || (echo "Refusing QEMU GDB stub without ALLOW_QEMU_GDB=1"; exit 1)
 	@echo "========================================"
 	@echo "  QEMU waiting for GDB on port 1234..."
 	@echo "  Run: gdb -x $(GDB_INIT)"

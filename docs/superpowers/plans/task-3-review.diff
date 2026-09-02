@@ -1,0 +1,200 @@
+diff --git a/scripts/jasterish_regression.py b/scripts/jasterish_regression.py
+index 62ebc33..52bba1f 100644
+--- a/scripts/jasterish_regression.py
++++ b/scripts/jasterish_regression.py
+@@ -1,32 +1,44 @@
+ from __future__ import annotations
+ 
++import os
+ import re
++import subprocess
++import time
+ import tomllib
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+ 
+ @dataclass
+ class Case:
+     root: Path
+     name: str
+     kind: str
+     archs: list[str]
+     timeout: int
+     compare: str
+ 
+     @property
+     def source_path(self) -> Path:
+         return self.root / "main.jstr"
+ 
+ 
++@dataclass
++class Result:
++    name: str
++    arch: str
++    status: str  # PASS | FAIL | SKIP | TIMEOUT | UPDATED
++    duration: float
++    detail: str = ""
++
++
+ def discover_cases(root: Path) -> list[Case]:
+     cases: list[Case] = []
+     if not root.exists():
+         return cases
+     for entry in sorted(root.iterdir()):
+         if not entry.is_dir():
+             continue
+         manifest = entry / "test.toml"
+         if not manifest.exists():
+             continue
+@@ -70,10 +82,77 @@ def compare_output(actual: str, golden_path: Path, mode: str) -> tuple[bool, str
+         for line in golden.splitlines():
+             if not line:
+                 continue
+             if not re.search(line, actual):
+                 missing.append(line)
+         if not missing:
+             return True, ""
+         return False, f"unmatched regexes: {missing}"
+ 
+     return False, f"unknown compare mode: {mode}"
++
++
++def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
++    compiler = os.environ.get("JASTERISH_COMPILER", "morphlex")
++    elf_path = case.root / f"{case.name}.{arch}.elf"
++    golden_path = case.root / f"expected.{arch}"
++
++    if not update and not golden_path.exists():
++        return Result(case.name, arch, "SKIP", 0.0, f"missing {golden_path}")
++
++    build_cmd = [
++        compiler, "jstar", "compile",
++        "--target", arch,
++        "--input", str(case.source_path),
++        "--output", str(elf_path),
++    ]
++
++    t0 = time.monotonic()
++    try:
++        build = subprocess.run(
++            build_cmd,
++            capture_output=True,
++            text=True,
++            timeout=case.timeout,
++        )
++    except subprocess.TimeoutExpired:
++        return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "compile timed out")
++
++    if build.returncode != 0:
++        return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"compile failed:\n{build.stderr}")
++
++    try:
++        run = subprocess.run(
++            [str(elf_path)],
++            capture_output=True,
++            text=True,
++            timeout=case.timeout,
++        )
++    except subprocess.TimeoutExpired:
++        return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "run timed out")
++
++    actual = run.stdout
++    exit_code = run.returncode
++
++    if update:
++        golden_path.write_text(actual)
++        exit_golden = case.root / f"expected.{arch}.exit"
++        exit_golden.write_text(str(exit_code))
++        return Result(case.name, arch, "UPDATED", time.monotonic() - t0, f"wrote {golden_path}")
++
++    ok, detail = compare_output(actual, golden_path, case.compare)
++    if not ok:
++        return Result(case.name, arch, "FAIL", time.monotonic() - t0, detail)
++
++    exit_golden = case.root / f"expected.{arch}.exit"
++    if exit_golden.exists():
++        expected_exit = int(exit_golden.read_text().strip())
++        if exit_code != expected_exit:
++            return Result(
++                case.name,
++                arch,
++                "FAIL",
++                time.monotonic() - t0,
++                f"exit code mismatch: expected {expected_exit}, got {exit_code}",
++            )
++
++    return Result(case.name, arch, "PASS", time.monotonic() - t0, "")
+diff --git a/tests/regression/print-literal/expected.aarch64 b/tests/regression/print-literal/expected.aarch64
+new file mode 100644
+index 0000000..d81cc07
+--- /dev/null
++++ b/tests/regression/print-literal/expected.aarch64
+@@ -0,0 +1 @@
++42
+diff --git a/tests/regression/print-literal/expected.x86_64 b/tests/regression/print-literal/expected.x86_64
+new file mode 100644
+index 0000000..d81cc07
+--- /dev/null
++++ b/tests/regression/print-literal/expected.x86_64
+@@ -0,0 +1 @@
++42
+diff --git a/tests/regression/print-literal/main.jstr b/tests/regression/print-literal/main.jstr
+new file mode 100644
+index 0000000..2e97662
+--- /dev/null
++++ b/tests/regression/print-literal/main.jstr
+@@ -0,0 +1 @@
++print 42
+diff --git a/tests/regression/print-literal/test.toml b/tests/regression/print-literal/test.toml
+new file mode 100644
+index 0000000..e54fee0
+--- /dev/null
++++ b/tests/regression/print-literal/test.toml
+@@ -0,0 +1,5 @@
++name = "print-literal"
++kind = "compiler"
++archs = ["x86_64", "aarch64"]
++timeout = 30
++compare = "exact"
+diff --git a/tests/test_regression_lib.py b/tests/test_regression_lib.py
+index 7ba724a..cb5a2f2 100644
+--- a/tests/test_regression_lib.py
++++ b/tests/test_regression_lib.py
+@@ -1,14 +1,14 @@
+ from pathlib import Path
+ import tempfile
+ 
+-from scripts.jasterish_regression import compare_output, discover_cases
++from scripts.jasterish_regression import Case, compare_output, discover_cases, run_compiler_case
+ 
+ 
+ def test_discover_cases_finds_test_toml():
+     with tempfile.TemporaryDirectory() as tmp:
+         root = Path(tmp)
+         case_dir = root / "print-literal"
+         case_dir.mkdir()
+         (case_dir / "test.toml").write_text('name = "print-literal"\nkind = "compiler"\n')
+         (case_dir / "main.jstr").write_text('print 42')
+         cases = discover_cases(root)
+@@ -41,10 +41,20 @@ def test_compare_contains_pass():
+         ok, detail = compare_output("BOOT\nJMK> prompt\n", golden, "contains")
+         assert ok is True
+ 
+ 
+ def test_compare_regex_pass():
+     with tempfile.TemporaryDirectory() as tmp:
+         golden = Path(tmp) / "expected.x86_64"
+         golden.write_text(r"^JMK>\s*$")
+         ok, detail = compare_output("JMK> \n", golden, "regex")
+         assert ok is True
++
++
++def test_run_compiler_case_skips_without_golden():
++    with tempfile.TemporaryDirectory() as tmp:
++        case_dir = Path(tmp) / "print-literal"
++        case_dir.mkdir()
++        (case_dir / "main.jstr").write_text("print 42")
++        case = Case(root=case_dir, name="print-literal", kind="compiler", archs=["x86_64"], timeout=30, compare="exact")
++        result = run_compiler_case(case, "x86_64", update=False)
++        assert result.status == "SKIP"

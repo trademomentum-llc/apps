@@ -118,9 +118,10 @@ fn parse_directive(line: &str, rules: &mut RobotsRules) {
         }
     } else if lower.starts_with("crawl-delay:")
         && let Some((_, delay)) = line.split_once(':')
-            && let Ok(d) = delay.trim().parse::<u64>() {
-                rules.crawl_delay = Some(d);
-            }
+        && let Ok(d) = delay.trim().parse::<u64>()
+    {
+        rules.crawl_delay = Some(d);
+    }
 }
 
 /// Check if a given path is allowed by the robots rules.

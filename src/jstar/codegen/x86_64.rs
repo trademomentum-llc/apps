@@ -84,6 +84,10 @@ pub struct MachineCode {
     /// Each entry is the byte offset in .text of an 8-byte value to which the
     /// linker adds data_vaddr.
     pub data_fixups: Vec<usize>,
+    /// Positions in .text where function-offset placeholders need patching by
+    /// the linker. Each entry is the byte offset in .text of an 8-byte value
+    /// to which the linker adds the .text base virtual address.
+    pub text_fixups: Vec<usize>,
 }
 
 /// Generate x86-64 machine code from IR.
@@ -118,6 +122,7 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
 
     // Resolve call fixups now that all function offsets are known
     emitter.apply_call_fixups()?;
+    emitter.apply_text_fixups()?;
 
     Ok(MachineCode {
         text: emitter.text,
@@ -126,6 +131,7 @@ pub fn generate(program: &IrProgram) -> MorphResult<MachineCode> {
         stack_size: emitter.stack_size,
         data_vaddr: 0, // set by linker
         data_fixups: emitter.data_fixups,
+        text_fixups: emitter.text_fixups,
     })
 }
 
@@ -145,6 +151,12 @@ struct CodeGen {
     function_offsets: std::collections::HashMap<String, usize>,
     /// (patch_offset, function_name) — call fixups
     call_fixups: Vec<(usize, String)>,
+    /// (patch_offset, function_name) — pending function-address fixups to
+    /// resolve once all functions have been emitted.
+    text_fixup_work: Vec<(usize, String)>,
+    /// Byte offsets in .text of resolved function-offset placeholders. The
+    /// linker adds the .text base virtual address to each.
+    text_fixups: Vec<usize>,
     /// Whether current function is _start (uses sys_exit) vs regular (uses ret)
     is_entry_point: bool,
     /// Global vregs: vreg -> data_offset (absolute offset in .data section).
@@ -174,6 +186,8 @@ impl CodeGen {
             fixups: Vec::new(),
             function_offsets: std::collections::HashMap::new(),
             call_fixups: Vec::new(),
+            text_fixup_work: Vec::new(),
+            text_fixups: Vec::new(),
             is_entry_point: false,
             global_vregs: std::collections::HashMap::new(),
             direct_storage_vregs: std::collections::HashSet::new(),
@@ -211,7 +225,8 @@ impl CodeGen {
         self.is_entry_point = func.name == "_start";
 
         // Record function offset for call resolution
-        self.function_offsets.insert(func.name.clone(), self.text.len());
+        self.function_offsets
+            .insert(func.name.clone(), self.text.len());
 
         // === CRITICAL FIX BLOCK - MUST BE FIRST ===
         // Apply ALL data fixups BEFORE any code is emitted
@@ -250,10 +265,11 @@ impl CodeGen {
                     IrInst::Compare { dest, .. }
                     | IrInst::Call { dest, .. }
                     | IrInst::Syscall { dest, .. }
-                    | IrInst::AddressOf { dest, .. } => {
+                    | IrInst::AddressOf { dest, .. }
+                    | IrInst::FunctionAddress { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
-                    IrInst::LoadIndexed { dest, .. } => {
+                    IrInst::LoadIndexed { dest, .. } | IrInst::PhysicalLoad { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
                     IrInst::ArrayAlloc { dest, count } => {
@@ -268,9 +284,14 @@ impl CodeGen {
                     | IrInst::StrLen { dest, .. } => {
                         self.alloc_stack_slot(*dest, 8);
                     }
-                    IrInst::Store { .. } | IrInst::StoreIndexed { .. }
-                    | IrInst::Print { .. } | IrInst::PrintStr { .. }
-                    | IrInst::Nop | IrInst::ArrayStore { .. }
+                    IrInst::Store { .. }
+                    | IrInst::StoreIndexed { .. }
+                    | IrInst::InlineAssembly { .. }
+                    | IrInst::PhysicalStore { .. }
+                    | IrInst::Print { .. }
+                    | IrInst::PrintStr { .. }
+                    | IrInst::Nop
+                    | IrInst::ArrayStore { .. }
                     | IrInst::FileClose { .. }
                     | IrInst::StrCopy { .. } => {}
                 }
@@ -283,7 +304,7 @@ impl CodeGen {
         // Function prologue: push rbp; mov rbp, rsp
         self.emit_push_reg(X86Reg::Rbp);
         self.emit_mov_reg_reg(X86Reg::Rbp, X86Reg::Rsp);
-        
+
         // Stack probing for large frames (>4KB)
         if self.stack_size > 0 {
             if self.stack_size > 4096 {
@@ -317,15 +338,18 @@ impl CodeGen {
             if let Some(entry_block) = func.blocks.first() {
                 for inst in &entry_block.instructions {
                     if let IrInst::Alloca { dest, .. } = inst
-                        && param_vregs.len() < func.param_count {
-                            param_vregs.push(*dest);
-                        }
+                        && param_vregs.len() < func.param_count
+                    {
+                        param_vregs.push(*dest);
+                    }
                 }
             }
             if param_vregs.len() != func.param_count {
                 return Err(MorphlexError::CodegenError(format!(
                     "function '{}': expected {} parameter allocas in entry block, found {}",
-                    func.name, func.param_count, param_vregs.len()
+                    func.name,
+                    func.param_count,
+                    param_vregs.len()
                 )));
             }
             for (i, vreg) in param_vregs.iter().enumerate() {
@@ -621,6 +645,16 @@ impl CodeGen {
                 self.emit_store_reg_to_rbp_offset(X86Reg::Rax, dest_offset);
             }
 
+            IrInst::FunctionAddress { dest, name } => {
+                // Load absolute address of function `name`. The codegen writes
+                // the function's .text offset into the placeholder, then the
+                // linker adds the .text base virtual address.
+                let patch_offset = self.emit_load_text_addr();
+                self.text_fixup_work.push((patch_offset, name.clone()));
+                let dest_offset = self.vreg_offset(*dest);
+                self.emit_store_reg_to_rbp_offset(X86Reg::Rax, dest_offset);
+            }
+
             IrInst::ArrayAlloc { .. } => {
                 // Stack space already allocated in prologue
             }
@@ -861,6 +895,23 @@ impl CodeGen {
                 self.text.extend_from_slice(&[0xF3, 0xA4]); // rep movsb
             }
 
+            IrInst::InlineAssembly(_) => {
+                // Inline assembly is currently ignored on x86-64; the
+                // statements exist primarily for the AArch64 port.
+            }
+
+            IrInst::PhysicalLoad { dest, .. } => {
+                // Physical register loads are not modelled on x86-64; zero-fill.
+                self.emit_mov_reg_imm64(X86Reg::Rax, 0);
+                let offset = self.vreg_offset(*dest);
+                self.emit_store_reg_to_rbp_offset(X86Reg::Rax, offset);
+            }
+
+            IrInst::PhysicalStore { value, .. } => {
+                // Load the value into rax as a side-effect-free approximation.
+                self.emit_load_value(X86Reg::Rax, value);
+            }
+
             IrInst::Nop => {
                 self.emit_nop();
             }
@@ -1025,6 +1076,19 @@ impl CodeGen {
                 // Named variables: for now, load 0 (resolved later with symbol table)
                 self.emit_mov_reg_imm64(dest, 0);
             }
+            IrValue::DataAddr(data_offset) => {
+                // Address of data in .data: movabs dest, imm64 (linker-patched).
+                let mut rex: u8 = 0x48; // REX.W
+                if dest.needs_rex_ext() {
+                    rex |= 0x01; // REX.B
+                }
+                self.text.push(rex);
+                self.text.push(0xB8 + dest.encoding()); // movabs dest
+                let fixup_pos = self.text.len();
+                self.text
+                    .extend_from_slice(&(*data_offset as u64).to_le_bytes());
+                self.data_fixups.push(fixup_pos);
+            }
         }
     }
 
@@ -1188,6 +1252,17 @@ impl CodeGen {
         self.text
             .extend_from_slice(&(data_offset as u64).to_le_bytes());
         self.data_fixups.push(fixup_pos);
+    }
+
+    /// Emit: movabs rax, #0  (placeholder for a function offset).
+    /// Returns the byte offset of the 8-byte immediate so the linker can add
+    /// the .text base virtual address.
+    fn emit_load_text_addr(&mut self) -> usize {
+        self.text.push(0x48); // REX.W
+        self.text.push(0xB8); // movabs rax
+        let fixup_pos = self.text.len();
+        self.text.extend_from_slice(&0u64.to_le_bytes());
+        fixup_pos
     }
 
     // ─── x86-64 Instruction Encoding ────────────────────────────────────────
@@ -1451,6 +1526,29 @@ impl CodeGen {
         Ok(())
     }
 
+    /// Resolve function-address fixups after all functions have been emitted.
+    ///
+    /// The movabs immediate currently holds zero. This function writes the
+    /// function's byte offset within .text into the placeholder and records
+    /// the position so the linker can add the .text base virtual address.
+    fn apply_text_fixups(&mut self) -> MorphResult<()> {
+        for (patch_offset, func_name) in self.text_fixup_work.drain(..) {
+            let target = *self.function_offsets.get(&func_name).ok_or_else(|| {
+                MorphlexError::CodegenError(format!(
+                    "missing function '{}' at function-address fixup offset {} \
+                     (known functions: {:?})",
+                    func_name,
+                    patch_offset,
+                    self.function_offsets.keys().collect::<Vec<_>>()
+                ))
+            })?;
+            self.text[patch_offset..patch_offset + 8]
+                .copy_from_slice(&(target as u64).to_le_bytes());
+            self.text_fixups.push(patch_offset);
+        }
+        Ok(())
+    }
+
     /// Emit x86-64 code to print a string from the .data section.
     ///
     /// Uses sys_write(1, data_vaddr + offset, len).
@@ -1556,8 +1654,7 @@ impl CodeGen {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 /// Write crash report for debugging self-host divergence
-impl CodeGen {
-}
+impl CodeGen {}
 
 #[cfg(test)]
 mod tests {

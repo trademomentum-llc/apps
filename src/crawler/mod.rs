@@ -71,6 +71,8 @@ struct QueueEntry {
 /// Respects robots.txt, enforces rate limiting via thread::sleep,
 /// and writes each page as a markdown file. Stays within the seed domain.
 pub fn crawl(config: &CrawlConfig) -> MorphResult<CrawlSummary> {
+    fetcher::validate_public_http_url(&config.seed_url)?;
+
     let seed_domain = config
         .seed_url
         .host_str()
@@ -124,10 +126,11 @@ pub fn crawl(config: &CrawlConfig) -> MorphResult<CrawlSummary> {
     while let Some(entry) = queue.pop_front() {
         // Check page limit
         if let Some(max) = config.max_pages
-            && pages_crawled >= max {
-                eprintln!("Reached max_pages limit ({})", max);
-                break;
-            }
+            && pages_crawled >= max
+        {
+            eprintln!("Reached max_pages limit ({})", max);
+            break;
+        }
 
         // Check depth limit
         if entry.depth > config.max_depth {
@@ -187,6 +190,11 @@ pub fn crawl(config: &CrawlConfig) -> MorphResult<CrawlSummary> {
         // Enqueue discovered links
         if entry.depth < config.max_depth {
             for link in &page.links {
+                if let Err(e) = fetcher::validate_public_http_url(link) {
+                    eprintln!("  [SKIP] unsafe or unsupported link {}: {}", link, e);
+                    pages_skipped += 1;
+                    continue;
+                }
                 let normalized = normalize_url(link);
                 if !visited.contains(&normalized) {
                     visited.insert(normalized);

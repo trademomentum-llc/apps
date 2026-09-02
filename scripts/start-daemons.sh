@@ -12,6 +12,18 @@ BIN="$APP_DIR/target/release/morphlex"
 LOG_DIR="$APP_DIR/logs"
 DATA_DIR="$APP_DIR/data"
 
+if [ "${RR_START_NON_PRODUCTION_SCAFFOLDING:-0}" != "1" ]; then
+    echo "Refusing to start RR daemon scaffolding without RR_START_NON_PRODUCTION_SCAFFOLDING=1"
+    echo "These daemons are not production security controls."
+    exit 1
+fi
+
+if [ "${RR_ALLOW_SYSTEM_PATH_MONITORING:-0}" = "1" ]; then
+    MONITOR_PATHS=("$APP_DIR" "/etc" "/var")
+else
+    MONITOR_PATHS=("$APP_DIR")
+fi
+
 # Create directories
 mkdir -p "$LOG_DIR" "$DATA_DIR"
 
@@ -38,12 +50,12 @@ start_daemon() {
 }
 
 # Start System Integrity Daemon
-start_daemon "integrity-daemon" \
-    daemon integrity \
-    --monitor "$APP_DIR" \
-    --monitor "/etc" \
-    --monitor "/var" \
-    --check-interval 60
+integrity_args=(daemon integrity)
+for monitor_path in "${MONITOR_PATHS[@]}"; do
+    integrity_args+=(--monitor "$monitor_path")
+done
+integrity_args+=(--check-interval 60)
+start_daemon "integrity-daemon" "${integrity_args[@]}"
 
 # Start Threat Intelligence Manager
 start_daemon "threat-manager" \

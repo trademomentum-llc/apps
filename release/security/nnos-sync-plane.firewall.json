@@ -1,0 +1,31 @@
+{
+  "deny_by_default": true,
+  "host_network_allowed": true,
+  "host_network_justification": "Host networking is limited to an explicit NNOS sync-plane firewall policy for UDP multicast only.",
+  "rules": [
+    {
+      "action": "allow",
+      "port": 20046,
+      "protocol": "udp",
+      "sources": [
+        "10.44.0.11",
+        "10.44.0.12"
+      ]
+    }
+  ],
+  "schema_version": "nnos.firewall.v1",
+  "sync_plane": {
+    "allowed_peer_node_ids": [
+      2,
+      3
+    ],
+    "allowed_source_ips": [
+      "10.44.0.11",
+      "10.44.0.12"
+    ],
+    "interface_address": "10.44.0.10",
+    "multicast_group": "239.192.0.1",
+    "protocol": "udp",
+    "udp_port": 20046
+  }
+}

@@ -1,5 +1,5 @@
 [Unit]
-Description=Rational Reserve - Daily Maintenance Timer
+Description=Rational Reserve - Daily Maintenance Timer (NON-PRODUCTION SCAFFOLDING)
 Documentation=https://github.com/morphlex/rational-reserve
 
 [Timer]

@@ -12,7 +12,11 @@
 #   ./jstar1 < compiler.jstr > jstar2
 #   chmod +x jstar2
 #   ./jstar2 < compiler.jstr > jstar3
-#   cmp jstar2 jstar3   # byte-identical = self-hosting verified
+#   chmod +x jstar3
+#   ./jstar3 < compiler.jstr > jstar4
+#   chmod +x jstar4
+#   ./jstar4 < compiler.jstr > jstar5
+#   cmp jstar4 jstar5   # byte-identical = canonical self-host fixpoint
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ─── Data declarations ────────────────────────────────────────────────────────

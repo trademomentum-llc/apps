@@ -16,6 +16,10 @@ pub enum BuiltinResult {
     NotBuiltin,
 }
 
+fn dev_flag_enabled(name: &str) -> bool {
+    matches!(std::env::var(name).as_deref(), Ok("1" | "true" | "yes"))
+}
+
 /// Try to execute a line as a built-in command.
 /// Returns NotBuiltin if it should be passed to the JStar compiler.
 pub fn try_builtin(line: &str) -> BuiltinResult {
@@ -88,6 +92,11 @@ pub fn try_builtin(line: &str) -> BuiltinResult {
         }
 
         "cat" => {
+            if !dev_flag_enabled("MORPHLEX_JSH_ALLOW_FILE_IO") {
+                return BuiltinResult::Output(
+                    "cat: file reads are disabled by default; set MORPHLEX_JSH_ALLOW_FILE_IO=1 only for audited local development".to_string(),
+                );
+            }
             if args.is_empty() {
                 return BuiltinResult::Output("cat: missing file argument".to_string());
             }
@@ -100,6 +109,12 @@ pub fn try_builtin(line: &str) -> BuiltinResult {
         "echo" => BuiltinResult::Output(args.to_string()),
 
         "env" => {
+            if !dev_flag_enabled("MORPHLEX_JSH_ALLOW_ENV_DUMP") {
+                return BuiltinResult::Output(
+                    "env: environment dumping is disabled by default to prevent PII/secret leakage"
+                        .to_string(),
+                );
+            }
             let mut vars: Vec<String> = std::env::vars()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect();
