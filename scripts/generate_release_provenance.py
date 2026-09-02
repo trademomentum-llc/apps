@@ -15,7 +15,6 @@ import hashlib
 import json
 import stat
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
