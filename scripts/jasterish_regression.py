@@ -15,6 +15,51 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@dataclass(frozen=True)
+class ArchitectureConfig:
+    compiler_target: str
+    qemu_candidates: tuple[Path, ...]
+    machine: str
+    cpu: str
+
+
+ARCHITECTURES = {
+    "aarch64": ArchitectureConfig(
+        compiler_target="aarch64",
+        qemu_candidates=(
+            Path("/opt/homebrew/bin/qemu-system-aarch64"),
+            Path("/usr/local/bin/qemu-system-aarch64"),
+            Path("/usr/bin/qemu-system-aarch64"),
+        ),
+        machine="virt",
+        cpu="cortex-a72",
+    ),
+    "x86_64": ArchitectureConfig(
+        compiler_target="x86_64",
+        qemu_candidates=(
+            Path("/opt/homebrew/bin/qemu-system-x86_64"),
+            Path("/usr/local/bin/qemu-system-x86_64"),
+            Path("/usr/bin/qemu-system-x86_64"),
+        ),
+        machine="q35",
+        cpu="qemu64",
+    ),
+}
+SUPPORTED_ARCHITECTURE_NAMES = tuple(sorted(ARCHITECTURES))
+TRUSTED_COMPILER_PATHS = (
+    REPO_ROOT / "target" / "debug" / "morphlex",
+    REPO_ROOT / "target" / "release" / "morphlex",
+)
+TRUSTED_MAKE_PATHS = (
+    Path("/usr/bin/make"),
+    Path("/opt/homebrew/bin/make"),
+    Path("/usr/local/bin/make"),
+)
+
+
 @dataclass
 class Case:
     root: Path
@@ -58,17 +103,59 @@ def discover_cases(root: Path) -> list[Case]:
     return cases
 
 
-def _resolve_compiler() -> str:
-    env = os.environ.get("JASTERISH_COMPILER", "").strip()
-    if env:
-        return env
-    local = Path(__file__).resolve().parent.parent / "target" / "debug" / "morphlex"
-    if local.exists():
-        return str(local)
-    found = shutil.which("morphlex")
-    if found:
-        return found
-    return "morphlex"
+def _architecture_config(arch: str) -> ArchitectureConfig:
+    try:
+        return ARCHITECTURES[arch]
+    except KeyError as exc:
+        allowed = ", ".join(SUPPORTED_ARCHITECTURE_NAMES)
+        raise ValueError(f"unsupported architecture {arch!r}; expected one of: {allowed}") from exc
+
+
+def _is_executable_file(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def _resolve_trusted_executable(candidates: tuple[Path, ...], label: str) -> Path:
+    for candidate in candidates:
+        if _is_executable_file(candidate):
+            return candidate
+    checked = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"no trusted {label} executable found; checked: {checked}")
+
+
+def _available_compilers() -> tuple[Path, ...]:
+    target_root = (REPO_ROOT / "target").resolve()
+    available: list[Path] = []
+    for candidate in TRUSTED_COMPILER_PATHS:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved.is_relative_to(target_root) and _is_executable_file(resolved):
+            available.append(resolved)
+    return tuple(available)
+
+
+def _resolve_compiler() -> Path:
+    available = _available_compilers()
+    override = os.environ.get("JASTERISH_COMPILER", "").strip()
+    if override:
+        try:
+            requested = Path(override).expanduser().resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"JASTERISH_COMPILER does not resolve to an executable file: {override!r}") from exc
+        for trusted in available:
+            if requested == trusted:
+                return trusted
+        allowed = ", ".join(str(path) for path in TRUSTED_COMPILER_PATHS)
+        raise ValueError(
+            "JASTERISH_COMPILER must select a repository-built compiler; "
+            f"expected one of: {allowed}"
+        )
+    if available:
+        return available[0]
+    checked = ", ".join(str(path) for path in TRUSTED_COMPILER_PATHS)
+    raise FileNotFoundError(f"no repository-built morphlex compiler found; checked: {checked}")
 
 
 def _normalize_trailing_newlines(text: str) -> str:
@@ -111,27 +198,39 @@ def compare_output(actual: str, golden_path: Path, mode: str) -> tuple[bool, str
 
 
 def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
-    compiler = _resolve_compiler()
-    elf_path = case.root / f"{case.name}.{arch}.elf"
-    golden_path = case.root / f"expected.{arch}"
+    try:
+        config = _architecture_config(arch)
+    except ValueError as exc:
+        return Result(case.name, arch, "FAIL", 0.0, f"command validation failed: {exc}")
+
+    elf_name = f"actual.{config.compiler_target}.elf"
+    elf_path = case.root / elf_name
+    golden_path = case.root / f"expected.{config.compiler_target}"
 
     if not update and not golden_path.exists():
         return Result(case.name, arch, "SKIP", 0.0, f"missing {golden_path}")
 
+    try:
+        compiler = _resolve_compiler()
+    except (OSError, ValueError) as exc:
+        return Result(case.name, arch, "FAIL", 0.0, f"command validation failed: {exc}")
+
     build_cmd = [
-        compiler, "jstar", "compile",
-        "--target", arch,
-        "--input", str(case.source_path),
-        "--output", str(elf_path),
+        str(compiler), "jstar", "compile",
+        "--target", config.compiler_target,
+        "--input", "main.jstr",
+        "--output", elf_name,
     ]
 
     t0 = time.monotonic()
     try:
         build = subprocess.run(
             build_cmd,
+            cwd=case.root,
             capture_output=True,
             text=True,
             timeout=case.timeout,
+            shell=False,
         )
     except subprocess.TimeoutExpired:
         return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "compile timed out")
@@ -143,10 +242,12 @@ def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
 
     try:
         run = subprocess.run(
-            [str(elf_path)],
+            [f"./{elf_name}"],
+            cwd=case.root,
             capture_output=True,
             text=True,
             timeout=case.timeout,
+            shell=False,
         )
     except subprocess.TimeoutExpired:
         return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "run timed out")
@@ -184,6 +285,13 @@ def run_compiler_case(case: Case, arch: str, update: bool) -> Result:
 
 
 def run_kernel_case(case: Case, arch: str, update: bool, kernel_dir: Path | None = None) -> Result:
+    try:
+        config = _architecture_config(arch)
+        make = _resolve_trusted_executable(TRUSTED_MAKE_PATHS, "make")
+        qemu = _resolve_trusted_executable(config.qemu_candidates, "QEMU")
+    except (OSError, ValueError) as exc:
+        return Result(case.name, arch, "FAIL", 0.0, f"command validation failed: {exc}")
+
     if kernel_dir is None:
         # Default when called from the shared library location (System/apps/scripts/)
         kernel_dir = Path(__file__).resolve().parent.parent.parent / "engine" / "nnos" / "neurodios" / "jasterish-microkernel"
@@ -204,12 +312,13 @@ def run_kernel_case(case: Case, arch: str, update: bool, kernel_dir: Path | None
 
     try:
         build = subprocess.run(
-            ["make", f"ARCH={arch}", "clean", "build"],
+            [str(make), f"ARCH={config.compiler_target}", "clean", "build"],
             cwd=build_dir,
             capture_output=True,
             text=True,
             timeout=case.timeout,
             env=build_env,
+            shell=False,
         )
     except subprocess.TimeoutExpired:
         return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "kernel build timed out")
@@ -217,16 +326,13 @@ def run_kernel_case(case: Case, arch: str, update: bool, kernel_dir: Path | None
     if build.returncode != 0:
         return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"kernel build failed:\n{build.stderr}")
 
-    qemu = f"qemu-system-{arch}"
-    machine = "virt" if arch == "aarch64" else "q35"
-    cpu = "cortex-a72" if arch == "aarch64" else "qemu64"
     kernel_bin = build_dir / "jmk.bin"
-    log_file = case.root / f"actual.{arch}.log"
+    log_file = case.root / f"actual.{config.compiler_target}.log"
 
     qemu_cmd = [
-        qemu,
-        "-machine", machine,
-        "-cpu", cpu,
+        str(qemu),
+        "-machine", config.machine,
+        "-cpu", config.cpu,
         "-m", "512",
         "-serial", "stdio",
         "-no-reboot",
@@ -237,7 +343,13 @@ def run_kernel_case(case: Case, arch: str, update: bool, kernel_dir: Path | None
 
     try:
         with log_file.open("w") as log:
-            proc = subprocess.Popen(qemu_cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
+            proc = subprocess.Popen(
+                qemu_cmd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                shell=False,
+            )
             try:
                 proc.wait(timeout=case.timeout)
             except subprocess.TimeoutExpired:
@@ -252,7 +364,7 @@ def run_kernel_case(case: Case, arch: str, update: bool, kernel_dir: Path | None
         return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"QEMU launch failed: {exc}")
 
     actual = log_file.read_text()
-    golden_path = case.root / f"expected.{arch}"
+    golden_path = case.root / f"expected.{config.compiler_target}"
 
     if update:
         golden_path.write_text(actual)
@@ -273,30 +385,41 @@ def run_kernel_case(case: Case, arch: str, update: bool, kernel_dir: Path | None
 
 def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
     t0 = time.monotonic()
+    try:
+        config = _architecture_config(arch)
+        compiler = _resolve_compiler()
+    except (OSError, ValueError) as exc:
+        return Result(case.name, arch, "FAIL", 0.0, f"command validation failed: {exc}")
+
     reference = case.source_path
     if not reference.exists():
         return Result(case.name, arch, "FAIL", time.monotonic() - t0, "missing compiler.jstr reference")
 
-    work = case.root / f"work.{arch}"
+    work_name = f"work.{config.compiler_target}"
+    work = case.root / work_name
     work.mkdir(exist_ok=True)
-    stage0 = work / "stage0.elf"
-    stage1 = work / "stage1.elf"
-    stage2 = work / "stage2.elf"
+    stage0_name = f"{work_name}/stage0.elf"
+    stage1_name = f"{work_name}/stage1.elf"
+    stage2_name = f"{work_name}/stage2.elf"
+    stage0 = case.root / stage0_name
+    stage1 = case.root / stage1_name
+    stage2 = case.root / stage2_name
 
     # Stage 0: reference compiler from Rust toolchain
-    compiler = _resolve_compiler()
     build_cmd = [
-        compiler, "jstar", "compile",
-        "--target", arch,
-        "--input", str(reference),
-        "--output", str(stage0),
+        str(compiler), "jstar", "compile",
+        "--target", config.compiler_target,
+        "--input", "main.jstr",
+        "--output", stage0_name,
     ]
     try:
         build = subprocess.run(
             build_cmd,
+            cwd=case.root,
             capture_output=True,
             text=True,
             timeout=case.timeout,
+            shell=False,
         )
     except subprocess.TimeoutExpired:
         return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, "stage0 compile timed out")
@@ -306,14 +429,19 @@ def run_self_host_case(case: Case, arch: str, update: bool) -> Result:
         return Result(case.name, arch, "FAIL", time.monotonic() - t0, f"stage0 compile failed:\n{build.stderr}")
 
     # Stage 1/2: compiler compiled by stage0
-    for stage_in, stage_out in [(stage0, stage1), (stage1, stage2)]:
+    for stage_in_name, stage_in, stage_out in (
+        (stage0_name, stage0, stage1),
+        (stage1_name, stage1, stage2),
+    ):
         try:
             run = subprocess.run(
-                [str(stage_in)],
+                [f"./{stage_in_name}"],
+                cwd=case.root,
                 input=reference.read_bytes(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=case.timeout,
+                shell=False,
             )
         except subprocess.TimeoutExpired:
             return Result(case.name, arch, "TIMEOUT", time.monotonic() - t0, f"{stage_out.name} generation timed out")

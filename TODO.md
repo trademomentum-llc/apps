@@ -88,3 +88,14 @@ The self-hosted compiler's single-pass lookup failed, reading garbage from
 **2026-05-31 Compiler Update:** Pulled jstar4 fixpoint. JStar 4 and JStar 5 are now byte-identical (SHA256 d510be40bea44ece8442e66289e39a4f5a89822307316ed80ca84ad969187dc1). Full self-host T-diagram validated through generation 4/5. Critical foundation for sovereign J* work. KDB 2026-05-31-06.
 
 **Architectural Scope (2026-05-31):** Jasterish = sovereign foundation + Neural Engine + proprietary Denominators mechanisms. Not the entire OS. Pragmatic layers allowed in other languages. See KDB 2026-05-31-07.
+
+## CodeQL Command-Execution Hardening
+
+- [x] Trace alerts 171 through 176 to their CLI and environment inputs.
+- [x] Implement fail-closed executable, architecture, corpus, and key-path controls.
+- [x] Add and pass malicious-input regression tests.
+- [x] Pin the advanced CodeQL workflow actions to verified commit SHAs.
+- [x] Run Semgrep and current-tree Gitleaks scans.
+- [ ] Commit and publish the branch after user review.
+- [ ] Confirm GitHub CodeQL closes alerts 171 through 176 on the published commit.
+- [ ] Separately classify the eight redacted historical Gitleaks matches in four removed dataset files before deciding whether Git history must be rewritten.
