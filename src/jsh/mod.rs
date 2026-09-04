@@ -102,6 +102,9 @@ mod tests {
         }
         let result = execute_jstar("print 99").unwrap();
         assert_eq!(result.stdout.trim(), "99");
+        unsafe {
+            std::env::remove_var("MORPHLEX_JSH_UNSAFE_EXECUTE");
+        }
     }
 
     #[test]
