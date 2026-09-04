@@ -82,7 +82,7 @@ def ensure_signing_key(private_key: Path, create: bool) -> None:
 
 
 def tracked_file_digests(repo: Path) -> dict[str, str]:
-    files = git(repo, "ls-files", "--cached", "--others", "--exclude-standard").splitlines()
+    files = git(repo, "ls-files --others").splitlines()
     out: dict[str, str] = {}
     for rel in files:
         if rel == "release" or rel.startswith("release/"):
