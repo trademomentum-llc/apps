@@ -94,7 +94,7 @@ for f in "${OUT_DIR}"/jstar1 "${OUT_DIR}"/jstar2 "${OUT_DIR}"/jstar3 "${OUT_DIR}
   fi
 done
 if [ "${#sha_files[@]}" -gt 0 ]; then
-  sha256sum "${sha_files[@]}" > "${OUT_DIR}/sha256.txt"
+  shasum -a 256 "${sha_files[@]}" > "${OUT_DIR}/sha256.txt"
   wc -c "${sha_files[@]}" > "${OUT_DIR}/sizes.txt"
 fi
 if [ -f "${OUT_DIR}/jstar4" ] && [ -f "${OUT_DIR}/jstar5" ]; then

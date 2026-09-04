@@ -7,13 +7,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "apps" / "scripts"))
 
-from jasterish_regression import discover_cases, report, run_cases, run_kernel_case
+from jasterish_regression import (
+    discover_cases,
+    report,
+    run_cases,
+    run_kernel_case,
+    SUPPORTED_ARCHITECTURE_NAMES,
+)
 
 
 def main(kernel_dir: Path | None = None) -> int:
     parser = argparse.ArgumentParser(description="Jasterish Micro-Kernel regression runner")
     parser.add_argument("corpus", type=Path, help="Path to regression corpus directory")
-    parser.add_argument("--arch", action="append", help="Architecture to test (repeatable)")
+    parser.add_argument(
+        "--arch",
+        action="append",
+        choices=SUPPORTED_ARCHITECTURE_NAMES,
+        help="Architecture to test (repeatable)",
+    )
     parser.add_argument("--update", action="store_true", help="Update golden files")
     parser.add_argument("--json", action="store_true", help="Emit JSON report")
     args = parser.parse_args()

@@ -13,13 +13,19 @@ from jasterish_regression import (
     Result,
     run_compiler_case,
     run_self_host_case,
+    SUPPORTED_ARCHITECTURE_NAMES,
 )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="JStar compiler regression runner")
     parser.add_argument("corpus", type=Path, help="Path to regression corpus directory")
-    parser.add_argument("--arch", action="append", help="Architecture to test (repeatable; default: all in case)")
+    parser.add_argument(
+        "--arch",
+        action="append",
+        choices=SUPPORTED_ARCHITECTURE_NAMES,
+        help="Architecture to test (repeatable; default: all in case)",
+    )
     parser.add_argument("--update", action="store_true", help="Update golden files from current output")
     parser.add_argument("--json", action="store_true", help="Emit JSON report")
     args = parser.parse_args()

@@ -76,3 +76,19 @@
 **Status:** T-Diagram fixpoint achieved and pulled — JStar 4 == JStar 5 (byte-identical, SHA256 d510be40bea44ece8442e66289e39a4f5a89822307316ed80ca84ad969187dc1, 70,925 bytes each). Full self-hosting validated through generation 4/5. New binaries landed in jstar/ (jstar2–jstar5). This solidifies the sovereign Jasterish foundation for all downstream work, including the Jasterish userspace Sovereign Event Bus (step 2). See KDB 2026-05-31-06.
 
 **Architectural Scope (User Directive 2026-05-31):** Jasterish is the language for the sovereign **foundation**, the **Neural Engine**, and all **proprietary aspects** and core **Denominators** mechanisms developed in this project. The entire operating system does **not** need to be written in Jasterish — pragmatic, compatibility, and current-deployment layers may use other languages. See KDB 2026-05-31-07 for the exact boundary.
+
+## 2026-09-02 Security Hardening Update
+
+Status: Locally complete; remote CodeQL verification pending publication.
+
+- Hardened CodeQL command-execution alerts 171 through 176 across the release
+  provenance generator and Jasterish regression utilities.
+- Added architecture, executable, script, corpus, Git-operation, and external
+  signing-key controls that fail before process creation.
+- Removed caller-selected corpus and private-key paths from subprocess command
+  arrays.
+- Pinned the advanced CodeQL workflow actions to verified full commit SHAs so
+  organization policy permits the scan to start.
+- Added 13 standard-library security tests. All pass locally.
+- Semgrep completed 151 Python rules with zero findings. Gitleaks found no
+  secrets in the current working tree.

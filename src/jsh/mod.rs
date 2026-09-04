@@ -81,6 +81,8 @@ fn unsafe_execute_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::execute_jstar;
+
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_return() {

@@ -68,3 +68,46 @@ Group into 4 parallel workstreams:
 - `linker.ld` — Linker script
 - `Makefile` — Build system
 - `README.md` — Documentation
+
+## CodeQL Command-Execution Hardening (2026-09-02)
+
+### Scope
+
+Harden the six reported Python process-launch sites in
+`scripts/generate_release_provenance.py`, `scripts/jasterish_orchestrator.py`,
+and `scripts/jasterish_regression.py`, and restore the pinned CodeQL workflow
+needed to verify closure, without changing intended build, regression, or
+provenance behavior.
+
+### Security Requirements
+
+1. Permit only explicitly supported architecture identifiers.
+2. Resolve executable names to concrete files and reject missing,
+   non-executable, or unapproved compiler overrides.
+3. Confine internal scripts and corpus paths to their expected repository
+   roots before process launch.
+4. Keep subprocess arguments as arrays with shell execution disabled.
+5. Fail closed before launching a process when validation fails.
+6. Pin every third-party CodeQL workflow action to a verified full commit SHA.
+
+### Status
+
+| Step | State | Evidence |
+|---|---|---|
+| Inspect all six CodeQL data flows | Complete | Alerts 171 through 176 traced from CLI or environment input to subprocess sinks |
+| Implement boundary validation | Complete | Allowlisted architectures, executables, Git operations, scripts, corpora, and external signing-key placement |
+| Restore CodeQL execution | Complete | Workflow actions pinned to verified full commit SHAs |
+| Add malicious-input regression tests | Complete | Thirteen standard-library security tests added |
+| Run targeted tests | Complete | Thirteen tests passed; compiler integration completed with expected host-architecture skips |
+| Run Semgrep and Gitleaks | Complete | Semgrep and current-tree Gitleaks passed; historical matches documented for separate classification |
+| Review final diff and residual risk | Complete | Remote CodeQL closure remains pending until publication |
+
+### Verification Plan
+
+- Run focused unit tests for accepted commands and rejected architecture,
+  executable, corpus, and path inputs.
+- Run the complete Python test suite relevant to the three utilities.
+- Run Semgrep against all modified Python files.
+- Run Gitleaks against the working tree and Git history with redacted output.
+- Treat GitHub CodeQL as the authoritative closure check after publication;
+  local checks cannot close remote alert records.

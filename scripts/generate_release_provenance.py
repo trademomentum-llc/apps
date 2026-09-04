@@ -13,25 +13,67 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import stat
 import subprocess
 from pathlib import Path
 from typing import Any
 
 
-def run(args: list[str], cwd: Path | None = None, input_text: str | None = None) -> str:
+TRUSTED_EXECUTABLES = {
+    "git": (
+        Path("/usr/bin/git"),
+        Path("/opt/homebrew/bin/git"),
+        Path("/usr/local/bin/git"),
+    ),
+    "openssl": (
+        Path("/opt/homebrew/bin/openssl"),
+        Path("/usr/local/bin/openssl"),
+        Path("/usr/bin/openssl"),
+    ),
+}
+GIT_COMMANDS = {
+    "branch": ("branch", "--show-current"),
+    "head": ("rev-parse", "HEAD"),
+    "short-head": ("rev-parse", "--short=12", "HEAD"),
+    "source-files": ("ls-files", "--cached", "--others", "--exclude-standard"),
+}
+
+
+def _trusted_executable(name: str) -> Path:
+    try:
+        candidates = TRUSTED_EXECUTABLES[name]
+    except KeyError as exc:
+        raise ValueError(f"unsupported executable: {name}") from exc
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    checked = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"no trusted {name} executable found; checked: {checked}")
+
+
+def _run_checked(
+    command: list[str],
+    *,
+    label: str,
+    cwd: Path | None = None,
+    input_bytes: bytes | None = None,
+    pass_fds: tuple[int, ...] = (),
+) -> bytes:
     result = subprocess.run(
-        args,
+        command,
         cwd=str(cwd) if cwd else None,
-        input=input_text,
+        input=input_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        text=False,
         check=False,
+        shell=False,
+        pass_fds=pass_fds,
     )
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        raise SystemExit(f"command failed ({' '.join(args)}): {detail}")
+        detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
+        raise SystemExit(f"{label} failed: {detail}")
     return result.stdout
 
 
@@ -53,8 +95,82 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def git(repo: Path, *args: str) -> str:
-    return run(["git", *args], cwd=repo).strip()
+def git(repo: Path, operation: str) -> str:
+    try:
+        args = GIT_COMMANDS[operation]
+    except KeyError as exc:
+        raise ValueError(f"unsupported Git operation: {operation}") from exc
+    output = _run_checked(
+        [str(_trusted_executable("git")), *args],
+        label=f"git {operation}",
+        cwd=repo,
+    )
+    return output.decode("utf-8").strip()
+
+
+def _write_private_key(path: Path, private_key: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(private_key)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
+
+
+def _openssl_output(operation: str, input_bytes: bytes | None = None) -> bytes:
+    commands = {
+        "generate-private-key": (
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:3072",
+        ),
+        "public-key": ("pkey", "-pubout"),
+    }
+    try:
+        args = commands[operation]
+    except KeyError as exc:
+        raise ValueError(f"unsupported OpenSSL operation: {operation}") from exc
+    return _run_checked(
+        [str(_trusted_executable("openssl")), *args],
+        label=f"openssl {operation}",
+        input_bytes=input_bytes,
+    )
+
+
+def _sign_manifest(private_key: Path, manifest: Path, signature: Path) -> None:
+    with private_key.open("rb") as key_handle:
+        key_descriptor = key_handle.fileno()
+        command = [
+            str(_trusted_executable("openssl")),
+            "dgst",
+            "-sha256",
+            "-sign",
+            f"/dev/fd/{key_descriptor}",
+        ]
+        signed = _run_checked(
+            command,
+            label="openssl sign-manifest",
+            input_bytes=manifest.read_bytes(),
+            pass_fds=(key_descriptor,),
+        )
+    signature.write_bytes(signed)
+
+
+def _private_key_path(repo: Path, value: str) -> Path:
+    requested = Path(value).expanduser()
+    if not requested.is_absolute():
+        raise SystemExit("--signing-key must be an absolute path outside the repository")
+    private_key = requested.resolve(strict=False)
+    if private_key == repo or private_key.is_relative_to(repo):
+        raise SystemExit("--signing-key must remain outside the repository")
+    return private_key
 
 
 def ensure_signing_key(private_key: Path, create: bool) -> None:
@@ -65,24 +181,12 @@ def ensure_signing_key(private_key: Path, create: bool) -> None:
         return
     if not create:
         raise SystemExit(f"missing private signing key: {private_key}")
-    private_key.parent.mkdir(parents=True, exist_ok=True)
-    run(
-        [
-            "openssl",
-            "genpkey",
-            "-algorithm",
-            "RSA",
-            "-pkeyopt",
-            "rsa_keygen_bits:3072",
-            "-out",
-            str(private_key),
-        ]
-    )
-    private_key.chmod(0o600)
+    private_key.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _write_private_key(private_key, _openssl_output("generate-private-key"))
 
 
 def tracked_file_digests(repo: Path) -> dict[str, str]:
-    files = git(repo, "ls-files --others").splitlines()
+    files = git(repo, "source-files").splitlines()
     out: dict[str, str] = {}
     for rel in files:
         if rel == "release" or rel.startswith("release/"):
@@ -140,15 +244,15 @@ def build_attestation(manifest: dict[str, str], repo: Path, image_ref: str, imag
                     "image_digest": image_digest,
                 },
                 "internalParameters": {
-                    "git_commit": git(repo, "rev-parse", "HEAD"),
-                    "git_branch": git(repo, "branch", "--show-current"),
+                    "git_commit": git(repo, "head"),
+                    "git_branch": git(repo, "branch"),
                 },
             },
             "runDetails": {
                 "builder": {"id": "local-codex-macos"},
                 "metadata": {
                     "finishedOn": created,
-                    "invocationId": git(repo, "rev-parse", "--short=12", "HEAD"),
+                    "invocationId": git(repo, "short-head"),
                 },
             },
         },
@@ -173,14 +277,11 @@ def main() -> int:
     release_prov.mkdir(parents=True, exist_ok=True)
     release_sec.mkdir(parents=True, exist_ok=True)
 
-    private_key = Path(args.signing_key).expanduser().resolve()
+    private_key = _private_key_path(repo, args.signing_key)
     ensure_signing_key(private_key, args.create_signing_key)
 
     public_key = release_prov / "release-manifest.pub.pem"
-    public_key.write_text(
-        run(["openssl", "pkey", "-in", str(private_key), "-pubout"]),
-        encoding="utf-8",
-    )
+    public_key.write_bytes(_openssl_output("public-key", private_key.read_bytes()))
 
     created = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     source_tree = release_prov / "source-tree-files.sha256"
@@ -308,7 +409,7 @@ def main() -> int:
     )
 
     signature = release_prov / "manifest.sha256.sig"
-    run(["openssl", "dgst", "-sha256", "-sign", str(private_key), "-out", str(signature), str(manifest_path)])
+    _sign_manifest(private_key, manifest_path, signature)
 
     print(f"release provenance generated under {release_prov}")
     print(f"public key: {public_key}")
