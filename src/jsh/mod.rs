@@ -30,7 +30,7 @@ pub(crate) struct TestEnvGuard {
 #[cfg(test)]
 impl TestEnvGuard {
     pub(crate) fn new(name: &'static str, value: &str) -> Self {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let previous = std::env::var_os(name);
         unsafe {
             std::env::set_var(name, value);
