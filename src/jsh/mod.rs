@@ -82,39 +82,61 @@ fn unsafe_execute_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::execute_jstar;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static EXECUTION_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct UnsafeExecuteGuard {
+        previous: Option<OsString>,
+    }
+
+    impl UnsafeExecuteGuard {
+        fn new() -> Self {
+            let previous = std::env::var_os("MORPHLEX_JSH_UNSAFE_EXECUTE");
+            unsafe {
+                std::env::set_var("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for UnsafeExecuteGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe {
+                    std::env::set_var("MORPHLEX_JSH_UNSAFE_EXECUTE", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("MORPHLEX_JSH_UNSAFE_EXECUTE");
+                },
+            }
+        }
+    }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_return() {
-        unsafe {
-            std::env::set_var("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
-        }
+        let _lock = EXECUTION_ENV_LOCK.lock().unwrap();
+        let _guard = UnsafeExecuteGuard::new();
         let result = execute_jstar("return 42").unwrap();
         assert_eq!(result.exit_code, 42);
-        unsafe {
-            std::env::remove_var("MORPHLEX_JSH_UNSAFE_EXECUTE");
-        }
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_print() {
-        unsafe {
-            std::env::set_var("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
-        }
+        let _lock = EXECUTION_ENV_LOCK.lock().unwrap();
+        let _guard = UnsafeExecuteGuard::new();
         let result = execute_jstar("print 99").unwrap();
         assert_eq!(result.stdout.trim(), "99");
-        unsafe {
-            std::env::remove_var("MORPHLEX_JSH_UNSAFE_EXECUTE");
-        }
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_multiline() {
-        unsafe {
-            std::env::set_var("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
-        }
+        let _lock = EXECUTION_ENV_LOCK.lock().unwrap();
+        let _guard = UnsafeExecuteGuard::new();
         let result = execute_jstar("a counter\nstore 10 into counter\nprint counter").unwrap();
         assert_eq!(result.stdout.trim(), "10");
     }
