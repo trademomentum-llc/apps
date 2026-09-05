@@ -227,6 +227,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_run_script_jstar_code() {
+        let _lock = super::super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::super::TestEnvGuard::new("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_jstar.jsh");
         {
@@ -243,6 +245,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_run_script_multiline_jstar() {
+        let _lock = super::super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::super::TestEnvGuard::new("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_multiline.jsh");
         {
@@ -274,6 +278,8 @@ mod tests {
 
     #[test]
     fn test_run_script_with_redirect() {
+        let _lock = super::super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::super::TestEnvGuard::new("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
         let dir = std::env::temp_dir();
         let script_path = dir.join("test_jsh_redirect.jsh");
         let output_path = dir.join("test_jsh_redirect_out.txt");
@@ -292,6 +298,8 @@ mod tests {
 
     #[test]
     fn test_run_script_with_pipeline() {
+        let _lock = super::super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::super::TestEnvGuard::new("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
         let dir = std::env::temp_dir();
         let script_path = dir.join("test_jsh_pipeline.jsh");
         let output_path = dir.join("test_jsh_pipeline_out.txt");
