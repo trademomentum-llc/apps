@@ -264,6 +264,7 @@ fn require_file_io_enabled() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::TestEnvGuard;
     use super::*;
 
     // ── Variable expansion ──────────────────────────────────────────────
@@ -277,14 +278,9 @@ mod tests {
 
     #[test]
     fn test_expand_env_var() {
+        let _guard = TestEnvGuard::new("JSH_TEST_VAR", "works");
         let state = ShellState::new();
-        unsafe {
-            std::env::set_var("JSH_TEST_VAR", "works");
-        }
         assert_eq!(state.expand_vars("it $JSH_TEST_VAR"), "it works");
-        unsafe {
-            std::env::remove_var("JSH_TEST_VAR");
-        }
     }
 
     #[test]
@@ -347,12 +343,10 @@ mod tests {
 
     #[test]
     fn test_export_var() {
+        let _guard = TestEnvGuard::new("JSH_EXPORT_TEST", "before");
         let mut state = ShellState::new();
         state.try_set_var("export JSH_EXPORT_TEST hello");
         assert_eq!(std::env::var("JSH_EXPORT_TEST").unwrap(), "hello");
-        unsafe {
-            std::env::remove_var("JSH_EXPORT_TEST");
-        }
     }
 
     #[test]
@@ -423,9 +417,7 @@ mod tests {
 
     #[test]
     fn test_write_output_to_file() {
-        unsafe {
-            std::env::set_var("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
-        }
+        let _guard = TestEnvGuard::new("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_redirect_write.txt");
         let redirect = Redirect {
@@ -438,16 +430,11 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "hello\n");
         let _ = std::fs::remove_file(&path);
-        unsafe {
-            std::env::remove_var("MORPHLEX_JSH_ALLOW_FILE_IO");
-        }
     }
 
     #[test]
     fn test_write_output_append() {
-        unsafe {
-            std::env::set_var("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
-        }
+        let _guard = TestEnvGuard::new("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_redirect_append.txt");
         let _ = std::fs::remove_file(&path);
@@ -463,16 +450,11 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "line1\nline2\n");
         let _ = std::fs::remove_file(&path);
-        unsafe {
-            std::env::remove_var("MORPHLEX_JSH_ALLOW_FILE_IO");
-        }
     }
 
     #[test]
     fn test_read_input_from_file() {
-        unsafe {
-            std::env::set_var("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
-        }
+        let _guard = TestEnvGuard::new("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_redirect_read.txt");
         std::fs::write(&path, "input data\n").unwrap();
@@ -486,9 +468,6 @@ mod tests {
         let input = read_input(&redirect).unwrap();
         assert_eq!(input, Some("input data\n".to_string()));
         let _ = std::fs::remove_file(&path);
-        unsafe {
-            std::env::remove_var("MORPHLEX_JSH_ALLOW_FILE_IO");
-        }
     }
 
     #[test]
