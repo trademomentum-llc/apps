@@ -81,12 +81,19 @@ fn unsafe_execute_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::execute_jstar;
+
     #[test]
     #[cfg(target_os = "linux")]
-        unsafe { std::env::set_var("MORPHLEX_JSH_UNSAFE_EXECUTE", "1"); }
+    fn test_execute_jstar_return() {
+        unsafe {
+            std::env::set_var("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
+        }
         let result = execute_jstar("return 42").unwrap();
         assert_eq!(result.exit_code, 42);
-        unsafe { std::env::remove_var("MORPHLEX_JSH_UNSAFE_EXECUTE"); }
+        unsafe {
+            std::env::remove_var("MORPHLEX_JSH_UNSAFE_EXECUTE");
+        }
     }
 
     #[test]
@@ -97,6 +104,9 @@ mod tests {
         }
         let result = execute_jstar("print 99").unwrap();
         assert_eq!(result.stdout.trim(), "99");
+        unsafe {
+            std::env::remove_var("MORPHLEX_JSH_UNSAFE_EXECUTE");
+        }
     }
 
     #[test]
