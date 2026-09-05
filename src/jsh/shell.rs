@@ -264,7 +264,7 @@ fn require_file_io_enabled() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{TestEnvGuard, TEST_ENV_LOCK};
+    use super::super::TestEnvGuard;
     use super::*;
 
     // ── Variable expansion ──────────────────────────────────────────────
@@ -278,7 +278,6 @@ mod tests {
 
     #[test]
     fn test_expand_env_var() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _guard = TestEnvGuard::new("JSH_TEST_VAR", "works");
         let state = ShellState::new();
         assert_eq!(state.expand_vars("it $JSH_TEST_VAR"), "it works");
@@ -344,8 +343,7 @@ mod tests {
 
     #[test]
     fn test_export_var() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
-        let _guard = TestEnvGuard::new("JSH_EXPORT_TEST", "hello");
+        let _guard = TestEnvGuard::new("JSH_EXPORT_TEST", "before");
         let mut state = ShellState::new();
         state.try_set_var("export JSH_EXPORT_TEST hello");
         assert_eq!(std::env::var("JSH_EXPORT_TEST").unwrap(), "hello");
@@ -419,7 +417,6 @@ mod tests {
 
     #[test]
     fn test_write_output_to_file() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _guard = TestEnvGuard::new("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_redirect_write.txt");
@@ -437,7 +434,6 @@ mod tests {
 
     #[test]
     fn test_write_output_append() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _guard = TestEnvGuard::new("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_redirect_append.txt");
@@ -458,7 +454,6 @@ mod tests {
 
     #[test]
     fn test_read_input_from_file() {
-        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _guard = TestEnvGuard::new("MORPHLEX_JSH_ALLOW_FILE_IO", "1");
         let dir = std::env::temp_dir();
         let path = dir.join("test_jsh_redirect_read.txt");

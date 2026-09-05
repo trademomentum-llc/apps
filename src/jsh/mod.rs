@@ -22,6 +22,7 @@ pub(crate) static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 pub(crate) struct TestEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
     name: &'static str,
     previous: Option<std::ffi::OsString>,
 }
@@ -29,11 +30,12 @@ pub(crate) struct TestEnvGuard {
 #[cfg(test)]
 impl TestEnvGuard {
     pub(crate) fn new(name: &'static str, value: &str) -> Self {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os(name);
         unsafe {
             std::env::set_var(name, value);
         }
-        Self { name, previous }
+        Self { _lock, name, previous }
     }
 }
 
@@ -122,7 +124,6 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_return() {
-        let _lock = super::TEST_ENV_LOCK.lock().unwrap();
         let _guard = super::TestEnvGuard::new("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
         let result = execute_jstar("return 42").unwrap();
         assert_eq!(result.exit_code, 42);
@@ -131,7 +132,6 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_print() {
-        let _lock = super::TEST_ENV_LOCK.lock().unwrap();
         let _guard = super::TestEnvGuard::new("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
         let result = execute_jstar("print 99").unwrap();
         assert_eq!(result.stdout.trim(), "99");
@@ -140,7 +140,6 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_execute_jstar_multiline() {
-        let _lock = super::TEST_ENV_LOCK.lock().unwrap();
         let _guard = super::TestEnvGuard::new("MORPHLEX_JSH_UNSAFE_EXECUTE", "1");
         let result = execute_jstar("a counter\nstore 10 into counter\nprint counter").unwrap();
         assert_eq!(result.stdout.trim(), "10");
