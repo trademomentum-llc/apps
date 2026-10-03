@@ -10,12 +10,12 @@
     "redteam:eval": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_CACHE_PATH=.promptfoo/cache PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 PROMPTFOO_DISABLE_SHARING=1 promptfoo eval -c security/promptfoo/promptfooconfig.yaml"
   },
   "devDependencies": {
-    "promptfoo": "0.122.0"
+    "promptfoo": "0.123.1"
   },
   "overrides": {
     "@huggingface/transformers": {
       "sharp": "0.35.0"
     },
-    "adm-zip": "^0.6.0"
+    "adm-zip": "^0.6.1"
   }
 }
