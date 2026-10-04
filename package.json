@@ -25,10 +25,10 @@
       "undici": "7.30.0"
     },
     "@ai-sdk/provider-utils": {
-      "undici": "6.29.0"
+      "undici": "7.29.1"
     },
     "@apidevtools/json-schema-ref-parser": {
-      "undici": "6.29.0"
+      "undici": "7.29.1"
     }
   }
 }
